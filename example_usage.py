@@ -2,7 +2,7 @@
 """
 PyTorch Profiler Parser Tool 使用示例
 
-这个脚本展示了如何使用 torch_profiler_parser_tool 来分析 PyTorch profiler 数据。
+这个脚本展示了如何使用 time_chart_tool 来分析 PyTorch profiler 数据。
 """
 
 import sys
@@ -12,7 +12,7 @@ from pathlib import Path
 # 添加当前目录到 Python 路径
 sys.path.insert(0, str(Path(__file__).parent))
 
-from torch_profiler_parser_tool import Analyzer
+from time_chart_tool import Analyzer
 
 def example_single_file_analysis():
     """示例：单个文件分析"""
@@ -161,7 +161,7 @@ def example_programmatic_usage():
 
 def main():
     """主函数"""
-    print("PyTorch Profiler Parser Tool 使用示例")
+    print("Time Chart Tool 使用示例")
     print("=" * 50)
     
     # 创建输出目录
@@ -176,13 +176,13 @@ def main():
     print("所有示例完成！")
     print("\n命令行使用示例:")
     print("1. 单个文件分析:")
-    print("   python3 -m torch_profiler_parser_tool.cli single ../file.json --label example")
+    print("   python3 -m time_chart_tool.cli single ../file.json --label example")
     print("\n2. 多文件对比分析:")
-    print("   python3 -m torch_profiler_parser_tool.cli compare ../file1.json:fp32 ../file2.json:tf32")
+    print("   python3 -m time_chart_tool.cli compare ../file1.json:fp32 ../file2.json:tf32")
     print("\n3. 指定输出格式:")
-    print("   python3 -m torch_profiler_parser_tool.cli single ../file.json --output-format json")
+    print("   python3 -m time_chart_tool.cli single ../file.json --output-format json")
     print("\n4. 指定输出目录:")
-    print("   python3 -m torch_profiler_parser_tool.cli single ../file.json --output-dir ./results")
+    print("   python3 -m time_chart_tool.cli single ../file.json --output-dir ./results")
 
 if __name__ == "__main__":
     main()

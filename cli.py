@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 import json
 
-from torch_profiler_parser_tool.analyzer import Analyzer
+from time_chart_tool.analyzer import Analyzer
 
 
 def parse_arguments():

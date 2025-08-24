@@ -1,2 +1,0 @@
-[console_scripts]
-torch-profiler-parser = cli:main

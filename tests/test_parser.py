@@ -12,8 +12,8 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from parser import PyTorchProfilerParser
-from models import ActivityEvent, ProfilerData
+from time_chart_tool.parser import PyTorchProfilerParser
+from time_chart_tool.models import ActivityEvent, ProfilerData
 
 
 class TestActivityEvent(unittest.TestCase):

@@ -1,4 +1,4 @@
-# PyTorch Profiler Parser Tool
+# Time Chart Tool
 
 一个用于解析和分析 PyTorch profiler 时间图表 JSON 数据的工具库。
 
@@ -28,50 +28,50 @@ pip3 install .
 
 ### 命令行工具
 
-安装后，您可以使用 `torch-profiler-parser` 命令：
+安装后，您可以使用 `time-chart-tool` 命令：
 
 #### 分析单个文件
 
 ```bash
 # 基本用法
-torch-profiler-parser single file.json --label "baseline"
+time-chart-tool single file.json --label "baseline"
 
 # 指定输出格式
-torch-profiler-parser single file.json --label "baseline" --output-format json,xlsx
+time-chart-tool single file.json --label "baseline" --output-format json,xlsx
 
 # 只输出 JSON 格式
-torch-profiler-parser single file.json --label "baseline" --output-format json
+time-chart-tool single file.json --label "baseline" --output-format json
 
 # 只输出 XLSX 格式
-torch-profiler-parser single file.json --label "baseline" --output-format xlsx
+time-chart-tool single file.json --label "baseline" --output-format xlsx
 
 # 指定输出目录
-torch-profiler-parser single file.json --label "baseline" --output-dir ./results
+time-chart-tool single file.json --label "baseline" --output-dir ./results
 ```
 
 #### 分析多个文件并对比
 
 ```bash
 # 基本用法
-torch-profiler-parser compare file1.json:label1 file2.json:label2
+time-chart-tool compare file1.json:label1 file2.json:label2
 
 # 指定输出格式
-torch-profiler-parser compare file1.json:fp32 file2.json:tf32 --output-format json,xlsx
+time-chart-tool compare file1.json:fp32 file2.json:tf32 --output-format json,xlsx
 
 # 只输出 JSON 格式
-torch-profiler-parser compare file1.json:baseline file2.json:optimized --output-format json
+time-chart-tool compare file1.json:baseline file2.json:optimized --output-format json
 
 # 只输出 XLSX 格式
-torch-profiler-parser compare file1.json:fp32 file2.json:tf32 --output-format xlsx
+time-chart-tool compare file1.json:fp32 file2.json:tf32 --output-format xlsx
 
 # 指定输出目录
-torch-profiler-parser compare file1.json:fp32 file2.json:tf32 --output-dir ./comparison_results
+time-chart-tool compare file1.json:fp32 file2.json:tf32 --output-dir ./comparison_results
 ```
 
 ### 编程接口
 
 ```python
-from torch_profiler_parser_tool import Analyzer
+from time_chart_tool import Analyzer
 
 # 创建分析器
 analyzer = Analyzer()

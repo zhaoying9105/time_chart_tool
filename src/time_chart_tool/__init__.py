@@ -1,5 +1,5 @@
 """
-PyTorch Profiler JSON Parser Tool
+Time Chart Tool
 
 一个用于解析 PyTorch profiler 时间图表 JSON 数据的工具库。
 """

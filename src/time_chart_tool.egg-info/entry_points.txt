@@ -1,0 +1,3 @@
+[console_scripts]
+time-chart-tool = cli:main
+

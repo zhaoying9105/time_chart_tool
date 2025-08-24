@@ -10,7 +10,7 @@ from pathlib import Path
 # 添加当前目录到 Python 路径
 sys.path.insert(0, str(Path(__file__).parent))
 
-from parser import PyTorchProfilerParser
+from time_chart_tool.parser import PyTorchProfilerParser
 
 
 def main():

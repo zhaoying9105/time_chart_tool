@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PyTorch Profiler Parser Tool 命令行工具
+Time Chart Tool 命令行工具
 
 支持分析多个 timechart JSON 文件，生成单个文件分析和对比分析结果。
 支持 JSON 和 XLSX 输出格式。
@@ -19,21 +19,21 @@ from .analyzer import Analyzer
 def parse_arguments():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(
-        description="PyTorch Profiler Parser Tool - 分析多个 timechart JSON 文件",
+        description="Time Chart Tool - 分析多个 timechart JSON 文件",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
   # 分析单个文件
-  torch-profiler-parser single file.json --label "baseline" --output-format json,xlsx
+  time-chart-tool single file.json --label "baseline" --output-format json,xlsx
   
   # 分析多个文件并对比
-  torch-profiler-parser compare file1.json:label1 file2.json:label2 --output-format json,xlsx
+  time-chart-tool compare file1.json:label1 file2.json:label2 --output-format json,xlsx
   
   # 只输出 JSON 格式
-  torch-profiler-parser compare file1.json:fp32 file2.json:tf32 --output-format json
+  time-chart-tool compare file1.json:fp32 file2.json:tf32 --output-format json
   
   # 只输出 XLSX 格式
-  torch-profiler-parser compare file1.json:baseline file2.json:optimized --output-format xlsx
+  time-chart-tool compare file1.json:baseline file2.json:optimized --output-format xlsx
         """
     )
     

@@ -5,7 +5,7 @@ PyTorch Profiler Parser Tool Setup
 from setuptools import setup, find_packages
 
 setup(
-    name="torch-profiler-parser",
+    name="time-chart-tool",
     version="1.0.0",
     author="PyTorch Profiler Parser Team",
     description="一个用于解析 PyTorch profiler 时间图表 JSON 数据的工具库",
@@ -42,7 +42,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "torch-profiler-parser=cli:main",
+            "time-chart-tool=cli:main",
         ],
     },
 )

@@ -13,8 +13,8 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
-from torch_profiler_parser_tool.analyzer import Analyzer, KernelStatistics
-from models import ActivityEvent, ProfilerData
+from time_chart_tool.analyzer import Analyzer, KernelStatistics
+from time_chart_tool.models import ActivityEvent, ProfilerData
 
 
 class TestAnalyzer(unittest.TestCase):
