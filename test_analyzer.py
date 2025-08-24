@@ -13,16 +13,16 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
-from advanced_analyzer import AdvancedAnalyzer, KernelStatistics
+from torch_profiler_parser_tool.analyzer import Analyzer, KernelStatistics
 from models import ActivityEvent, ProfilerData
 
 
-class TestAdvancedAnalyzer(unittest.TestCase):
+class TestAnalyzer(unittest.TestCase):
     """测试高级分析器"""
     
     def setUp(self):
         """设置测试环境"""
-        self.analyzer = AdvancedAnalyzer()
+        self.analyzer = Analyzer()
         
         # 创建测试数据
         self.test_events = [

@@ -6,7 +6,7 @@ PyTorch Profiler JSON Parser Tool
 
 from .parser import PyTorchProfilerParser
 from .models import ActivityEvent, ProfilerData
-from .advanced_analyzer import AdvancedAnalyzer, KernelStatistics
+from .analyzer import Analyzer, KernelStatistics
 
 __version__ = "1.0.0"
-__all__ = ["PyTorchProfilerParser", "ActivityEvent", "ProfilerData", "AdvancedAnalyzer", "KernelStatistics"]
+__all__ = ["PyTorchProfilerParser", "ActivityEvent", "ProfilerData", "Analyzer", "KernelStatistics"]

@@ -29,7 +29,7 @@ class KernelStatistics:
         return f"KernelStatistics({self.kernel_name}, count={self.count}, mean={self.mean_duration:.3f}, std={self.variance**0.5:.3f})"
 
 
-class AdvancedAnalyzer:
+class Analyzer:
     """高级分析器"""
     
     def __init__(self):
