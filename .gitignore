@@ -3,3 +3,5 @@
 *.json
 build/
 dist/
+.DS_Store
+src/.DS_Store

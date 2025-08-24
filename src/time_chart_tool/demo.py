@@ -21,7 +21,7 @@ def main():
     analyzer = Analyzer()
     
     # 指定要分析的 JSON 文件
-    json_file = "../fp32-trainer-runner_var_log_tiger_trace_ctr_torch_v210_fix_relu01_r9612311_0_115_3021.json"
+    json_file = "../../../fp32-trainer-runner_var_log_tiger_trace_ctr_torch_v210_fix_relu01_r9612311_0_115_3021.json"
     
     # 检查文件是否存在
     if not Path(json_file).exists():
@@ -90,8 +90,8 @@ def main():
         print("功能5.4 和功能6: 多文件分析演示")
         
         # 使用两个真实的 JSON 文件
-        fp32_file = "../fp32-trainer-runner_var_log_tiger_trace_ctr_torch_v210_fix_relu01_r9612311_0_115_3021.json"
-        tf32_file = "../tf32-trainer-runner_var_log_tiger_trace_ctr_torch_v210_fix_relu01_r9612311_0_42_3021.json"
+        fp32_file = "../../../fp32-trainer-runner_var_log_tiger_trace_ctr_torch_v210_fix_relu01_r9612311_0_115_3021.json"
+        tf32_file = "../../../tf32-trainer-runner_var_log_tiger_trace_ctr_torch_v210_fix_relu01_r9612311_0_42_3021.json"
         
         file_labels = []
         

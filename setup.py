@@ -42,7 +42,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "time-chart-tool=cli:main",
+            "time-chart-tool=time_chart_tool.cli:main",
         ],
     },
 )

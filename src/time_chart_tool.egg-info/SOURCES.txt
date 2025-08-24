@@ -1,8 +1,6 @@
 MANIFEST.in
 README.md
 analyze_performance_comparison.py
-analyzer.py
-cli.py
 demo.py
 example_usage.py
 requirements.txt
