@@ -322,22 +322,84 @@ class Analyzer:
                 kernel_stats = self.calculate_kernel_statistics(kernel_events)
                 all_kernel_stats[label] = {stats.kernel_name: stats for stats in kernel_stats}
             
-            # 生成比较行
-            for label, kernel_stats in all_kernel_stats.items():
-                for kernel_name, stats in kernel_stats.items():
-                    row = {
-                        'cpu_op_name': cpu_op_name,
-                        'cpu_op_input_strides': str(input_strides),
-                        'cpu_op_input_dims': str(input_dims),
-                        'file_label': label,
-                        'kernel_name': kernel_name,
-                        'kernel_count': stats.count,
-                        'kernel_min_duration': stats.min_duration,
-                        'kernel_max_duration': stats.max_duration,
-                        'kernel_mean_duration': stats.mean_duration,
-                        'kernel_std_duration': stats.variance ** 0.5
-                    }
-                    rows.append(row)
+            # 获取所有标签
+            labels = list(all_kernel_stats.keys())
+            
+            if len(labels) < 2:
+                # 只有一个文件的数据，直接添加
+                for label, kernel_stats in all_kernel_stats.items():
+                    for kernel_name, stats in kernel_stats.items():
+                        row = {
+                            'cpu_op_name': cpu_op_name,
+                            'cpu_op_input_strides': str(input_strides),
+                            'cpu_op_input_dims': str(input_dims),
+                            'file_label': label,
+                            'kernel_name': kernel_name,
+                            'kernel_count': stats.count,
+                            'kernel_min_duration': stats.min_duration,
+                            'kernel_max_duration': stats.max_duration,
+                            'kernel_mean_duration': stats.mean_duration,
+                            'kernel_std_duration': stats.variance ** 0.5
+                        }
+                        rows.append(row)
+            else:
+                # 有多个文件的数据，进行比较
+                # 获取所有kernel名称
+                all_kernel_names = set()
+                for kernel_stats in all_kernel_stats.values():
+                    all_kernel_names.update(kernel_stats.keys())
+                
+                for kernel_name in all_kernel_names:
+                    # 检查是否所有文件都有这个kernel
+                    if all(kernel_name in kernel_stats for kernel_stats in all_kernel_stats.values()):
+                        # 所有文件都有这个kernel，进行比较
+                        base_label = labels[0]
+                        base_stats = all_kernel_stats[base_label][kernel_name]
+                        base_mean = base_stats.mean_duration
+                        
+                        row = {
+                            'cpu_op_name': cpu_op_name,
+                            'cpu_op_input_strides': str(input_strides),
+                            'cpu_op_input_dims': str(input_dims),
+                            'kernel_name': kernel_name,
+                            'comparison_type': 'matched'
+                        }
+                        
+                        # 添加每个文件的数据
+                        for label in labels:
+                            stats = all_kernel_stats[label][kernel_name]
+                            row[f'{label}_count'] = stats.count
+                            row[f'{label}_min_duration'] = stats.min_duration
+                            row[f'{label}_max_duration'] = stats.max_duration
+                            row[f'{label}_mean_duration'] = stats.mean_duration
+                            row[f'{label}_std_duration'] = stats.variance ** 0.5
+                            
+                            # 计算相对于基准的比值
+                            if base_mean > 0:
+                                row[f'{label}_ratio_to_{base_label}'] = stats.mean_duration / base_mean
+                            else:
+                                row[f'{label}_ratio_to_{base_label}'] = float('inf') if stats.mean_duration > 0 else 1.0
+                        
+                        rows.append(row)
+                    else:
+                        # 不是所有文件都有这个kernel，分别添加
+                        for label, kernel_stats in all_kernel_stats.items():
+                            if kernel_name in kernel_stats:
+                                stats = kernel_stats[kernel_name]
+                                row = {
+                                    'cpu_op_name': cpu_op_name,
+                                    'cpu_op_input_strides': str(input_strides),
+                                    'cpu_op_input_dims': str(input_dims),
+                                    'kernel_name': kernel_name,
+                                    'comparison_type': 'unmatched',
+                                    'file_label': label,
+                                    'kernel_count': stats.count,
+                                    'kernel_min_duration': stats.min_duration,
+                                    'kernel_max_duration': stats.max_duration,
+                                    'kernel_mean_duration': stats.mean_duration,
+                                    'kernel_std_duration': stats.variance ** 0.5
+                                }
+                                rows.append(row)
         
         if rows:
             df = pd.DataFrame(rows)
@@ -345,6 +407,14 @@ class Analyzer:
                 df.to_excel(output_file, index=False)
                 print(f"比较分析 Excel 文件已生成: {output_file}")
                 print(f"包含 {len(rows)} 行数据")
+                
+                # 打印统计信息
+                if 'comparison_type' in df.columns:
+                    matched_count = len(df[df['comparison_type'] == 'matched'])
+                    unmatched_count = len(df[df['comparison_type'] == 'unmatched'])
+                    print(f"匹配的kernel比较: {matched_count} 行")
+                    print(f"不匹配的kernel: {unmatched_count} 行")
+                    
             except ImportError:
                 # 如果没有 openpyxl，保存为 CSV 和 JSON
                 csv_file = output_file.replace('.xlsx', '.csv')
