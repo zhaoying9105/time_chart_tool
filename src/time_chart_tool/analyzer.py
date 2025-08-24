@@ -336,19 +336,30 @@ class Analyzer:
                     
                     row[f'{label}_kernel_count'] = total_count
                     row[f'{label}_kernel_mean_duration'] = weighted_mean
-                    row[f'{label}_kernel_details'] = '||'.join([
-                        f"{stats.kernel_name}({stats.count},{stats.mean_duration:.3f})" 
-                        for stats in kernel_stats_list
-                    ])
                 else:
                     row[f'{label}_kernel_count'] = 0
                     row[f'{label}_kernel_mean_duration'] = 0.0
-                    row[f'{label}_kernel_details'] = ''
             
-            # 计算相对变化（如果有多个标签）
+            # 计算相对变化和比较信息（如果有多个标签）
             if len(labels) >= 2:
                 base_label = labels[0]
                 base_mean = row.get(f'{base_label}_kernel_mean_duration', 0.0)
+                
+                # 收集所有kernel_names和kernel_count进行比较
+                all_kernel_names = []
+                all_kernel_counts = []
+                
+                for label in labels:
+                    all_kernel_names.append(set(row.get(f'{label}_kernel_names', '').split('||') if row.get(f'{label}_kernel_names') else []))
+                    all_kernel_counts.append(row.get(f'{label}_kernel_count', 0))
+                
+                # 检查kernel_names是否相等（不考虑顺序）
+                kernel_names_equal = len(set(frozenset(names) for names in all_kernel_names)) == 1
+                row['kernel_names_equal'] = kernel_names_equal
+                
+                # 检查kernel_count是否相等
+                kernel_count_equal = len(set(all_kernel_counts)) == 1
+                row['kernel_count_equal'] = kernel_count_equal
                 
                 for label in labels[1:]:
                     current_mean = row.get(f'{label}_kernel_mean_duration', 0.0)
@@ -357,6 +368,10 @@ class Analyzer:
                         row[f'{label}_ratio_to_{base_label}'] = ratio
                     else:
                         row[f'{label}_ratio_to_{base_label}'] = float('inf') if current_mean > 0 else 1.0
+            else:
+                # 只有一个标签时，设置默认值
+                row['kernel_names_equal'] = True
+                row['kernel_count_equal'] = True
             
             rows.append(row)
         
@@ -534,19 +549,30 @@ class Analyzer:
                     
                     row[f'{label}_kernel_count'] = total_count
                     row[f'{label}_kernel_mean_duration'] = weighted_mean
-                    row[f'{label}_kernel_details'] = '||'.join([
-                        f"{stats.kernel_name}({stats.count},{stats.mean_duration:.3f})" 
-                        for stats in kernel_stats_list
-                    ])
                 else:
                     row[f'{label}_kernel_count'] = 0
                     row[f'{label}_kernel_mean_duration'] = 0.0
-                    row[f'{label}_kernel_details'] = ''
             
-            # 计算相对变化（如果有多个标签）
+            # 计算相对变化和比较信息（如果有多个标签）
             if len(labels) >= 2:
                 base_label = labels[0]
                 base_mean = row.get(f'{base_label}_kernel_mean_duration', 0.0)
+                
+                # 收集所有kernel_names和kernel_count进行比较
+                all_kernel_names = []
+                all_kernel_counts = []
+                
+                for label in labels:
+                    all_kernel_names.append(set(row.get(f'{label}_kernel_names', '').split('||') if row.get(f'{label}_kernel_names') else []))
+                    all_kernel_counts.append(row.get(f'{label}_kernel_count', 0))
+                
+                # 检查kernel_names是否相等（不考虑顺序）
+                kernel_names_equal = len(set(frozenset(names) for names in all_kernel_names)) == 1
+                row['kernel_names_equal'] = kernel_names_equal
+                
+                # 检查kernel_count是否相等
+                kernel_count_equal = len(set(all_kernel_counts)) == 1
+                row['kernel_count_equal'] = kernel_count_equal
                 
                 for label in labels[1:]:
                     current_mean = row.get(f'{label}_kernel_mean_duration', 0.0)
@@ -555,6 +581,10 @@ class Analyzer:
                         row[f'{label}_ratio_to_{base_label}'] = ratio
                     else:
                         row[f'{label}_ratio_to_{base_label}'] = float('inf') if current_mean > 0 else 1.0
+            else:
+                # 只有一个标签时，设置默认值
+                row['kernel_names_equal'] = True
+                row['kernel_count_equal'] = True
             
             serializable_data.append(row)
         
