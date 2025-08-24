@@ -271,38 +271,20 @@ class Analyzer:
             all_mappings: Dict[label, mapping]
             
         Returns:
-            Dict: 合并后的映射
+            Dict: 合并后的映射，key为(cpu_op_name, input_strides, input_dims)，value为Dict[label, Dict[input_type, kernel_events]]
         """
-        merged = defaultdict(list)
+        merged = defaultdict(lambda: defaultdict(dict))
         
         for label, mapping in all_mappings.items():
             for cpu_op_name, strides_map in mapping.items():
                 for input_strides, dims_map in strides_map.items():
                     for input_dims, types_map in dims_map.items():
-                        # 不考虑 input_type，直接合并
+                        key = (cpu_op_name, input_strides, input_dims)
+                        # 保留input_type信息
                         for input_type, kernel_events in types_map.items():
-                            key = (cpu_op_name, input_strides, input_dims)
-                            merged[key].append((label, kernel_events))
+                            merged[key][label][input_type] = kernel_events
         
         return dict(merged)
-
-    def _safe_csv_output(self, df: pd.DataFrame, csv_file: str) -> None:
-        """
-        安全地生成 CSV 文件，处理包含逗号的字段
-        
-        Args:
-            df: pandas DataFrame
-            csv_file: CSV 文件路径
-        """
-        # 方法1: 使用制表符分隔符
-        df.to_csv(csv_file, index=False, sep='\t', encoding='utf-8')
-        
-        # 方法2: 同时生成一个带引号的 CSV 文件
-        quoted_csv_file = csv_file.replace('.csv', '_quoted.csv')
-        df.to_csv(quoted_csv_file, index=False, quoting=1, encoding='utf-8')  # quoting=1 表示所有字段都用引号包围
-        
-        print(f"CSV 文件已生成 (制表符分隔): {csv_file}")
-        print(f"CSV 文件已生成 (带引号): {quoted_csv_file}")
 
     def generate_comparison_excel(self, merged_mapping: Dict, output_file: str = "comparison_analysis.xlsx") -> None:
         """
@@ -314,92 +296,69 @@ class Analyzer:
         """
         rows = []
         
-        for (cpu_op_name, input_strides, input_dims), label_events_list in merged_mapping.items():
-            # 收集所有 kernel 统计信息
-            all_kernel_stats = {}
+        for (cpu_op_name, input_strides, input_dims), label_types_map in merged_mapping.items():
+            # 收集所有标签
+            labels = list(label_types_map.keys())
             
-            for label, kernel_events in label_events_list:
-                kernel_stats = self.calculate_kernel_statistics(kernel_events)
-                all_kernel_stats[label] = {stats.kernel_name: stats for stats in kernel_stats}
+            # 基础行数据
+            row = {
+                'cpu_op_name': cpu_op_name,
+                'cpu_op_input_strides': str(input_strides),
+                'cpu_op_input_dims': str(input_dims)
+            }
             
-            # 获取所有标签
-            labels = list(all_kernel_stats.keys())
-            
-            if len(labels) < 2:
-                # 只有一个文件的数据，直接添加
-                for label, kernel_stats in all_kernel_stats.items():
-                    for kernel_name, stats in kernel_stats.items():
-                        row = {
-                            'cpu_op_name': cpu_op_name,
-                            'cpu_op_input_strides': str(input_strides),
-                            'cpu_op_input_dims': str(input_dims),
-                            'file_label': label,
-                            'kernel_name': kernel_name,
-                            'kernel_count': stats.count,
-                            'kernel_min_duration': stats.min_duration,
-                            'kernel_max_duration': stats.max_duration,
-                            'kernel_mean_duration': stats.mean_duration,
-                            'kernel_std_duration': stats.variance ** 0.5
-                        }
-                        rows.append(row)
-            else:
-                # 有多个文件的数据，进行比较
-                # 获取所有kernel名称
-                all_kernel_names = set()
-                for kernel_stats in all_kernel_stats.values():
-                    all_kernel_names.update(kernel_stats.keys())
+            # 为每个标签收集数据
+            for label in labels:
+                types_map = label_types_map[label]
                 
-                for kernel_name in all_kernel_names:
-                    # 检查是否所有文件都有这个kernel
-                    if all(kernel_name in kernel_stats for kernel_stats in all_kernel_stats.values()):
-                        # 所有文件都有这个kernel，进行比较
-                        base_label = labels[0]
-                        base_stats = all_kernel_stats[base_label][kernel_name]
-                        base_mean = base_stats.mean_duration
-                        
-                        row = {
-                            'cpu_op_name': cpu_op_name,
-                            'cpu_op_input_strides': str(input_strides),
-                            'cpu_op_input_dims': str(input_dims),
-                            'kernel_name': kernel_name,
-                            'comparison_type': 'matched'
-                        }
-                        
-                        # 添加每个文件的数据
-                        for label in labels:
-                            stats = all_kernel_stats[label][kernel_name]
-                            row[f'{label}_count'] = stats.count
-                            row[f'{label}_min_duration'] = stats.min_duration
-                            row[f'{label}_max_duration'] = stats.max_duration
-                            row[f'{label}_mean_duration'] = stats.mean_duration
-                            row[f'{label}_std_duration'] = stats.variance ** 0.5
-                            
-                            # 计算相对于基准的比值
-                            if base_mean > 0:
-                                row[f'{label}_ratio_to_{base_label}'] = stats.mean_duration / base_mean
-                            else:
-                                row[f'{label}_ratio_to_{base_label}'] = float('inf') if stats.mean_duration > 0 else 1.0
-                        
-                        rows.append(row)
+                # 收集所有input_type和kernel信息
+                input_types = []
+                kernel_names = []
+                kernel_stats_list = []
+                
+                for input_type, kernel_events in types_map.items():
+                    input_types.append(str(input_type))
+                    kernel_stats = self.calculate_kernel_statistics(kernel_events)
+                    
+                    for stats in kernel_stats:
+                        kernel_names.append(stats.kernel_name)
+                        kernel_stats_list.append(stats)
+                
+                # 用||连接多个值
+                row[f'{label}_input_types'] = '||'.join(input_types) if input_types else ''
+                row[f'{label}_kernel_names'] = '||'.join(kernel_names) if kernel_names else ''
+                
+                # 计算kernel统计信息
+                if kernel_stats_list:
+                    # 计算所有kernel的总调用次数和加权平均duration
+                    total_count = sum(stats.count for stats in kernel_stats_list)
+                    weighted_mean = sum(stats.mean_duration * stats.count for stats in kernel_stats_list) / total_count if total_count > 0 else 0.0
+                    
+                    row[f'{label}_kernel_count'] = total_count
+                    row[f'{label}_kernel_mean_duration'] = weighted_mean
+                    row[f'{label}_kernel_details'] = '||'.join([
+                        f"{stats.kernel_name}({stats.count},{stats.mean_duration:.3f})" 
+                        for stats in kernel_stats_list
+                    ])
+                else:
+                    row[f'{label}_kernel_count'] = 0
+                    row[f'{label}_kernel_mean_duration'] = 0.0
+                    row[f'{label}_kernel_details'] = ''
+            
+            # 计算相对变化（如果有多个标签）
+            if len(labels) >= 2:
+                base_label = labels[0]
+                base_mean = row.get(f'{base_label}_kernel_mean_duration', 0.0)
+                
+                for label in labels[1:]:
+                    current_mean = row.get(f'{label}_kernel_mean_duration', 0.0)
+                    if base_mean > 0:
+                        ratio = current_mean / base_mean
+                        row[f'{label}_ratio_to_{base_label}'] = ratio
                     else:
-                        # 不是所有文件都有这个kernel，分别添加
-                        for label, kernel_stats in all_kernel_stats.items():
-                            if kernel_name in kernel_stats:
-                                stats = kernel_stats[kernel_name]
-                                row = {
-                                    'cpu_op_name': cpu_op_name,
-                                    'cpu_op_input_strides': str(input_strides),
-                                    'cpu_op_input_dims': str(input_dims),
-                                    'kernel_name': kernel_name,
-                                    'comparison_type': 'unmatched',
-                                    'file_label': label,
-                                    'kernel_count': stats.count,
-                                    'kernel_min_duration': stats.min_duration,
-                                    'kernel_max_duration': stats.max_duration,
-                                    'kernel_mean_duration': stats.mean_duration,
-                                    'kernel_std_duration': stats.variance ** 0.5
-                                }
-                                rows.append(row)
+                        row[f'{label}_ratio_to_{base_label}'] = float('inf') if current_mean > 0 else 1.0
+            
+            rows.append(row)
         
         if rows:
             df = pd.DataFrame(rows)
@@ -409,12 +368,8 @@ class Analyzer:
                 print(f"包含 {len(rows)} 行数据")
                 
                 # 打印统计信息
-                if 'comparison_type' in df.columns:
-                    matched_count = len(df[df['comparison_type'] == 'matched'])
-                    unmatched_count = len(df[df['comparison_type'] == 'unmatched'])
-                    print(f"匹配的kernel比较: {matched_count} 行")
-                    print(f"不匹配的kernel: {unmatched_count} 行")
-                    
+                print(f"分析了 {len(merged_mapping)} 个不同的 (cpu_op_name, input_strides, input_dims) 组合")
+                
             except ImportError:
                 # 如果没有 openpyxl，保存为 CSV 和 JSON
                 csv_file = output_file.replace('.xlsx', '.csv')
@@ -539,85 +494,69 @@ class Analyzer:
         # 转换数据为可序列化的格式
         serializable_data = []
         
-        for (cpu_op_name, input_strides, input_dims), label_events_list in merged_mapping.items():
-            # 收集所有 kernel 统计信息
-            all_kernel_stats = {}
+        for (cpu_op_name, input_strides, input_dims), label_types_map in merged_mapping.items():
+            # 收集所有标签
+            labels = list(label_types_map.keys())
             
-            for label, kernel_events in label_events_list:
-                kernel_stats = self.calculate_kernel_statistics(kernel_events)
-                all_kernel_stats[label] = {stats.kernel_name: stats for stats in kernel_stats}
+            # 基础行数据
+            row = {
+                'cpu_op_name': cpu_op_name,
+                'cpu_op_input_strides': str(input_strides),
+                'cpu_op_input_dims': str(input_dims)
+            }
             
-            # 获取所有标签
-            labels = list(all_kernel_stats.keys())
-            
-            if len(labels) < 2:
-                # 只有一个文件的数据，直接添加
-                for label, kernel_stats in all_kernel_stats.items():
-                    for kernel_name, stats in kernel_stats.items():
-                        serializable_item = {
-                            'cpu_op_name': cpu_op_name,
-                            'cpu_op_input_strides': str(input_strides),
-                            'cpu_op_input_dims': str(input_dims),
-                            'file_label': label,
-                            'kernel_name': kernel_name,
-                            'kernel_count': stats.count,
-                            'kernel_min_duration': stats.min_duration,
-                            'kernel_max_duration': stats.max_duration,
-                            'kernel_mean_duration': stats.mean_duration,
-                            'kernel_std_duration': stats.variance ** 0.5
-                        }
-                        serializable_data.append(serializable_item)
-            else:
-                # 有多个文件的数据，进行比较
-                # 获取所有kernel名称
-                all_kernel_names = set()
-                for kernel_stats in all_kernel_stats.values():
-                    all_kernel_names.update(kernel_stats.keys())
+            # 为每个标签收集数据
+            for label in labels:
+                types_map = label_types_map[label]
                 
-                for kernel_name in all_kernel_names:
-                    # 检查是否所有文件都有这个kernel
-                    if all(kernel_name in kernel_stats for kernel_stats in all_kernel_stats.values()):
-                        # 所有文件都有这个kernel，进行比较
-                        base_label = labels[0]
-                        base_stats = all_kernel_stats[base_label][kernel_name]
-                        base_mean = base_stats.mean_duration
-                        
-                        for label in labels:
-                            stats = all_kernel_stats[label][kernel_name]
-                            serializable_item = {
-                                'cpu_op_name': cpu_op_name,
-                                'cpu_op_input_strides': str(input_strides),
-                                'cpu_op_input_dims': str(input_dims),
-                                'kernel_name': kernel_name,
-                                'comparison_type': 'matched',
-                                'file_label': label,
-                                'kernel_count': stats.count,
-                                'kernel_min_duration': stats.min_duration,
-                                'kernel_max_duration': stats.max_duration,
-                                'kernel_mean_duration': stats.mean_duration,
-                                'kernel_std_duration': stats.variance ** 0.5,
-                                'ratio_to_base': stats.mean_duration / base_mean if base_mean > 0 else float('inf')
-                            }
-                            serializable_data.append(serializable_item)
+                # 收集所有input_type和kernel信息
+                input_types = []
+                kernel_names = []
+                kernel_stats_list = []
+                
+                for input_type, kernel_events in types_map.items():
+                    input_types.append(str(input_type))
+                    kernel_stats = self.calculate_kernel_statistics(kernel_events)
+                    
+                    for stats in kernel_stats:
+                        kernel_names.append(stats.kernel_name)
+                        kernel_stats_list.append(stats)
+                
+                # 用||连接多个值
+                row[f'{label}_input_types'] = '||'.join(input_types) if input_types else ''
+                row[f'{label}_kernel_names'] = '||'.join(kernel_names) if kernel_names else ''
+                
+                # 计算kernel统计信息
+                if kernel_stats_list:
+                    # 计算所有kernel的总调用次数和加权平均duration
+                    total_count = sum(stats.count for stats in kernel_stats_list)
+                    weighted_mean = sum(stats.mean_duration * stats.count for stats in kernel_stats_list) / total_count if total_count > 0 else 0.0
+                    
+                    row[f'{label}_kernel_count'] = total_count
+                    row[f'{label}_kernel_mean_duration'] = weighted_mean
+                    row[f'{label}_kernel_details'] = '||'.join([
+                        f"{stats.kernel_name}({stats.count},{stats.mean_duration:.3f})" 
+                        for stats in kernel_stats_list
+                    ])
+                else:
+                    row[f'{label}_kernel_count'] = 0
+                    row[f'{label}_kernel_mean_duration'] = 0.0
+                    row[f'{label}_kernel_details'] = ''
+            
+            # 计算相对变化（如果有多个标签）
+            if len(labels) >= 2:
+                base_label = labels[0]
+                base_mean = row.get(f'{base_label}_kernel_mean_duration', 0.0)
+                
+                for label in labels[1:]:
+                    current_mean = row.get(f'{label}_kernel_mean_duration', 0.0)
+                    if base_mean > 0:
+                        ratio = current_mean / base_mean
+                        row[f'{label}_ratio_to_{base_label}'] = ratio
                     else:
-                        # 不是所有文件都有这个kernel，分别添加
-                        for label, kernel_stats in all_kernel_stats.items():
-                            if kernel_name in kernel_stats:
-                                stats = kernel_stats[kernel_name]
-                                serializable_item = {
-                                    'cpu_op_name': cpu_op_name,
-                                    'cpu_op_input_strides': str(input_strides),
-                                    'cpu_op_input_dims': str(input_dims),
-                                    'kernel_name': kernel_name,
-                                    'comparison_type': 'unmatched',
-                                    'file_label': label,
-                                    'kernel_count': stats.count,
-                                    'kernel_min_duration': stats.min_duration,
-                                    'kernel_max_duration': stats.max_duration,
-                                    'kernel_mean_duration': stats.mean_duration,
-                                    'kernel_std_duration': stats.variance ** 0.5
-                                }
-                                serializable_data.append(serializable_item)
+                        row[f'{label}_ratio_to_{base_label}'] = float('inf') if current_mean > 0 else 1.0
+            
+            serializable_data.append(row)
         
         # 保存为 JSON 文件
         with open(output_file, 'w', encoding='utf-8') as f:
@@ -625,3 +564,21 @@ class Analyzer:
         
         print(f"比较分析数据已保存为 JSON: {output_file}")
         print(f"包含 {len(serializable_data)} 条记录")
+
+    def _safe_csv_output(self, df: pd.DataFrame, csv_file: str) -> None:
+        """
+        安全地生成 CSV 文件，处理包含逗号的字段
+        
+        Args:
+            df: pandas DataFrame
+            csv_file: CSV 文件路径
+        """
+        # 方法1: 使用制表符分隔符
+        df.to_csv(csv_file, index=False, sep='\t', encoding='utf-8')
+        
+        # 方法2: 同时生成一个带引号的 CSV 文件
+        quoted_csv_file = csv_file.replace('.csv', '_quoted.csv')
+        df.to_csv(quoted_csv_file, index=False, quoting=1, encoding='utf-8')  # quoting=1 表示所有字段都用引号包围
+        
+        print(f"CSV 文件已生成 (制表符分隔): {csv_file}")
+        print(f"CSV 文件已生成 (带引号): {quoted_csv_file}")
