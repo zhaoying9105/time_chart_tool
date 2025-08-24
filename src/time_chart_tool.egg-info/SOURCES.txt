@@ -1,13 +1,13 @@
 MANIFEST.in
 README.md
 analyze_performance_comparison.py
-demo.py
 example_usage.py
 requirements.txt
 setup.py
 src/time_chart_tool/__init__.py
 src/time_chart_tool/analyzer.py
 src/time_chart_tool/cli.py
+src/time_chart_tool/demo.py
 src/time_chart_tool/models.py
 src/time_chart_tool/parser.py
 src/time_chart_tool.egg-info/PKG-INFO

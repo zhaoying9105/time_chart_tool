@@ -28,44 +28,44 @@ pip3 install .
 
 ### 命令行工具
 
-安装后，您可以使用 `time-chart-tool` 命令：
+安装后，您可以使用以下命令：
 
 #### 分析单个文件
 
 ```bash
 # 基本用法
-time-chart-tool single file.json --label "baseline"
+python3 -m time_chart_tool.cli single file.json --label "baseline"
 
 # 指定输出格式
-time-chart-tool single file.json --label "baseline" --output-format json,xlsx
+python3 -m time_chart_tool.cli single file.json --label "baseline" --output-format json,xlsx
 
 # 只输出 JSON 格式
-time-chart-tool single file.json --label "baseline" --output-format json
+python3 -m time_chart_tool.cli single file.json --label "baseline" --output-format json
 
 # 只输出 XLSX 格式
-time-chart-tool single file.json --label "baseline" --output-format xlsx
+python3 -m time_chart_tool.cli single file.json --label "baseline" --output-format xlsx
 
 # 指定输出目录
-time-chart-tool single file.json --label "baseline" --output-dir ./results
+python3 -m time_chart_tool.cli single file.json --label "baseline" --output-dir ./results
 ```
 
 #### 分析多个文件并对比
 
 ```bash
 # 基本用法
-time-chart-tool compare file1.json:label1 file2.json:label2
+python3 -m time_chart_tool.cli compare file1.json:label1 file2.json:label2
 
 # 指定输出格式
-time-chart-tool compare file1.json:fp32 file2.json:tf32 --output-format json,xlsx
+python3 -m time_chart_tool.cli compare file1.json:fp32 file2.json:tf32 --output-format json,xlsx
 
 # 只输出 JSON 格式
-time-chart-tool compare file1.json:baseline file2.json:optimized --output-format json
+python3 -m time_chart_tool.cli compare file1.json:baseline file2.json:optimized --output-format json
 
 # 只输出 XLSX 格式
-time-chart-tool compare file1.json:fp32 file2.json:tf32 --output-format xlsx
+python3 -m time_chart_tool.cli compare file1.json:fp32 file2.json:tf32 --output-format xlsx
 
 # 指定输出目录
-time-chart-tool compare file1.json:fp32 file2.json:tf32 --output-dir ./comparison_results
+python3 -m time_chart_tool.cli compare file1.json:fp32 file2.json:tf32 --output-dir ./comparison_results
 ```
 
 ### 编程接口
@@ -139,23 +139,29 @@ analyzer.run_complete_analysis(file_labels, output_dir="./results")
     "cpu_op_name": "op_name",
     "cpu_op_input_strides": "[1, 2, 3]",
     "cpu_op_input_dims": "[4, 5, 6]",
-    "kernel_name": "kernel_name",
-    "file_label": "fp32",
-    "kernel_count": 100,
-    "kernel_min_duration": 1.0,
-    "kernel_max_duration": 10.0,
-    "kernel_mean_duration": 5.0,
-    "kernel_std_duration": 2.0
+    "fp32_input_types": "('float', 'float')",
+    "fp32_kernel_names": "kernel1||kernel2",
+    "fp32_kernel_count": 100,
+    "fp32_kernel_mean_duration": 5.0,
+    "tf32_input_types": "('float', 'float')",
+    "tf32_kernel_names": "kernel1||kernel2",
+    "tf32_kernel_count": 100,
+    "tf32_kernel_mean_duration": 4.8,
+    "kernel_names_equal": true,
+    "kernel_count_equal": true,
+    "tf32_ratio_to_fp32": 0.96
   }
 ]
 ```
 
 ### Excel 输出格式
 
+#### 单个文件分析
 Excel 文件包含以下列：
 - cpu_op_name: CPU 操作名称
 - cpu_op_input_strides: 输入步长
 - cpu_op_input_dims: 输入维度
+- cpu_op_input_type: 输入类型
 - kernel_name: Kernel 名称
 - kernel_count: Kernel 执行次数
 - kernel_min_duration: 最小执行时间
@@ -163,36 +169,34 @@ Excel 文件包含以下列：
 - kernel_mean_duration: 平均执行时间
 - kernel_std_duration: 执行时间标准差
 
-对于对比分析，还会包含：
-- file_label: 文件标签
-- comparison_type: 比较类型（matched/unmatched）
-- 各文件的统计数据和比值
+#### 多文件对比分析
+Excel 文件包含以下列：
+- cpu_op_name: CPU 操作名称（共享列）
+- cpu_op_input_strides: 输入步长（共享列）
+- cpu_op_input_dims: 输入维度（共享列）
+- {label}_input_types: 各文件的输入类型（用||连接多个值）
+- {label}_kernel_names: 各文件的kernel名称（用||连接多个值）
+- {label}_kernel_count: 各文件的kernel执行次数
+- {label}_kernel_mean_duration: 各文件的平均执行时间
+- kernel_names_equal: kernel名称是否相同（不考虑顺序）
+- kernel_count_equal: kernel执行次数是否相同
+- {label}_ratio_to_{base_label}: 相对于基准文件的性能比值
+
+## 功能5.4特性
+
+### 多文件对比分析增强功能
+
+1. **保留Input Type信息**: 在对比分析中保留并展示Input Type信息
+2. **行级展示**: 将同一个(cpu_op_name, input_strides, input_dims)下的信息展示成一行
+3. **多值连接**: 使用||连接多个Input Type和kernel_name
+4. **标签前缀**: 所有列名都有label前缀（如fp32_, tf32_）
+5. **比较列**: 
+   - kernel_names_equal: 比较不同time chart的kernel_names是否相同（不考虑顺序）
+   - kernel_count_equal: 比较不同time chart的kernel_count是否相同
+6. **性能比较**: 只计算mean duration的变化
 
 ## 依赖要求
 
 - Python >= 3.7
 - pandas >= 1.3.0
 - openpyxl >= 3.0.0
-
-## 开发
-
-### 运行测试
-
-```bash
-pytest tests/
-```
-
-### 代码格式化
-
-```bash
-black .
-flake8 .
-```
-
-## 许可证
-
-MIT License
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！ 
