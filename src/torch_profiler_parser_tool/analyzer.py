@@ -11,8 +11,8 @@ from collections import defaultdict
 import statistics
 from dataclasses import dataclass
 
-from models import ActivityEvent, ProfilerData
-from parser import PyTorchProfilerParser
+from .models import ActivityEvent, ProfilerData
+from .parser import PyTorchProfilerParser
 
 
 @dataclass
@@ -539,17 +539,77 @@ class Analyzer:
         # 转换数据为可序列化的格式
         serializable_data = []
         
-        for cpu_op_name, strides_map in merged_mapping.items():
-            for strides, dims_map in strides_map.items():
-                for dims, types_map in dims_map.items():
-                    for input_type, files_map in types_map.items():
-                        for kernel_name, kernel_stats in files_map.items():
-                            for label, stats in kernel_stats.items():
+        for (cpu_op_name, input_strides, input_dims), label_events_list in merged_mapping.items():
+            # 收集所有 kernel 统计信息
+            all_kernel_stats = {}
+            
+            for label, kernel_events in label_events_list:
+                kernel_stats = self.calculate_kernel_statistics(kernel_events)
+                all_kernel_stats[label] = {stats.kernel_name: stats for stats in kernel_stats}
+            
+            # 获取所有标签
+            labels = list(all_kernel_stats.keys())
+            
+            if len(labels) < 2:
+                # 只有一个文件的数据，直接添加
+                for label, kernel_stats in all_kernel_stats.items():
+                    for kernel_name, stats in kernel_stats.items():
+                        serializable_item = {
+                            'cpu_op_name': cpu_op_name,
+                            'cpu_op_input_strides': str(input_strides),
+                            'cpu_op_input_dims': str(input_dims),
+                            'file_label': label,
+                            'kernel_name': kernel_name,
+                            'kernel_count': stats.count,
+                            'kernel_min_duration': stats.min_duration,
+                            'kernel_max_duration': stats.max_duration,
+                            'kernel_mean_duration': stats.mean_duration,
+                            'kernel_std_duration': stats.variance ** 0.5
+                        }
+                        serializable_data.append(serializable_item)
+            else:
+                # 有多个文件的数据，进行比较
+                # 获取所有kernel名称
+                all_kernel_names = set()
+                for kernel_stats in all_kernel_stats.values():
+                    all_kernel_names.update(kernel_stats.keys())
+                
+                for kernel_name in all_kernel_names:
+                    # 检查是否所有文件都有这个kernel
+                    if all(kernel_name in kernel_stats for kernel_stats in all_kernel_stats.values()):
+                        # 所有文件都有这个kernel，进行比较
+                        base_label = labels[0]
+                        base_stats = all_kernel_stats[base_label][kernel_name]
+                        base_mean = base_stats.mean_duration
+                        
+                        for label in labels:
+                            stats = all_kernel_stats[label][kernel_name]
+                            serializable_item = {
+                                'cpu_op_name': cpu_op_name,
+                                'cpu_op_input_strides': str(input_strides),
+                                'cpu_op_input_dims': str(input_dims),
+                                'kernel_name': kernel_name,
+                                'comparison_type': 'matched',
+                                'file_label': label,
+                                'kernel_count': stats.count,
+                                'kernel_min_duration': stats.min_duration,
+                                'kernel_max_duration': stats.max_duration,
+                                'kernel_mean_duration': stats.mean_duration,
+                                'kernel_std_duration': stats.variance ** 0.5,
+                                'ratio_to_base': stats.mean_duration / base_mean if base_mean > 0 else float('inf')
+                            }
+                            serializable_data.append(serializable_item)
+                    else:
+                        # 不是所有文件都有这个kernel，分别添加
+                        for label, kernel_stats in all_kernel_stats.items():
+                            if kernel_name in kernel_stats:
+                                stats = kernel_stats[kernel_name]
                                 serializable_item = {
                                     'cpu_op_name': cpu_op_name,
-                                    'cpu_op_input_strides': str(strides),
-                                    'cpu_op_input_dims': str(dims),
+                                    'cpu_op_input_strides': str(input_strides),
+                                    'cpu_op_input_dims': str(input_dims),
                                     'kernel_name': kernel_name,
+                                    'comparison_type': 'unmatched',
                                     'file_label': label,
                                     'kernel_count': stats.count,
                                     'kernel_min_duration': stats.min_duration,

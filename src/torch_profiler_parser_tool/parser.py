@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple, Union
 import logging
 
-from models import ActivityEvent, ProfilerData
+from .models import ActivityEvent, ProfilerData
 
 logger = logging.getLogger(__name__)
 

@@ -4,17 +4,15 @@ PyTorch Profiler Parser Tool Setup
 
 from setuptools import setup, find_packages
 
-with open("README.md", "r", encoding="utf-8") as fh:
-    long_description = fh.read()
-
 setup(
     name="torch-profiler-parser",
     version="1.0.0",
     author="PyTorch Profiler Parser Team",
     description="一个用于解析 PyTorch profiler 时间图表 JSON 数据的工具库",
-    long_description=long_description,
+    long_description="",
     long_description_content_type="text/markdown",
-    packages=find_packages(),
+    packages=find_packages(where="src"),
+    package_dir={"": "src"},
     classifiers=[
         "Development Status :: 4 - Beta",
         "Intended Audience :: Developers",
@@ -31,7 +29,8 @@ setup(
     ],
     python_requires=">=3.7",
     install_requires=[
-        # 目前只使用标准库，无需额外依赖
+        "pandas>=1.3.0",
+        "openpyxl>=3.0.0",
     ],
     extras_require={
         "dev": [
@@ -43,7 +42,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "torch-profiler-parser=demo:main",
+            "torch-profiler-parser=cli:main",
         ],
     },
 )
