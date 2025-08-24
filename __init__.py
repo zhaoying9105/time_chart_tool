@@ -1,0 +1,12 @@
+"""
+PyTorch Profiler JSON Parser Tool
+
+一个用于解析 PyTorch profiler 时间图表 JSON 数据的工具库。
+"""
+
+from .parser import PyTorchProfilerParser
+from .models import ActivityEvent, ProfilerData
+from .advanced_analyzer import AdvancedAnalyzer, KernelStatistics
+
+__version__ = "1.0.0"
+__all__ = ["PyTorchProfilerParser", "ActivityEvent", "ProfilerData", "AdvancedAnalyzer", "KernelStatistics"]
