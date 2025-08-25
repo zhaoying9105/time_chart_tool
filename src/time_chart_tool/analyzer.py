@@ -652,6 +652,23 @@ class Analyzer:
         """
         matmul_data = {}
         
+        # 首先收集所有标签
+        labels = []
+        for item in comparison_data:
+            if item.get('cpu_op_name') == 'aten::mm':
+                for key in item.keys():
+                    if key.endswith('_input_types'):
+                        label = key.replace('_input_types', '')
+                        if label not in labels:
+                            labels.append(label)
+                break
+        
+        if not labels:
+            return {}
+        
+        # 按min_dim分组收集数据
+        min_dim_data = defaultdict(lambda: {label: [] for label in labels})
+        
         for item in comparison_data:
             if item.get('cpu_op_name') == 'aten::mm':
                 input_dims = item.get('cpu_op_input_dims', '')
@@ -661,31 +678,34 @@ class Analyzer:
                     m, k, n = dimensions
                     min_dim = min(m, k, n)
                     
-                    # 提取需要的数据
-                    data_entry = []
-                    
-                    # 获取所有标签（除了cpu_op_name等基础字段）
-                    labels = []
-                    for key in item.keys():
-                        if key.endswith('_input_types') or key.endswith('_kernel_count') or key.endswith('_kernel_mean_duration'):
-                            label = key.replace('_input_types', '').replace('_kernel_count', '').replace('_kernel_mean_duration', '')
-                            if label not in labels:
-                                labels.append(label)
-                    
                     # 为每个标签收集数据
                     for label in labels:
                         input_types = item.get(f'{label}_input_types', '')
                         kernel_count = item.get(f'{label}_kernel_count', 0)
                         kernel_mean_duration = item.get(f'{label}_kernel_mean_duration', 0.0)
                         
-                        data_entry.extend([input_types, kernel_count, kernel_mean_duration])
-                    
-                    # 添加到对应min_dim的列表中
-                    if min_dim not in matmul_data:
-                        matmul_data[min_dim] = []
-                    matmul_data[min_dim].append(data_entry)
+                        # 只有当所有字段都有有效数据时才添加
+                        if input_types and kernel_count > 0 and kernel_mean_duration > 0:
+                            min_dim_data[min_dim][label].append([input_types, kernel_count, kernel_mean_duration])
         
-        return matmul_data
+        # 只保留在所有标签中都有数据的min_dim
+        filtered_matmul_data = {}
+        for min_dim, label_data in min_dim_data.items():
+            # 检查是否所有标签都有数据
+            all_labels_have_data = all(len(data_list) > 0 for data_list in label_data.values())
+            
+            if all_labels_have_data:
+                # 为每个标签选择第一个数据条目（或者可以取平均值）
+                filtered_entries = []
+                for label in labels:
+                    data_list = label_data[label]
+                    if data_list:
+                        # 取第一个条目，或者可以计算平均值
+                        filtered_entries.extend(data_list[0])
+                
+                filtered_matmul_data[min_dim] = [filtered_entries]
+        
+        return filtered_matmul_data
 
     def generate_matmul_analysis(self, comparison_data: List[Dict], output_dir: str = ".") -> None:
         """
@@ -787,21 +807,35 @@ class Analyzer:
             if min_dim is not None:
                 min_dim_data[min_dim].append(item)
         
-        # 计算每个min_dim的平均比率
+        # 计算每个min_dim的平均比率，只考虑在所有标签中都有数据的点
         chart_data = {}
         base_label = labels[0]
         
         for min_dim, items in min_dim_data.items():
-            chart_data[min_dim] = {}
-            for label in labels[1:]:
-                ratios = []
+            # 检查这个min_dim是否在所有标签中都有数据
+            all_labels_have_data = True
+            for label in labels:
+                has_data = False
                 for item in items:
-                    ratio_key = f'{label}_ratio_to_{base_label}'
-                    if ratio_key in item and item[ratio_key] != float('inf'):
-                        ratios.append(item[ratio_key])
-                
-                if ratios:
-                    chart_data[min_dim][label] = sum(ratios) / len(ratios)
+                    duration_key = f'{label}_kernel_mean_duration'
+                    if duration_key in item and item[duration_key] > 0:
+                        has_data = True
+                        break
+                if not has_data:
+                    all_labels_have_data = False
+                    break
+            
+            if all_labels_have_data:
+                chart_data[min_dim] = {}
+                for label in labels[1:]:
+                    ratios = []
+                    for item in items:
+                        ratio_key = f'{label}_ratio_to_{base_label}'
+                        if ratio_key in item and item[ratio_key] != float('inf'):
+                            ratios.append(item[ratio_key])
+                    
+                    if ratios:
+                        chart_data[min_dim][label] = sum(ratios) / len(ratios)
         
         # 生成图表
         plt.figure(figsize=(12, 8))
@@ -821,7 +855,7 @@ class Analyzer:
         
         plt.xlabel('Matmul Min Dimension (m/k/n)', fontsize=12)
         plt.ylabel(f'Performance Ratio ({base_label} = 1.0)', fontsize=12)
-        plt.title('Matmul Performance Analysis by Min Dimension', fontsize=14, fontweight='bold')
+        plt.title('Matmul Performance Analysis by Min Dimension\n(Only shapes present in all time charts)', fontsize=14, fontweight='bold')
         plt.legend(fontsize=10)
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -832,6 +866,7 @@ class Analyzer:
         plt.close()
         
         print(f"Matmul性能图表已生成: {chart_file}")
+        print(f"图表包含 {len(chart_data)} 个在所有标签中都有数据的min_dim点")
 
     def run_complete_analysis_with_matmul(self, file_labels: List[Tuple[str, str]], 
                                         output_dir: str = ".", 

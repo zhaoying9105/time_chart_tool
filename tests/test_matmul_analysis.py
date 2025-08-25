@@ -97,7 +97,7 @@ class TestMatmulAnalysis:
         """测试matmul按最小维度分组分析"""
         matmul_data = self.analyzer.analyze_matmul_by_min_dim(self.test_comparison_data)
         
-        # 应该有两个matmul条目
+        # 应该有两个matmul条目（min_dim=3和min_dim=32，因为这两个在所有标签中都有数据）
         assert len(matmul_data) == 2
         
         # 检查min_dim=3的数据
@@ -189,6 +189,58 @@ class TestMatmulAnalysis:
             
             # 检查文件大小（确保不是空文件）
             assert os.path.getsize(chart_file) > 0
+
+    def test_analyze_matmul_data_completeness(self):
+        """测试matmul数据完整性检查逻辑"""
+        # 创建包含缺失数据的测试数据
+        incomplete_data = [
+            {
+                "cpu_op_name": "aten::mm",
+                "cpu_op_input_strides": "((3, 1), (1, 3))",
+                "cpu_op_input_dims": "((2048, 3), (3, 32))",
+                "fp32_input_types": "('float', 'float')",
+                "fp32_kernel_count": 15,
+                "fp32_kernel_mean_duration": 2.9066666666666667,
+                "op_bf16_input_types": "('c10::BFloat16', 'c10::BFloat16')",
+                "op_bf16_kernel_count": 15,
+                "op_bf16_kernel_mean_duration": 2.5893333333333333,
+            },
+            {
+                "cpu_op_name": "aten::mm",
+                "cpu_op_input_strides": "((1, 32), (32, 1))",
+                "cpu_op_input_dims": "((1024, 32), (32, 64))",
+                "fp32_input_types": "('float', 'float')",
+                "fp32_kernel_count": 20,
+                "fp32_kernel_mean_duration": 3.5,
+                # 注意：这个条目缺少op_bf16的数据
+            },
+            {
+                "cpu_op_name": "aten::mm",
+                "cpu_op_input_strides": "((1, 64), (64, 1))",
+                "cpu_op_input_dims": "((512, 64), (64, 128))",
+                "fp32_input_types": "('float', 'float')",
+                "fp32_kernel_count": 25,
+                "fp32_kernel_mean_duration": 4.2,
+                "op_bf16_input_types": "('c10::BFloat16', 'c10::BFloat16')",
+                "op_bf16_kernel_count": 25,
+                "op_bf16_kernel_mean_duration": 3.8,
+            }
+        ]
+        
+        matmul_data = self.analyzer.analyze_matmul_by_min_dim(incomplete_data)
+        
+        # 应该只有两个条目：min_dim=3（完整数据）和min_dim=64（完整数据）
+        # min_dim=32应该被过滤掉，因为缺少op_bf16数据
+        assert len(matmul_data) == 2
+        
+        # 检查min_dim=3的数据（完整）
+        assert 3 in matmul_data
+        
+        # 检查min_dim=64的数据（完整）
+        assert 64 in matmul_data
+        
+        # 检查min_dim=32的数据（不完整，应该被过滤）
+        assert 32 not in matmul_data
 
 
 if __name__ == "__main__":
