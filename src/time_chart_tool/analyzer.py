@@ -5,6 +5,8 @@ PyTorch Profiler 高级分析器
 
 import json
 import pandas as pd
+import matplotlib.pyplot as plt
+import re
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple, Union
 from collections import defaultdict
@@ -612,3 +614,278 @@ class Analyzer:
         
         print(f"CSV 文件已生成 (制表符分隔): {csv_file}")
         print(f"CSV 文件已生成 (带引号): {quoted_csv_file}")
+
+    def extract_matmul_dimensions(self, input_dims_str: str) -> Optional[Tuple[int, int, int]]:
+        """
+        从matmul算子的input_dims中提取m, k, n维度
+        
+        Args:
+            input_dims_str: 格式如 "((2048, 3), (3, 32))" 的字符串
+            
+        Returns:
+            Optional[Tuple[m, k, n]]: 提取的维度，如果解析失败返回None
+        """
+        try:
+            # 使用正则表达式提取数字
+            pattern = r'\(\((\d+),\s*(\d+)\)\s*,\s*\((\d+),\s*(\d+)\)\)'
+            match = re.match(pattern, input_dims_str)
+            
+            if match:
+                m, k1, k2, n = map(int, match.groups())
+                # 验证k1 == k2 (矩阵乘法的要求)
+                if k1 == k2:
+                    return (m, k1, n)
+            
+            return None
+        except Exception:
+            return None
+
+    def analyze_matmul_by_min_dim(self, comparison_data: List[Dict]) -> Dict[int, List]:
+        """
+        专门分析matmul算子，按最小维度分组
+        
+        Args:
+            comparison_data: 比较分析的数据列表
+            
+        Returns:
+            Dict[int, List]: 按min_dim分组的matmul数据
+        """
+        matmul_data = {}
+        
+        for item in comparison_data:
+            if item.get('cpu_op_name') == 'aten::mm':
+                input_dims = item.get('cpu_op_input_dims', '')
+                dimensions = self.extract_matmul_dimensions(input_dims)
+                
+                if dimensions:
+                    m, k, n = dimensions
+                    min_dim = min(m, k, n)
+                    
+                    # 提取需要的数据
+                    data_entry = []
+                    
+                    # 获取所有标签（除了cpu_op_name等基础字段）
+                    labels = []
+                    for key in item.keys():
+                        if key.endswith('_input_types') or key.endswith('_kernel_count') or key.endswith('_kernel_mean_duration'):
+                            label = key.replace('_input_types', '').replace('_kernel_count', '').replace('_kernel_mean_duration', '')
+                            if label not in labels:
+                                labels.append(label)
+                    
+                    # 为每个标签收集数据
+                    for label in labels:
+                        input_types = item.get(f'{label}_input_types', '')
+                        kernel_count = item.get(f'{label}_kernel_count', 0)
+                        kernel_mean_duration = item.get(f'{label}_kernel_mean_duration', 0.0)
+                        
+                        data_entry.extend([input_types, kernel_count, kernel_mean_duration])
+                    
+                    # 添加到对应min_dim的列表中
+                    if min_dim not in matmul_data:
+                        matmul_data[min_dim] = []
+                    matmul_data[min_dim].append(data_entry)
+        
+        return matmul_data
+
+    def generate_matmul_analysis(self, comparison_data: List[Dict], output_dir: str = ".") -> None:
+        """
+        生成matmul算子的专门分析
+        
+        Args:
+            comparison_data: 比较分析的数据列表
+            output_dir: 输出目录
+        """
+        print("=== 开始matmul算子专门分析 ===")
+        
+        # 分析matmul数据
+        matmul_data = self.analyze_matmul_by_min_dim(comparison_data)
+        
+        if not matmul_data:
+            print("没有找到matmul算子数据")
+            return
+        
+        # 获取标签信息
+        labels = []
+        for item in comparison_data:
+            if item.get('cpu_op_name') == 'aten::mm':
+                for key in item.keys():
+                    if key.endswith('_input_types'):
+                        label = key.replace('_input_types', '')
+                        if label not in labels:
+                            labels.append(label)
+                break
+        
+        # 生成JSON数据
+        json_data = []
+        for min_dim, entries in matmul_data.items():
+            for entry in entries:
+                row = {'mm_min_dim': min_dim}
+                
+                # 为每个标签添加数据
+                for i, label in enumerate(labels):
+                    start_idx = i * 3
+                    if start_idx + 2 < len(entry):
+                        row[f'{label}_input_types'] = entry[start_idx]
+                        row[f'{label}_kernel_count'] = entry[start_idx + 1]
+                        row[f'{label}_kernel_mean_duration'] = entry[start_idx + 2]
+                
+                # 计算比率（如果有多个标签）
+                if len(labels) >= 2:
+                    base_label = labels[0]
+                    base_duration = row.get(f'{base_label}_kernel_mean_duration', 0.0)
+                    
+                    for label in labels[1:]:
+                        current_duration = row.get(f'{label}_kernel_mean_duration', 0.0)
+                        if base_duration > 0:
+                            ratio = current_duration / base_duration
+                            row[f'{label}_ratio_to_{base_label}'] = ratio
+                        else:
+                            row[f'{label}_ratio_to_{base_label}'] = float('inf') if current_duration > 0 else 1.0
+                
+                json_data.append(row)
+        
+        # 保存JSON文件
+        json_file = f"{output_dir}/matmul_analysis.json"
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, indent=2, ensure_ascii=False)
+        print(f"Matmul分析JSON文件已生成: {json_file}")
+        
+        # 生成Excel文件
+        if json_data:
+            df = pd.DataFrame(json_data)
+            xlsx_file = f"{output_dir}/matmul_analysis.xlsx"
+            try:
+                df.to_excel(xlsx_file, index=False)
+                print(f"Matmul分析Excel文件已生成: {xlsx_file}")
+            except ImportError:
+                csv_file = f"{output_dir}/matmul_analysis.csv"
+                self._safe_csv_output(df, csv_file)
+                print(f"Matmul分析CSV文件已生成: {csv_file}")
+        
+        # 生成折线图
+        if len(labels) >= 2:
+            self.generate_matmul_chart(json_data, labels, output_dir)
+        
+        print(f"=== Matmul分析完成，共处理 {len(matmul_data)} 个不同的min_dim ===")
+
+    def generate_matmul_chart(self, json_data: List[Dict], labels: List[str], output_dir: str) -> None:
+        """
+        生成matmul算子的折线图
+        
+        Args:
+            json_data: matmul分析数据
+            labels: 标签列表
+            output_dir: 输出目录
+        """
+        if len(labels) < 2:
+            return
+        
+        # 按min_dim分组数据
+        min_dim_data = defaultdict(list)
+        for item in json_data:
+            min_dim = item.get('mm_min_dim')
+            if min_dim is not None:
+                min_dim_data[min_dim].append(item)
+        
+        # 计算每个min_dim的平均比率
+        chart_data = {}
+        base_label = labels[0]
+        
+        for min_dim, items in min_dim_data.items():
+            chart_data[min_dim] = {}
+            for label in labels[1:]:
+                ratios = []
+                for item in items:
+                    ratio_key = f'{label}_ratio_to_{base_label}'
+                    if ratio_key in item and item[ratio_key] != float('inf'):
+                        ratios.append(item[ratio_key])
+                
+                if ratios:
+                    chart_data[min_dim][label] = sum(ratios) / len(ratios)
+        
+        # 生成图表
+        plt.figure(figsize=(12, 8))
+        
+        # 为每个标签绘制一条线
+        for label in labels[1:]:
+            x_values = []
+            y_values = []
+            
+            for min_dim in sorted(chart_data.keys()):
+                if label in chart_data[min_dim]:
+                    x_values.append(min_dim)
+                    y_values.append(chart_data[min_dim][label])
+            
+            if x_values and y_values:
+                plt.plot(x_values, y_values, marker='o', label=f'{label} ratio to {base_label}', linewidth=2, markersize=6)
+        
+        plt.xlabel('Matmul Min Dimension (m/k/n)', fontsize=12)
+        plt.ylabel(f'Performance Ratio ({base_label} = 1.0)', fontsize=12)
+        plt.title('Matmul Performance Analysis by Min Dimension', fontsize=14, fontweight='bold')
+        plt.legend(fontsize=10)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        
+        # 保存图表
+        chart_file = f"{output_dir}/matmul_performance_chart.jpg"
+        plt.savefig(chart_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Matmul性能图表已生成: {chart_file}")
+
+    def run_complete_analysis_with_matmul(self, file_labels: List[Tuple[str, str]], 
+                                        output_dir: str = ".", 
+                                        output_formats: List[str] = None) -> None:
+        """
+        运行包含matmul专门分析的完整分析流程
+        
+        Args:
+            file_labels: List of (file_path, label) tuples
+            output_dir: 输出目录
+            output_formats: 输出格式列表，支持 ['json', 'xlsx']
+        """
+        if output_formats is None:
+            output_formats = ['json', 'xlsx']
+        
+        print("=== 开始完整分析流程（包含matmul专门分析）===")
+        
+        # 分析多个文件
+        all_mappings = self.analyze_multiple_files(file_labels)
+        
+        if not all_mappings:
+            print("没有成功分析任何文件")
+            return
+        
+        # 为每个文件生成单独的分析
+        for label, mapping in all_mappings.items():
+            base_name = f"{label}_single_file_analysis"
+            
+            if 'json' in output_formats:
+                json_file = f"{output_dir}/{base_name}.json"
+                self.save_mapping_to_json(mapping, json_file)
+            
+            if 'xlsx' in output_formats:
+                xlsx_file = f"{output_dir}/{base_name}.xlsx"
+                self.generate_excel_from_mapping(mapping, xlsx_file)
+        
+        # 合并映射并生成比较分析
+        if len(all_mappings) > 1:
+            merged_mapping = self.merge_mappings(all_mappings)
+            base_name = "comparison_analysis"
+            
+            if 'json' in output_formats:
+                json_file = f"{output_dir}/{base_name}.json"
+                self.save_comparison_to_json(merged_mapping, json_file)
+                
+                # 读取比较分析数据用于matmul分析
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    comparison_data = json.load(f)
+                
+                # 生成matmul专门分析
+                self.generate_matmul_analysis(comparison_data, output_dir)
+            
+            if 'xlsx' in output_formats:
+                xlsx_file = f"{output_dir}/{base_name}.xlsx"
+                self.generate_comparison_excel(merged_mapping, xlsx_file)
+        
+        print("=== 分析流程完成 ===")

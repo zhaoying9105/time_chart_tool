@@ -7,7 +7,8 @@
 - 解析 PyTorch profiler 生成的 JSON 文件
 - 分析 cpu_op 和 kernel 的映射关系
 - 支持单个文件分析和多文件对比分析
-- 生成 JSON 和 XLSX 格式的分析报告
+- **专门分析matmul算子 (aten::mm)，按最小维度分组统计**
+- 生成 JSON、XLSX 格式的分析报告和性能图表
 - 命令行工具支持，便于批量处理
 
 ## 安装
@@ -68,6 +69,26 @@ python3 -m time_chart_tool.cli compare file1.json:fp32 file2.json:tf32 --output-
 python3 -m time_chart_tool.cli compare file1.json:fp32 file2.json:tf32 --output-dir ./comparison_results
 ```
 
+#### 专门分析matmul算子
+
+```bash
+# 基本用法 - 专门分析matmul算子并按最小维度分组
+python3 -m time_chart_tool.cli matmul file1.json:fp32 file2.json:bf16
+
+# 指定输出格式
+python3 -m time_chart_tool.cli matmul file1.json:fp32 file2.json:bf16 --output-format json,xlsx
+
+# 指定输出目录
+python3 -m time_chart_tool.cli matmul file1.json:fp32 file2.json:bf16 --output-dir ./matmul_results
+```
+
+**Matmul分析功能说明：**
+- 自动提取所有 `aten::mm` 算子
+- 解析输入维度格式 `((m, k), (k, n))` 并计算最小维度 `min_dim = min(m, k, n)`
+- 按 `min_dim` 分组统计性能数据
+- 生成性能对比折线图，横轴为 `min_dim`，纵轴为性能比率
+- 支持任意数量的标签（如 fp32, bf16, tf32 等）
+
 ### 编程接口
 
 ```python
@@ -89,6 +110,9 @@ file_labels = [
     ("file2.json", "tf32")
 ]
 analyzer.run_complete_analysis(file_labels, output_dir="./results")
+
+# 专门分析matmul算子
+analyzer.run_complete_analysis_with_matmul(file_labels, output_dir="./matmul_results")
 ```
 
 ## 输出文件说明
@@ -102,6 +126,12 @@ analyzer.run_complete_analysis(file_labels, output_dir="./results")
 
 - `comparison_analysis.json`: 包含所有文件的对比数据
 - `comparison_analysis.xlsx`: Excel 格式的对比报告
+
+### Matmul专门分析
+
+- `matmul_analysis.json`: matmul算子的专门分析数据，按最小维度分组
+- `matmul_analysis.xlsx`: matmul算子的Excel分析报告
+- `matmul_performance_chart.jpg`: matmul性能对比折线图
 
 ## 数据格式
 
@@ -154,6 +184,22 @@ analyzer.run_complete_analysis(file_labels, output_dir="./results")
 ]
 ```
 
+Matmul专门分析的 JSON 格式：
+```json
+[
+  {
+    "mm_min_dim": 3,
+    "fp32_input_types": "('float', 'float')",
+    "fp32_kernel_count": 15,
+    "fp32_kernel_mean_duration": 2.9066666666666667,
+    "op_bf16_input_types": "('c10::BFloat16', 'c10::BFloat16')",
+    "op_bf16_kernel_count": 15,
+    "op_bf16_kernel_mean_duration": 2.5893333333333333,
+    "op_bf16_ratio_to_fp32": 0.8908256880733945
+  }
+]
+```
+
 ### Excel 输出格式
 
 #### 单个文件分析
@@ -182,6 +228,14 @@ Excel 文件包含以下列：
 - kernel_count_equal: kernel执行次数是否相同
 - {label}_ratio_to_{base_label}: 相对于基准文件的性能比值
 
+#### Matmul专门分析
+Excel 文件包含以下列：
+- mm_min_dim: matmul算子的最小维度 (min(m, k, n))
+- {label}_input_types: 各文件的输入类型
+- {label}_kernel_count: 各文件的kernel执行次数
+- {label}_kernel_mean_duration: 各文件的平均执行时间
+- {label}_ratio_to_{base_label}: 相对于基准文件的性能比值
+
 ## 功能5.4特性
 
 ### 多文件对比分析增强功能
@@ -195,8 +249,18 @@ Excel 文件包含以下列：
    - kernel_count_equal: 比较不同time chart的kernel_count是否相同
 6. **性能比较**: 只计算mean duration的变化
 
+### Matmul算子专门分析功能
+
+1. **自动识别**: 自动提取所有 `aten::mm` 算子
+2. **维度解析**: 解析输入维度格式 `((m, k), (k, n))` 并验证 k1 == k2
+3. **最小维度计算**: 计算 `min_dim = min(m, k, n)` 作为分组依据
+4. **性能统计**: 按 `min_dim` 分组统计各标签的性能数据
+5. **可视化图表**: 生成性能对比折线图，横轴为 `min_dim`，纵轴为性能比率
+6. **灵活标签**: 支持任意数量的标签（如 fp32, bf16, tf32 等）
+
 ## 依赖要求
 
 - Python >= 3.7
 - pandas >= 1.3.0
 - openpyxl >= 3.0.0
+- matplotlib >= 3.5.0

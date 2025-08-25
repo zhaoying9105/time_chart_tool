@@ -1,6 +1,8 @@
 MANIFEST.in
 README.md
 analyze_performance_comparison.py
+demo_matmul_analysis.py
+example_matmul_analysis.py
 example_usage.py
 requirements.txt
 setup.py
@@ -19,6 +21,7 @@ src/time_chart_tool.egg-info/top_level.txt
 tests/test_analyzer.py
 tests/test_enhanced_search.py
 tests/test_fix_comparison.py
+tests/test_matmul_analysis.py
 tests/test_parser.py
 tests/test_real_id.py
 tests/test_specific_id.py
