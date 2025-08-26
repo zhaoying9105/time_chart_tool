@@ -32,6 +32,9 @@ def parse_arguments():
   # 专门分析matmul算子
   time-chart-tool matmul file1.json:fp32 file2.json:bf16 --output-format json,xlsx
   
+  # 基于call stack的比较分析
+  time-chart-tool callstack file1.json:fp32 file2.json:bf16 --output-format json,xlsx
+  
   # 只输出 JSON 格式
   time-chart-tool compare file1.json:fp32 file2.json:tf32 --output-format json
   
@@ -68,6 +71,15 @@ def parse_arguments():
                               choices=['json', 'xlsx', 'json,xlsx'],
                               help='输出格式 (默认: json,xlsx)')
     matmul_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
+    
+    # callstack 命令 - 基于call stack的比较分析
+    callstack_parser = subparsers.add_parser('callstack', help='基于call stack的比较分析')
+    callstack_parser.add_argument('files', nargs='+', 
+                                 help='文件列表，格式: file.json:label')
+    callstack_parser.add_argument('--output-format', default='json,xlsx',
+                                 choices=['json', 'xlsx', 'json,xlsx'],
+                                 help='输出格式 (默认: json,xlsx)')
+    callstack_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
     
     return parser.parse_args()
 
@@ -272,12 +284,76 @@ def run_matmul_analysis(args):
         return 1
 
 
+def run_callstack_analysis(args):
+    """运行基于call stack的比较分析"""
+    print(f"=== 基于Call Stack的比较分析 ===")
+    print(f"输出格式: {args.output_format}")
+    print(f"输出目录: {args.output_dir}")
+    print()
+    
+    # 解析文件列表
+    file_labels = []
+    for file_label in args.files:
+        file_path, label = parse_file_label(file_label)
+        if not validate_file(file_path):
+            return 1
+        file_labels.append((file_path, label))
+        print(f"  {label}: {file_path}")
+    
+    if len(file_labels) < 2:
+        print("错误: call stack分析需要至少2个文件进行对比")
+        return 1
+    
+    print(f"\n将分析 {len(file_labels)} 个文件的call stack")
+    print("分析内容:")
+    print("1. 构建python_function调用树")
+    print("2. 通过时间范围匹配cpu_op和python_function")
+    print("3. 生成python_function call stack")
+    print("4. 基于call stack进行性能对比分析")
+    
+    # 创建输出目录
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 创建分析器
+    analyzer = Analyzer()
+    
+    try:
+        start_time = time.time()
+        
+        # 运行基于call stack的分析
+        print("\n开始分析...")
+        analyzer.analyze_by_call_stack(
+            file_labels, 
+            output_dir=str(output_dir), 
+            output_formats=args.output_format.split(',')
+        )
+        
+        total_time = time.time() - start_time
+        print(f"\n分析完成，总耗时: {total_time:.2f} 秒")
+        
+        # 显示生成的文件
+        print("\n生成的文件:")
+        for file_path in output_dir.glob("*"):
+            if file_path.suffix in ['.json', '.xlsx']:
+                if 'call_stack' in file_path.name:
+                    print(f"  {file_path}")
+        
+        return 0
+        
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
 def main():
     """主函数"""
     args = parse_arguments()
     
     if not args.command:
-        print("错误: 请指定命令 (single, compare 或 matmul)")
+        print("错误: 请指定命令 (single, compare, matmul 或 callstack)")
         print("使用 --help 查看帮助信息")
         return 1
     
@@ -287,6 +363,8 @@ def main():
         return run_compare_analysis(args)
     elif args.command == 'matmul':
         return run_matmul_analysis(args)
+    elif args.command == 'callstack':
+        return run_callstack_analysis(args)
     else:
         print(f"错误: 未知命令: {args.command}")
         return 1

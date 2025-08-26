@@ -20,11 +20,14 @@ class ActivityEvent:
     args: Optional[Dict[str, Any]] = None
     id: Optional[str] = None
     stream_id: Optional[int] = None
+    call_stack: Optional[List[str]] = None
     
     def __post_init__(self):
         """初始化后处理"""
         if self.args is None:
             self.args = {}
+        if self.call_stack is None:
+            self.call_stack = []
         
         # 从 args 中提取 stream_id
         if self.stream_id is None and self.args:
@@ -54,6 +57,11 @@ class ActivityEvent:
     def python_id(self) -> Optional[Union[int, str]]:
         """获取 Python id"""
         return self.args.get('Python id', None) if self.args else None
+    
+    @property
+    def python_parent_id(self) -> Optional[Union[int, str]]:
+        """获取 Python parent id"""
+        return self.args.get('Python parent id', None) if self.args else None
     
     @property
     def is_kernel(self) -> bool:

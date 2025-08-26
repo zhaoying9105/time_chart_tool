@@ -8,6 +8,7 @@
 - 分析 cpu_op 和 kernel 的映射关系
 - 支持单个文件分析和多文件对比分析
 - **专门分析matmul算子 (aten::mm)，按最小维度分组统计**
+- **基于python_function call stack的比较分析**
 - 生成 JSON、XLSX 格式的分析报告和性能图表
 - 命令行工具支持，便于批量处理
 
@@ -90,6 +91,13 @@ python3 -m time_chart_tool.cli matmul file1.json:fp32 file2.json:bf16 --output-d
 - 生成性能对比折线图，横轴为 `min_dim`，纵轴为性能比率
 - 支持任意数量的标签（如 fp32, bf16, tf32 等）
 
+**Call Stack分析功能说明：**
+- 构建python_function调用树结构
+- 通过时间范围匹配cpu_op和python_function
+- 生成python_function调用栈，过滤无意义的函数名
+- 基于调用栈进行性能对比分析
+- 支持多个time chart文件的比较
+
 ### 编程接口
 
 ```python
@@ -114,6 +122,9 @@ analyzer.run_complete_analysis(file_labels, output_dir="./results")
 
 # 专门分析matmul算子
 analyzer.run_complete_analysis_with_matmul(file_labels, output_dir="./matmul_results")
+
+# 基于call stack的比较分析
+analyzer.analyze_by_call_stack(file_labels, output_dir="./callstack_results")
 ```
 
 ## 输出文件说明
@@ -133,6 +144,11 @@ analyzer.run_complete_analysis_with_matmul(file_labels, output_dir="./matmul_res
 - `matmul_analysis.json`: matmul算子的专门分析数据，按最小维度分组
 - `matmul_analysis.xlsx`: matmul算子的Excel分析报告
 - `matmul_performance_chart.jpg`: matmul性能对比折线图
+
+### Call Stack比较分析
+
+- `call_stack_comparison_analysis.json`: 基于call stack的比较分析数据
+- `call_stack_comparison_analysis.xlsx`: 基于call stack的Excel比较报告
 
 ## 数据格式
 
@@ -237,6 +253,20 @@ Excel 文件包含以下列：
 - {label}_kernel_mean_duration: 各文件的平均执行时间
 - {label}_ratio_to_{base_label}: 相对于基准文件的性能比值
 
+#### Call Stack比较分析
+Excel 文件包含以下列：
+- cpu_op_name: CPU操作名称
+- cpu_op_input_strides: 输入步长
+- cpu_op_input_dims: 输入维度
+- call_stack: Python函数调用栈（用 -> 连接）
+- {label}_input_types: 各文件的输入类型
+- {label}_kernel_names: 各文件的kernel名称
+- {label}_kernel_count: 各文件的kernel执行次数
+- {label}_kernel_mean_duration: 各文件的平均执行时间
+- kernel_names_equal: kernel名称是否相同
+- kernel_count_equal: kernel执行次数是否相同
+- {label}_ratio_to_{base_label}: 相对于基准文件的性能比值
+
 ## 功能5.4特性
 
 ### 多文件对比分析增强功能
@@ -259,6 +289,15 @@ Excel 文件包含以下列：
 5. **数据完整性检查**: 只对比在所有time chart中都存在的shape数据
 6. **可视化图表**: 生成性能对比折线图，横轴为 `min_dim`，纵轴为性能比率
 7. **灵活标签**: 支持任意数量的标签（如 fp32, bf16, tf32 等）
+
+### Call Stack比较分析功能
+
+1. **调用树构建**: 基于Python parent id和Python id构建python_function调用树
+2. **时间范围匹配**: 通过时间范围匹配cpu_op和python_function
+3. **调用栈生成**: 生成完整的python_function调用栈
+4. **函数名过滤**: 自动过滤无意义的函数名（如`<built-in method`、`torch/nn`等）
+5. **性能对比**: 基于调用栈进行多文件性能对比分析
+6. **聚合分析**: 按(call_stack + cpu_op信息)进行聚合比较
 
 ## 依赖要求
 
