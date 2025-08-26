@@ -239,8 +239,8 @@ class Analyzer:
         
         # 过滤掉无意义的函数名
         def is_meaningful_function(name: str) -> bool:
-            return True
-            return not (name.startswith('<built-in method') or name.startswith('torch/nn'))
+            # 过滤掉无意义的函数名
+            return not ('<built-in method' in name or 'object at' in name or name.startswith('torch/nn'))
         
         # 构建调用栈
         stack = []
@@ -751,7 +751,14 @@ class Analyzer:
         # 转换数据为可序列化的格式
         serializable_data = []
         
-        for (cpu_op_name, input_strides, input_dims), label_types_map in merged_mapping.items():
+        for key, label_types_map in merged_mapping.items():
+            # 处理包含call_stack的键
+            if len(key) == 4:
+                cpu_op_name, input_strides, input_dims, call_stack = key
+            else:
+                cpu_op_name, input_strides, input_dims = key
+                call_stack = []
+            
             # 收集所有标签
             labels = list(label_types_map.keys())
             
@@ -759,7 +766,8 @@ class Analyzer:
             row = {
                 'cpu_op_name': cpu_op_name,
                 'cpu_op_input_strides': str(input_strides),
-                'cpu_op_input_dims': str(input_dims)
+                'cpu_op_input_dims': str(input_dims),
+                'call_stack': ' -> '.join(call_stack) if call_stack else ''
             }
             
             # 为每个标签收集数据
@@ -989,6 +997,35 @@ class Analyzer:
                         row[f'{label}_kernel_count'] = entry[start_idx + 1]
                         row[f'{label}_kernel_mean_duration'] = entry[start_idx + 2]
                 
+                # 添加input shape和input strides信息
+                # 从comparison_data中找到对应的原始数据
+                for item in comparison_data:
+                    if item.get('cpu_op_name') == 'aten::mm':
+                        input_dims = item.get('cpu_op_input_dims', '')
+                        input_strides = item.get('cpu_op_input_strides', '')
+                        dimensions = self.extract_matmul_dimensions(input_dims)
+                        
+                        if dimensions:
+                            m, k, n = dimensions
+                            current_min_dim = min(m, k, n)
+                            
+                            if current_min_dim == min_dim:
+                                # 为每个标签添加input shape和input strides
+                                for label in labels:
+                                    # 检查这个标签是否有数据
+                                    has_data = False
+                                    for i, label_check in enumerate(labels):
+                                        if label_check == label:
+                                            start_idx = i * 3
+                                            if start_idx + 2 < len(entry):
+                                                has_data = True
+                                                break
+                                    
+                                    if has_data:
+                                        row[f'{label}_input_shape'] = input_dims
+                                        row[f'{label}_input_strides'] = input_strides
+                                break
+                
                 # 计算比率（如果有多个标签）
                 if len(labels) >= 2:
                     base_label = labels[0]
@@ -1037,7 +1074,11 @@ class Analyzer:
             labels: 标签列表
             output_dir: 输出目录
         """
+        print(f"开始生成matmul图表，标签数量: {len(labels)}")
+        print(f"JSON数据数量: {len(json_data)}")
+        
         if len(labels) < 2:
+            print("标签数量少于2，跳过图表生成")
             return
         
         # 按min_dim分组数据
@@ -1046,6 +1087,8 @@ class Analyzer:
             min_dim = item.get('mm_min_dim')
             if min_dim is not None:
                 min_dim_data[min_dim].append(item)
+        
+        print(f"找到 {len(min_dim_data)} 个不同的min_dim")
         
         # 计算每个min_dim的平均比率，只考虑在所有标签中都有数据的点
         chart_data = {}
@@ -1077,36 +1120,86 @@ class Analyzer:
                     if ratios:
                         chart_data[min_dim][label] = sum(ratios) / len(ratios)
         
-        # 生成图表
-        plt.figure(figsize=(12, 8))
+        print(f"在所有标签中都有数据的min_dim数量: {len(chart_data)}")
         
-        # 为每个标签绘制一条线
-        for label in labels[1:]:
-            x_values = []
-            y_values = []
+        if not chart_data:
+            print("没有找到在所有标签中都有数据的min_dim，跳过图表生成")
+            return
+        
+        try:
+            # 生成图表
+            plt.figure(figsize=(12, 8))
             
-            for min_dim in sorted(chart_data.keys()):
-                if label in chart_data[min_dim]:
-                    x_values.append(min_dim)
-                    y_values.append(chart_data[min_dim][label])
+            # 为每个标签绘制一条线
+            for label in labels[1:]:
+                x_values = []
+                y_values = []
+                
+                for min_dim in sorted(chart_data.keys()):
+                    if label in chart_data[min_dim]:
+                        x_values.append(min_dim)
+                        y_values.append(chart_data[min_dim][label])
+                
+                if x_values and y_values:
+                    plt.plot(x_values, y_values, marker='o', label=f'{label} ratio to {base_label}', linewidth=2, markersize=6)
             
-            if x_values and y_values:
-                plt.plot(x_values, y_values, marker='o', label=f'{label} ratio to {base_label}', linewidth=2, markersize=6)
-        
-        plt.xlabel('Matmul Min Dimension (m/k/n)', fontsize=12)
-        plt.ylabel(f'Performance Ratio ({base_label} = 1.0)', fontsize=12)
-        plt.title('Matmul Performance Analysis by Min Dimension\n(Only shapes present in all time charts)', fontsize=14, fontweight='bold')
-        plt.legend(fontsize=10)
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        
-        # 保存图表
-        chart_file = f"{output_dir}/matmul_performance_chart.jpg"
-        plt.savefig(chart_file, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"Matmul性能图表已生成: {chart_file}")
-        print(f"图表包含 {len(chart_data)} 个在所有标签中都有数据的min_dim点")
+            plt.xlabel('Matmul Min Dimension (m/k/n)', fontsize=12)
+            plt.ylabel(f'Performance Ratio ({base_label} = 1.0)', fontsize=12)
+            plt.title('Matmul Performance Analysis by Min Dimension\n(Only shapes present in all time charts)', fontsize=14, fontweight='bold')
+            plt.legend(fontsize=10)
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            
+            # 保存图表
+            chart_file = f"{output_dir}/matmul_performance_chart.jpg"
+            plt.savefig(chart_file, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print(f"Matmul性能图表已生成: {chart_file}")
+            print(f"图表包含 {len(chart_data)} 个在所有标签中都有数据的min_dim点")
+        except Exception as e:
+            print(f"生成图表时出错: {e}")
+            print("尝试使用Agg后端...")
+            try:
+                # 重新设置matplotlib后端
+                import matplotlib
+                matplotlib.use('Agg')
+                # 重新导入plt
+                import matplotlib.pyplot as plt_new
+                
+                # 重新生成图表
+                plt_new.figure(figsize=(12, 8))
+                
+                # 为每个标签绘制一条线
+                for label in labels[1:]:
+                    x_values = []
+                    y_values = []
+                    
+                    for min_dim in sorted(chart_data.keys()):
+                        if label in chart_data[min_dim]:
+                            x_values.append(min_dim)
+                            y_values.append(chart_data[min_dim][label])
+                    
+                    if x_values and y_values:
+                        plt_new.plot(x_values, y_values, marker='o', label=f'{label} ratio to {base_label}', linewidth=2, markersize=6)
+                
+                plt_new.xlabel('Matmul Min Dimension (m/k/n)', fontsize=12)
+                plt_new.ylabel(f'Performance Ratio ({base_label} = 1.0)', fontsize=12)
+                plt_new.title('Matmul Performance Analysis by Min Dimension\n(Only shapes present in all time charts)', fontsize=14, fontweight='bold')
+                plt_new.legend(fontsize=10)
+                plt_new.grid(True, alpha=0.3)
+                plt_new.tight_layout()
+                
+                # 保存图表
+                chart_file = f"{output_dir}/matmul_performance_chart.jpg"
+                plt_new.savefig(chart_file, dpi=300, bbox_inches='tight')
+                plt_new.close()
+                
+                print(f"Matmul性能图表已生成: {chart_file}")
+                print(f"图表包含 {len(chart_data)} 个在所有标签中都有数据的min_dim点")
+            except Exception as e2:
+                print(f"使用Agg后端仍然失败: {e2}")
+                print("无法生成matmul性能图表")
 
     def run_complete_analysis_with_matmul(self, file_labels: List[Tuple[str, str]], 
                                         output_dir: str = ".", 
@@ -1171,6 +1264,8 @@ class Analyzer:
         """
         基于call stack的比较分析功能
         
+        专注于比较不同time chart中相同call stack的cpu_op对应的input type是否一致
+        
         Args:
             file_labels: List of (file_path, label) tuples
             output_dir: 输出目录
@@ -1188,114 +1283,158 @@ class Analyzer:
             print("没有成功分析任何文件")
             return
         
-        # 合并映射（包含call stack信息）
-        if len(all_mappings) > 1:
-            merged_mapping = self.merge_mappings(all_mappings)
-            
-            # 生成基于call stack的比较分析
-            self.generate_call_stack_comparison(merged_mapping, file_labels, output_dir, output_formats)
+        # 生成基于call stack的比较分析
+        self.generate_call_stack_comparison(all_mappings, file_labels, output_dir, output_formats)
         
         print("=== 基于call stack的分析完成 ===")
 
-    def generate_call_stack_comparison(self, merged_mapping: Dict, 
+    def generate_call_stack_comparison(self, all_mappings: Dict[str, Dict], 
                                      file_labels: List[Tuple[str, str]], 
                                      output_dir: str, 
                                      output_formats: List[str]) -> None:
         """
         生成基于call stack的比较分析
         
+        专注于比较相同call stack的cpu_op的input type一致性
+        
         Args:
-            merged_mapping: 合并的映射数据
+            all_mappings: 所有文件的映射数据 {label: mapping}
             file_labels: 文件标签列表
             output_dir: 输出目录
             output_formats: 输出格式
         """
         print("正在生成基于call stack的比较分析...")
         
+        # 收集所有call stack信息
+        call_stack_data = {}  # {call_stack_key: {label: [cpu_op_info]}}
+        
+        for label, mapping in all_mappings.items():
+            # 遍历嵌套的mapping结构
+            for cpu_op_name, strides_map in mapping.items():
+                for input_strides, dims_map in strides_map.items():
+                    for input_dims, types_map in dims_map.items():
+                        for input_type, kernel_events in types_map.items():
+                            # 获取第一个kernel_event的call_stack（所有kernel_event应该有相同的call_stack）
+                            if kernel_events:
+                                call_stack = kernel_events[0].call_stack or []
+                                call_stack_key = ' -> '.join(call_stack) if call_stack else 'NO_CALL_STACK'
+                                
+                                # 收集cpu_op信息
+                                cpu_op_info = {
+                                    'cpu_op_name': cpu_op_name,
+                                    'input_strides': input_strides,
+                                    'input_dims': input_dims,
+                                    'input_type': input_type,
+                                    'pid': kernel_events[0].pid,
+                                    'tid': kernel_events[0].tid,
+                                    'kernel_count': len(kernel_events)
+                                }
+                                
+                                if call_stack_key not in call_stack_data:
+                                    call_stack_data[call_stack_key] = {}
+                                
+                                if label not in call_stack_data[call_stack_key]:
+                                    call_stack_data[call_stack_key][label] = []
+                                
+                                call_stack_data[call_stack_key][label].append(cpu_op_info)
+        
+        # 生成比较分析数据
         rows = []
         labels = [label for _, label in file_labels]
         
-        for (cpu_op_name, input_strides, input_dims, call_stack), label_types_map in merged_mapping.items():
+        for call_stack_key, label_data in call_stack_data.items():
+            # 按pid, tid排序（先排pid，再排tid）
+            sorted_labels = sorted(labels, key=lambda label: (
+                label_data.get(label, [{}])[0].get('pid', 0) if label_data.get(label) else 0,
+                label_data.get(label, [{}])[0].get('tid', 0) if label_data.get(label) else 0
+            ))
+            
+            # 使用第一个标签作为base
+            base_label = sorted_labels[0] if sorted_labels else labels[0]
+            
             # 基础行数据
             row = {
-                'cpu_op_name': cpu_op_name,
-                'cpu_op_input_strides': str(input_strides),
-                'cpu_op_input_dims': str(input_dims),
-                'call_stack': ' -> '.join(call_stack) if call_stack else ''
+                'call_stack': call_stack_key,
+                'base_label': base_label
             }
             
             # 为每个标签收集数据
             for label in labels:
-                if label in label_types_map:
-                    types_map = label_types_map[label]
+                if label in label_data:
+                    cpu_op_infos = label_data[label]
                     
-                    # 收集所有input_type和kernel信息
+                    # 收集所有cpu_op信息
+                    cpu_op_names = []
                     input_types = []
-                    kernel_names = []
-                    kernel_stats_list = []
+                    pids = []
+                    tids = []
+                    kernel_counts = []
                     
-                    for input_type, kernel_events in types_map.items():
-                        input_types.append(str(input_type))
-                        kernel_stats = self.calculate_kernel_statistics(kernel_events)
-                        
-                        for stats in kernel_stats:
-                            kernel_names.append(stats.kernel_name)
-                            kernel_stats_list.append(stats)
+                    for cpu_op_info in cpu_op_infos:
+                        cpu_op_names.append(str(cpu_op_info['cpu_op_name']))
+                        input_types.append(str(cpu_op_info['input_type']))
+                        pids.append(str(cpu_op_info['pid']))
+                        tids.append(str(cpu_op_info['tid']))
+                        kernel_counts.append(str(cpu_op_info['kernel_count']))
                     
                     # 用||连接多个值
+                    row[f'{label}_cpu_op_names'] = '||'.join(cpu_op_names) if cpu_op_names else ''
                     row[f'{label}_input_types'] = '||'.join(input_types) if input_types else ''
-                    row[f'{label}_kernel_names'] = '||'.join(kernel_names) if kernel_names else ''
-                    
-                    # 计算kernel统计信息
-                    if kernel_stats_list:
-                        # 计算所有kernel的总调用次数和加权平均duration
-                        total_count = sum(stats.count for stats in kernel_stats_list)
-                        weighted_mean = sum(stats.mean_duration * stats.count for stats in kernel_stats_list) / total_count if total_count > 0 else 0.0
-                        
-                        row[f'{label}_kernel_count'] = total_count
-                        row[f'{label}_kernel_mean_duration'] = weighted_mean
-                    else:
-                        row[f'{label}_kernel_count'] = 0
-                        row[f'{label}_kernel_mean_duration'] = 0.0
+                    row[f'{label}_pids'] = '||'.join(pids) if pids else ''
+                    row[f'{label}_tids'] = '||'.join(tids) if tids else ''
+                    row[f'{label}_kernel_counts'] = '||'.join(kernel_counts) if kernel_counts else ''
                 else:
                     # 如果某个标签没有数据，设置默认值
+                    row[f'{label}_cpu_op_names'] = ''
                     row[f'{label}_input_types'] = ''
-                    row[f'{label}_kernel_names'] = ''
-                    row[f'{label}_kernel_count'] = 0
-                    row[f'{label}_kernel_mean_duration'] = 0.0
+                    row[f'{label}_pids'] = ''
+                    row[f'{label}_tids'] = ''
+                    row[f'{label}_kernel_counts'] = ''
             
-            # 计算相对变化和比较信息（如果有多个标签）
+            # 计算比较信息（如果有多个标签）
             if len(labels) >= 2:
-                base_label = labels[0]
-                base_mean = row.get(f'{base_label}_kernel_mean_duration', 0.0)
-                
-                # 收集所有kernel_names和kernel_count进行比较
-                all_kernel_names = []
-                all_kernel_counts = []
-                
+                # 检查input_types是否一致
+                all_input_types = []
                 for label in labels:
-                    all_kernel_names.append(set(row.get(f'{label}_kernel_names', '').split('||') if row.get(f'{label}_kernel_names') else []))
-                    all_kernel_counts.append(row.get(f'{label}_kernel_count', 0))
-                
-                # 检查kernel_names是否相等（不考虑顺序）
-                kernel_names_equal = len(set(frozenset(names) for names in all_kernel_names)) == 1
-                row['kernel_names_equal'] = kernel_names_equal
-                
-                # 检查kernel_count是否相等
-                kernel_count_equal = len(set(all_kernel_counts)) == 1
-                row['kernel_count_equal'] = kernel_count_equal
-                
-                for label in labels[1:]:
-                    current_mean = row.get(f'{label}_kernel_mean_duration', 0.0)
-                    if base_mean > 0:
-                        ratio = current_mean / base_mean
-                        row[f'{label}_ratio_to_{base_label}'] = ratio
+                    input_types_str = row.get(f'{label}_input_types', '')
+                    if input_types_str:
+                        all_input_types.append(set(input_types_str.split('||')))
                     else:
-                        row[f'{label}_ratio_to_{base_label}'] = float('inf') if current_mean > 0 else 1.0
+                        all_input_types.append(set())
+                
+                # 检查input_types是否相等（不考虑顺序）
+                input_types_equal = len(set(frozenset(types) for types in all_input_types)) == 1
+                row['input_types_equal'] = input_types_equal
+                
+                # 检查cpu_op_names是否一致
+                all_cpu_op_names = []
+                for label in labels:
+                    cpu_op_names_str = row.get(f'{label}_cpu_op_names', '')
+                    if cpu_op_names_str:
+                        all_cpu_op_names.append(set(cpu_op_names_str.split('||')))
+                    else:
+                        all_cpu_op_names.append(set())
+                
+                # 检查cpu_op_names是否相等（不考虑顺序）
+                cpu_op_names_equal = len(set(frozenset(names) for names in all_cpu_op_names)) == 1
+                row['cpu_op_names_equal'] = cpu_op_names_equal
+                
+                # 标记不一致的标签
+                inconsistent_labels = []
+                for label in labels:
+                    if label != base_label:
+                        label_input_types = set(row.get(f'{label}_input_types', '').split('||') if row.get(f'{label}_input_types') else [])
+                        base_input_types = set(row.get(f'{base_label}_input_types', '').split('||') if row.get(f'{base_label}_input_types') else [])
+                        
+                        if label_input_types != base_input_types:
+                            inconsistent_labels.append(label)
+                
+                row['inconsistent_labels'] = '||'.join(inconsistent_labels) if inconsistent_labels else ''
             else:
                 # 只有一个标签时，设置默认值
-                row['kernel_names_equal'] = True
-                row['kernel_count_equal'] = True
+                row['input_types_equal'] = ""
+                row['cpu_op_names_equal'] = ""
+                row['inconsistent_labels'] = ''
             
             rows.append(row)
         
@@ -1319,6 +1458,13 @@ class Analyzer:
                     self._safe_csv_output(df, csv_file)
                     print(f"基于call stack的比较分析CSV文件已生成: {csv_file}")
             
-            print(f"基于call stack的比较分析完成，共处理 {len(rows)} 条记录")
+            # 打印统计信息
+            total_call_stacks = len(rows)
+            consistent_call_stacks = sum(1 for row in rows if row.get('input_types_equal', True))
+            inconsistent_call_stacks = total_call_stacks - consistent_call_stacks
+            
+            print(f"基于call stack的比较分析完成，共处理 {total_call_stacks} 个call stack")
+            print(f"其中 {consistent_call_stacks} 个call stack的input types一致")
+            print(f"其中 {inconsistent_call_stacks} 个call stack的input types不一致")
         else:
             print("没有数据可以生成基于call stack的比较分析文件")
