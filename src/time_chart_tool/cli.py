@@ -139,6 +139,10 @@ def run_single_analysis(args):
         mapping = analyzer.analyze_cpu_op_kernel_mapping(data)
         print(f"找到 {len(mapping)} 个 cpu_op 的映射关系")
         
+        # 生成cpu_op性能统计摘要
+        print("正在生成cpu_op性能统计摘要...")
+        analyzer.generate_cpu_op_performance_summary(data, str(output_dir))
+        
         # 生成输出文件
         base_name = f"{args.label}_single_file_analysis"
         

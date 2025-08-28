@@ -242,6 +242,79 @@ class TestMatmulAnalysis:
         # 检查min_dim=32的数据（不完整，应该被过滤）
         assert 32 not in matmul_data
 
+    def test_generate_matmul_analysis_with_shape_strides(self):
+        """测试matmul分析功能，包含input shape和input strides列"""
+        import tempfile
+        import os
+        
+        # 创建测试数据
+        comparison_data = [
+            {
+                'cpu_op_name': 'aten::mm',
+                'cpu_op_input_dims': '((2048, 3), (3, 32))',
+                'cpu_op_input_strides': '((3, 1), (1, 3))',
+                'fp32_input_types': "('float', 'float')",
+                'fp32_kernel_count': 15,
+                'fp32_kernel_mean_duration': 2.9,
+                'op_bf16_input_types': "('c10::BFloat16', 'c10::BFloat16')",
+                'op_bf16_kernel_count': 15,
+                'op_bf16_kernel_mean_duration': 2.6,
+                'op_bf16_ratio_to_fp32': 0.89
+            },
+            {
+                'cpu_op_name': 'aten::mm',
+                'cpu_op_input_dims': '((1024, 5), (5, 64))',
+                'cpu_op_input_strides': '((5, 1), (1, 5))',
+                'fp32_input_types': "('float', 'float')",
+                'fp32_kernel_count': 20,
+                'fp32_kernel_mean_duration': 3.2,
+                'op_bf16_input_types': "('c10::BFloat16', 'c10::BFloat16')",
+                'op_bf16_kernel_count': 20,
+                'op_bf16_kernel_mean_duration': 2.8,
+                'op_bf16_ratio_to_fp32': 0.88
+            }
+        ]
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # 运行matmul分析
+            self.analyzer.generate_matmul_analysis(comparison_data, temp_dir)
+            
+            # 验证输出文件
+            xlsx_file = os.path.join(temp_dir, "matmul_analysis.xlsx")
+            assert os.path.exists(xlsx_file), "Excel文件应该存在"
+            
+            # 读取Excel文件并验证列
+            import pandas as pd
+            df = pd.read_excel(xlsx_file)
+            
+            # 验证基本列存在
+            assert 'mm_min_dim' in df.columns, "应该包含mm_min_dim列"
+            assert 'fp32_input_types' in df.columns, "应该包含fp32_input_types列"
+            assert 'op_bf16_input_types' in df.columns, "应该包含op_bf16_input_types列"
+            
+            # 验证新的input shape和input strides列
+            assert 'fp32_input_shape' in df.columns, "应该包含fp32_input_shape列"
+            assert 'fp32_input_strides' in df.columns, "应该包含fp32_input_strides列"
+            assert 'op_bf16_input_shape' in df.columns, "应该包含op_bf16_input_shape列"
+            assert 'op_bf16_input_strides' in df.columns, "应该包含op_bf16_input_strides列"
+            
+            # 验证数据内容
+            assert len(df) == 2, "应该有2行数据"
+            
+            # 验证第一行数据（min_dim=3）
+            row1 = df.iloc[0]
+            assert row1['mm_min_dim'] == 3, "第一行的min_dim应该是3"
+            assert "('float', 'float')" in str(row1['fp32_input_types']), "fp32_input_types应该包含float"
+            assert "('c10::BFloat16', 'c10::BFloat16')" in str(row1['op_bf16_input_types']), "op_bf16_input_types应该包含BFloat16"
+            assert "((2048, 3), (3, 32))" in str(row1['fp32_input_shape']), "fp32_input_shape应该正确"
+            assert "((3, 1), (1, 3))" in str(row1['fp32_input_strides']), "fp32_input_strides应该正确"
+            
+            # 验证第二行数据（min_dim=5）
+            row2 = df.iloc[1]
+            assert row2['mm_min_dim'] == 5, "第二行的min_dim应该是5"
+            assert "((1024, 5), (5, 64))" in str(row2['fp32_input_shape']), "第二行的input_shape应该正确"
+            assert "((5, 1), (1, 5))" in str(row2['fp32_input_strides']), "第二行的input_strides应该正确"
+
 
 if __name__ == "__main__":
     pytest.main([__file__])

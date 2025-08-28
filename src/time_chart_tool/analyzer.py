@@ -1468,3 +1468,122 @@ class Analyzer:
             print(f"其中 {inconsistent_call_stacks} 个call stack的input types不一致")
         else:
             print("没有数据可以生成基于call stack的比较分析文件")
+
+    def generate_cpu_op_performance_summary(self, data: 'ProfilerData', output_dir: str = ".") -> None:
+        """
+        生成cpu_op性能统计摘要（基于对应的kernel事件耗时）
+        
+        Args:
+            data: 分析的数据
+            output_dir: 输出目录
+        """
+        print("=== 开始生成cpu_op性能统计摘要（基于kernel耗时） ===")
+        
+        # 首先获取cpu_op和kernel的映射关系
+        mapping = self.analyze_cpu_op_kernel_mapping(data)
+        
+        # 统计每种cpu_op对应的kernel性能数据
+        cpu_op_stats = {}
+        total_kernel_duration = 0.0
+        
+        # 遍历映射数据，统计每种cpu_op对应的kernel耗时
+        for cpu_op_name, strides_map in mapping.items():
+            if cpu_op_name not in cpu_op_stats:
+                cpu_op_stats[cpu_op_name] = {
+                    'call_count': 0,
+                    'total_kernel_duration': 0.0,
+                    'min_kernel_duration': float('inf'),
+                    'max_kernel_duration': 0.0,
+                    'kernel_count': 0
+                }
+            
+            stats = cpu_op_stats[cpu_op_name]
+            
+            # 遍历该cpu_op的所有配置
+            for strides, dims_map in strides_map.items():
+                for dims, types_map in dims_map.items():
+                    for input_type, kernel_events in types_map.items():
+                        # 统计该配置下的kernel事件
+                        for kernel_event in kernel_events:
+                            if kernel_event.dur is not None:
+                                stats['call_count'] += 1
+                                stats['total_kernel_duration'] += kernel_event.dur
+                                stats['min_kernel_duration'] = min(stats['min_kernel_duration'], kernel_event.dur)
+                                stats['max_kernel_duration'] = max(stats['max_kernel_duration'], kernel_event.dur)
+                                stats['kernel_count'] += 1
+                                total_kernel_duration += kernel_event.dur
+        
+        if not cpu_op_stats:
+            print("没有找到cpu_op对应的kernel事件")
+            return
+        
+        # 计算平均耗时和比例
+        summary_data = []
+        for cpu_op_name, stats in cpu_op_stats.items():
+            if stats['call_count'] > 0:
+                avg_duration = stats['total_kernel_duration'] / stats['call_count']
+                percentage = (stats['total_kernel_duration'] / total_kernel_duration * 100) if total_kernel_duration > 0 else 0.0
+                
+                summary_data.append({
+                    'cpu_op_name': cpu_op_name,
+                    'call_count': stats['call_count'],
+                    'total_kernel_duration': stats['total_kernel_duration'],
+                    'avg_kernel_duration': avg_duration,
+                    'min_kernel_duration': stats['min_kernel_duration'] if stats['min_kernel_duration'] != float('inf') else 0.0,
+                    'max_kernel_duration': stats['max_kernel_duration'],
+                    'kernel_count': stats['kernel_count'],
+                    'percentage_of_total': percentage
+                })
+        
+        # 按总kernel耗时降序排序
+        summary_data.sort(key=lambda x: x['total_kernel_duration'], reverse=True)
+        
+        # 添加总计行
+        if summary_data:
+            summary_data.append({
+                'cpu_op_name': 'TOTAL',
+                'call_count': sum(item['call_count'] for item in summary_data),
+                'total_kernel_duration': total_kernel_duration,
+                'avg_kernel_duration': total_kernel_duration / sum(item['call_count'] for item in summary_data) if sum(item['call_count'] for item in summary_data) > 0 else 0.0,
+                'min_kernel_duration': 0.0,
+                'max_kernel_duration': 0.0,
+                'kernel_count': sum(item['kernel_count'] for item in summary_data),
+                'percentage_of_total': 100.0
+            })
+        
+        # 生成Excel文件
+        import pandas as pd
+        df = pd.DataFrame(summary_data)
+        xlsx_file = f"{output_dir}/cpu_op_performance_summary.xlsx"
+        
+        try:
+            df.to_excel(xlsx_file, index=False)
+            print(f"CPU Op性能统计Excel文件已生成: {xlsx_file}")
+        except ImportError:
+            csv_file = f"{output_dir}/cpu_op_performance_summary.csv"
+            self._safe_csv_output(df, csv_file)
+            print(f"CPU Op性能统计CSV文件已生成: {csv_file}")
+        
+        # 生成JSON文件
+        json_file = f"{output_dir}/cpu_op_performance_summary.json"
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(summary_data, f, indent=2, ensure_ascii=False)
+        print(f"CPU Op性能统计JSON文件已生成: {json_file}")
+        
+        # 打印统计信息
+        print(f"\n=== CPU Op性能统计摘要（基于kernel耗时） ===")
+        print(f"总共发现 {len(cpu_op_stats)} 种不同的cpu_op")
+        print(f"总kernel调用次数: {sum(item['call_count'] for item in summary_data[:-1]) if summary_data else 0}")
+        print(f"总kernel耗时: {total_kernel_duration:.2f} 微秒")
+        print(f"\n前5个最耗时的cpu_op（基于kernel耗时）:")
+        
+        for i, item in enumerate(summary_data[:5]):
+            if item['cpu_op_name'] != 'TOTAL':
+                print(f"  {i+1}. {item['cpu_op_name']}")
+                print(f"     kernel调用次数: {item['call_count']}")
+                print(f"     总kernel耗时: {item['total_kernel_duration']:.2f} 微秒")
+                print(f"     平均kernel耗时: {item['avg_kernel_duration']:.2f} 微秒")
+                print(f"     占总kernel耗时比例: {item['percentage_of_total']:.2f}%")
+                print()
+        
+        print(f"=== CPU Op性能统计完成 ===")
