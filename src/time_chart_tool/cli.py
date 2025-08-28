@@ -141,7 +141,7 @@ def run_single_analysis(args):
         
         # 生成cpu_op性能统计摘要
         print("正在生成cpu_op性能统计摘要...")
-        analyzer.generate_cpu_op_performance_summary(data, str(output_dir))
+        analyzer.generate_cpu_op_performance_summary(data, str(output_dir), args.label)
         
         # 生成输出文件
         base_name = f"{args.label}_single_file_analysis"

@@ -1469,13 +1469,14 @@ class Analyzer:
         else:
             print("没有数据可以生成基于call stack的比较分析文件")
 
-    def generate_cpu_op_performance_summary(self, data: 'ProfilerData', output_dir: str = ".") -> None:
+    def generate_cpu_op_performance_summary(self, data: 'ProfilerData', output_dir: str = ".", label: str = "") -> None:
         """
         生成cpu_op性能统计摘要（基于对应的kernel事件耗时）
         
         Args:
             data: 分析的数据
             output_dir: 输出目录
+            label: 文件标签，用于生成带前缀的输出文件名
         """
         print("=== 开始生成cpu_op性能统计摘要（基于kernel耗时） ===")
         
@@ -1554,18 +1555,21 @@ class Analyzer:
         # 生成Excel文件
         import pandas as pd
         df = pd.DataFrame(summary_data)
-        xlsx_file = f"{output_dir}/cpu_op_performance_summary.xlsx"
+        
+        # 使用label前缀生成文件名
+        base_name = f"{label}_cpu_op_performance_summary" if label else "cpu_op_performance_summary"
+        xlsx_file = f"{output_dir}/{base_name}.xlsx"
         
         try:
             df.to_excel(xlsx_file, index=False)
             print(f"CPU Op性能统计Excel文件已生成: {xlsx_file}")
         except ImportError:
-            csv_file = f"{output_dir}/cpu_op_performance_summary.csv"
+            csv_file = f"{output_dir}/{base_name}.csv"
             self._safe_csv_output(df, csv_file)
             print(f"CPU Op性能统计CSV文件已生成: {csv_file}")
         
         # 生成JSON文件
-        json_file = f"{output_dir}/cpu_op_performance_summary.json"
+        json_file = f"{output_dir}/{base_name}.json"
         with open(json_file, 'w', encoding='utf-8') as f:
             json.dump(summary_data, f, indent=2, ensure_ascii=False)
         print(f"CPU Op性能统计JSON文件已生成: {json_file}")
@@ -1575,6 +1579,10 @@ class Analyzer:
         print(f"总共发现 {len(cpu_op_stats)} 种不同的cpu_op")
         print(f"总kernel调用次数: {sum(item['call_count'] for item in summary_data[:-1]) if summary_data else 0}")
         print(f"总kernel耗时: {total_kernel_duration:.2f} 微秒")
+        
+        # 打印markdown表格形式的summary结果
+        self._print_cpu_op_summary_markdown_table(summary_data)
+        
         print(f"\n前5个最耗时的cpu_op（基于kernel耗时）:")
         
         for i, item in enumerate(summary_data[:5]):
@@ -1587,3 +1595,41 @@ class Analyzer:
                 print()
         
         print(f"=== CPU Op性能统计完成 ===")
+
+    def _print_cpu_op_summary_markdown_table(self, summary_data: List[Dict]) -> None:
+        """
+        以markdown表格形式打印cpu_op性能统计摘要
+        
+        Args:
+            summary_data: 统计摘要数据列表
+        """
+        if not summary_data:
+            print("没有数据可显示")
+            return
+        
+        print(f"\n## CPU Op性能统计摘要表格")
+        print()
+        
+        # 打印表头
+        print("| CPU Op名称 | 调用次数 | 总耗时(μs) | 平均耗时(μs) | 最小耗时(μs) | 最大耗时(μs) | Kernel数量 | 占比(%) |")
+        print("|------------|----------|------------|--------------|--------------|--------------|------------|---------|")
+        
+        # 打印数据行
+        for item in summary_data:
+            cpu_op_name = item['cpu_op_name']
+            call_count = item['call_count']
+            total_duration = item['total_kernel_duration']
+            avg_duration = item['avg_kernel_duration']
+            min_duration = item['min_kernel_duration']
+            max_duration = item['max_kernel_duration']
+            kernel_count = item['kernel_count']
+            percentage = item['percentage_of_total']
+            
+            # 格式化数值
+            if cpu_op_name == 'TOTAL':
+                # 总计行使用粗体
+                print(f"| **{cpu_op_name}** | **{call_count}** | **{total_duration:.2f}** | **{avg_duration:.2f}** | **{min_duration:.2f}** | **{max_duration:.2f}** | **{kernel_count}** | **{percentage:.2f}** |")
+            else:
+                print(f"| {cpu_op_name} | {call_count} | {total_duration:.2f} | {avg_duration:.2f} | {min_duration:.2f} | {max_duration:.2f} | {kernel_count} | {percentage:.2f} |")
+        
+        print()
