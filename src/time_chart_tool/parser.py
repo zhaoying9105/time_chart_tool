@@ -7,17 +7,88 @@ import gzip
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple, Union
 import logging
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
 
 from .models import ActivityEvent, ProfilerData
 
 logger = logging.getLogger(__name__)
 
 
+def _parse_event_worker(event_data: Dict[str, Any]) -> Optional[ActivityEvent]:
+    """
+    多进程工作函数：解析单个事件
+    
+    Args:
+        event_data: 事件数据字典
+        
+    Returns:
+        ActivityEvent: 解析后的事件对象，如果解析失败返回 None
+    """
+    try:
+        # 提取必需字段
+        name = event_data.get('name', '')
+        cat = event_data.get('cat', '')
+        ph = event_data.get('ph', '')
+        pid = event_data.get('pid', 0)
+        tid = event_data.get('tid', 0)
+        ts = event_data.get('ts', 0.0)
+        
+        # 提取可选字段
+        dur = event_data.get('dur')
+        args = event_data.get('args', {})
+        event_id = event_data.get('id')
+        stream_id = event_data.get('stream')
+        
+        # 创建事件对象
+        event = ActivityEvent(
+            name=name,
+            cat=cat,
+            ph=ph,
+            pid=pid,
+            tid=tid,
+            ts=ts,
+            dur=dur,
+            args=args,
+            id=event_id,
+            stream_id=stream_id
+        )
+        
+        return event
+        
+    except Exception as e:
+        logger.warning(f"解析事件失败: {e}")
+        return None
+
+
+def _parse_event_chunk_worker(chunk_data: List[Dict[str, Any]]) -> List[Optional[ActivityEvent]]:
+    """
+    多进程工作函数：解析事件块
+    
+    Args:
+        chunk_data: 事件数据块
+        
+    Returns:
+        List[Optional[ActivityEvent]]: 解析后的事件列表，失败的事件为 None
+    """
+    chunk_events = []
+    for event_data in chunk_data:
+        try:
+            event = _parse_event_worker(event_data)
+            chunk_events.append(event)
+        except Exception as e:
+            logger.warning(f"解析事件失败: {e}, 事件数据: {event_data}")
+            chunk_events.append(None)
+    return chunk_events
+
+
 class PyTorchProfilerParser:
     """PyTorch Profiler JSON 解析器"""
     
-    def __init__(self):
+    def __init__(self, max_workers: int = None):
         self.data: Optional[ProfilerData] = None
+        # 多进程并行，使用CPU核心数
+        self.max_workers = max_workers or mp.cpu_count()
     
     def load_json_file(self, file_path: Union[str, Path]) -> ProfilerData:
         """
@@ -71,16 +142,8 @@ class PyTorchProfilerParser:
         # 提取 traceEvents
         trace_events = data.get('traceEvents', [])
         
-        # 解析事件
-        events = []
-        for event_data in trace_events:
-            try:
-                event = self._parse_event(event_data)
-                if event:
-                    events.append(event)
-            except Exception as e:
-                logger.warning(f"解析事件失败: {e}, 事件数据: {event_data}")
-                continue
+        # 并行解析事件
+        events = self._parse_events_parallel(trace_events)
         
         return ProfilerData(
             metadata=metadata,
@@ -88,9 +151,81 @@ class PyTorchProfilerParser:
             trace_events=trace_events
         )
     
+    def _parse_events_parallel(self, trace_events: List[Dict[str, Any]]) -> List[ActivityEvent]:
+        """
+        并行解析事件列表
+        
+        Args:
+            trace_events: 原始事件数据列表
+            
+        Returns:
+            List[ActivityEvent]: 解析后的事件列表，保持原始顺序
+        """
+        if not trace_events:
+            return []
+        
+        # 如果事件数量较少，直接串行处理
+        if len(trace_events) < 1000:
+            return self._parse_events_sequential(trace_events)
+        
+        # 并行处理
+        events = [None] * len(trace_events)  # 预分配列表，保持顺序
+        
+        # 将事件分块处理
+        chunk_size = max(1, len(trace_events) // self.max_workers)
+        chunks = []
+        for i in range(0, len(trace_events), chunk_size):
+            chunk = trace_events[i:i + chunk_size]
+            chunks.append((i, chunk))
+        
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+            # 提交所有任务
+            future_to_chunk = {
+                executor.submit(_parse_event_chunk_worker, chunk_data): start_idx 
+                for start_idx, chunk_data in chunks
+            }
+            
+            # 收集结果并保持顺序
+            for future in as_completed(future_to_chunk):
+                start_idx = future_to_chunk[future]
+                try:
+                    chunk_events = future.result()
+                    # 将结果放回正确位置
+                    for i, event in enumerate(chunk_events):
+                        if event is not None:  # 只添加成功解析的事件
+                            events[start_idx + i] = event
+                except Exception as e:
+                    logger.warning(f"并行解析事件块失败: {e}")
+                    continue
+        
+        # 过滤掉 None 值，保持顺序
+        return [event for event in events if event is not None]
+    
+    def _parse_events_sequential(self, trace_events: List[Dict[str, Any]]) -> List[ActivityEvent]:
+        """
+        串行解析事件列表（用于小数据集或回退）
+        
+        Args:
+            trace_events: 原始事件数据列表
+            
+        Returns:
+            List[ActivityEvent]: 解析后的事件列表
+        """
+        events = []
+        for event_data in trace_events:
+            try:
+                event = _parse_event_worker(event_data)
+                if event:
+                    events.append(event)
+            except Exception as e:
+                logger.warning(f"解析事件失败: {e}, 事件数据: {event_data}")
+                continue
+        return events
+    
+    
     def _parse_event(self, event_data: Dict[str, Any]) -> Optional[ActivityEvent]:
         """
-        解析单个事件
+        解析单个事件（调用模块级别的工作函数）
         
         Args:
             event_data: 事件数据字典
@@ -98,40 +233,7 @@ class PyTorchProfilerParser:
         Returns:
             ActivityEvent: 解析后的事件对象，如果解析失败返回 None
         """
-        try:
-            # 提取必需字段
-            name = event_data.get('name', '')
-            cat = event_data.get('cat', '')
-            ph = event_data.get('ph', '')
-            pid = event_data.get('pid', 0)
-            tid = event_data.get('tid', 0)
-            ts = event_data.get('ts', 0.0)
-            
-            # 提取可选字段
-            dur = event_data.get('dur')
-            args = event_data.get('args', {})
-            event_id = event_data.get('id')
-            stream_id = event_data.get('stream')
-            
-            # 创建事件对象
-            event = ActivityEvent(
-                name=name,
-                cat=cat,
-                ph=ph,
-                pid=pid,
-                tid=tid,
-                ts=ts,
-                dur=dur,
-                args=args,
-                id=event_id,
-                stream_id=stream_id
-            )
-            
-            return event
-            
-        except Exception as e:
-            logger.warning(f"解析事件失败: {e}")
-            return None
+        return _parse_event_worker(event_data)
     
     def print_metadata(self) -> None:
         """打印元数据信息"""
