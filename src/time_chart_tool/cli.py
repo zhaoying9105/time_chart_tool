@@ -23,8 +23,11 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
-  # 分析单个文件
-  time-chart-tool single file.json --label "baseline" --output-format json,xlsx
+  # 分析单个文件 (基于CPU操作，默认方法)
+  time-chart-tool single file.json --label "baseline" --method on_cpu_op --output-format json,xlsx
+  
+  # 分析单个文件 (基于调用栈)
+  time-chart-tool single file.json --label "baseline" --method on_call_stack --output-format json,xlsx
   
   # 基于CPU操作对比多个文件 (默认方法)
   time-chart-tool compare file1.json:label1 file2.json:label2 --method on_cpu_op --output-format json,xlsx
@@ -36,9 +39,11 @@ def parse_arguments():
   time-chart-tool matmul file1.json:fp32 file2.json:bf16 --output-format json,xlsx
   
   # 只输出 JSON 格式
+  time-chart-tool single file.json --method on_call_stack --output-format json
   time-chart-tool compare file1.json:fp32 file2.json:tf32 --method on_cpu_op --output-format json
   
   # 只输出 XLSX 格式
+  time-chart-tool single file.json --method on_cpu_op --output-format xlsx
   time-chart-tool compare file1.json:baseline file2.json:optimized --method on_call_stack --output-format xlsx
         """
     )
@@ -49,6 +54,9 @@ def parse_arguments():
     single_parser = subparsers.add_parser('single', help='分析单个 JSON 文件')
     single_parser.add_argument('file', help='要分析的 JSON 文件路径')
     single_parser.add_argument('--label', default='single_file', help='文件标签 (默认: single_file)')
+    single_parser.add_argument('--method', choices=['on_cpu_op', 'on_call_stack'], 
+                              default='on_cpu_op',
+                              help='分析方法: on_cpu_op (基于CPU操作) 或 on_call_stack (基于调用栈) (默认: on_cpu_op)')
     single_parser.add_argument('--output-format', default='json,xlsx', 
                               choices=['json', 'xlsx', 'json,xlsx'],
                               help='输出格式 (默认: json,xlsx)')
@@ -106,6 +114,7 @@ def run_single_analysis(args):
     print(f"=== 单个文件分析 ===")
     print(f"文件: {args.file}")
     print(f"标签: {args.label}")
+    print(f"分析方法: {args.method}")
     print(f"输出格式: {args.output_format}")
     print(f"输出目录: {args.output_dir}")
     print()
@@ -129,27 +138,41 @@ def run_single_analysis(args):
         load_time = time.time() - start_time
         print(f"文件加载完成，耗时: {load_time:.2f} 秒")
         
-        # 分析 cpu_op 和 kernel 的映射关系
-        print("正在分析 cpu_op 和 kernel 的映射关系...")
-        mapping = analyzer.analyze_cpu_op_kernel_mapping(data)
-        print(f"找到 {len(mapping)} 个 cpu_op 的映射关系")
-        
-        # 生成cpu_op性能统计摘要
-        print("正在生成cpu_op性能统计摘要...")
-        analyzer.generate_cpu_op_performance_summary(data, str(output_dir), args.label)
-        
-        # 生成输出文件
-        base_name = f"{args.label}_single_file_analysis"
-        
-        if 'json' in args.output_format:
-            json_file = output_dir / f"{base_name}.json"
-            print(f"正在生成 JSON 文件: {json_file}")
-            analyzer.save_mapping_to_json(mapping, str(json_file))
-        
-        if 'xlsx' in args.output_format:
-            xlsx_file = output_dir / f"{base_name}.xlsx"
-            print(f"正在生成 XLSX 文件: {xlsx_file}")
-            analyzer.generate_excel_from_mapping(mapping, str(xlsx_file))
+        # 根据方法选择不同的分析流程
+        if args.method == 'on_cpu_op':
+            print("\n使用 on_cpu_op 方法进行分析...")
+            
+            # 分析 cpu_op 和 kernel 的映射关系
+            print("正在分析 cpu_op 和 kernel 的映射关系...")
+            mapping = analyzer.analyze_cpu_op_kernel_mapping(data)
+            print(f"找到 {len(mapping)} 个 cpu_op 的映射关系")
+            
+            # 生成cpu_op性能统计摘要
+            print("正在生成cpu_op性能统计摘要...")
+            analyzer.generate_cpu_op_performance_summary(data, str(output_dir), args.label)
+            
+            # 生成输出文件
+            base_name = f"{args.label}_single_file_analysis"
+            
+            if 'json' in args.output_format:
+                json_file = output_dir / f"{base_name}.json"
+                print(f"正在生成 JSON 文件: {json_file}")
+                analyzer.save_mapping_to_json(mapping, str(json_file))
+            
+            if 'xlsx' in args.output_format:
+                xlsx_file = output_dir / f"{base_name}.xlsx"
+                print(f"正在生成 XLSX 文件: {xlsx_file}")
+                analyzer.generate_excel_from_mapping(mapping, str(xlsx_file))
+                
+        elif args.method == 'on_call_stack':
+            print("\n使用 on_call_stack 方法进行分析...")
+            
+            # 分析 call stack
+            analyzer.analyze_single_file_by_call_stack(data, args.label, str(output_dir), args.output_format.split(','))
+            
+        else:
+            print(f"错误: 未知的分析方法: {args.method}")
+            return 1
         
         total_time = time.time() - start_time
         print(f"\n分析完成，总耗时: {total_time:.2f} 秒")

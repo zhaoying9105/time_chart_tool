@@ -1297,6 +1297,123 @@ class Analyzer:
         
         print("=== 基于 call stack 的对比分析完成 ===")
 
+    def analyze_single_file_by_call_stack(self, data: ProfilerData, label: str, output_dir: str, output_formats: List[str] = None) -> None:
+        """
+        分析单个文件的 call stack
+        
+        Args:
+            data: ProfilerData 对象
+            label: 文件标签
+            output_dir: 输出目录
+            output_formats: 输出格式列表，如 ['json', 'xlsx']
+        """
+        print(f"=== 开始单文件 call stack 分析 (标签: {label}) ===")
+        
+        # 分析 call stack
+        call_stack_analysis = self.analyze_cpu_op_by_call_stack(data)
+        
+        if not call_stack_analysis:
+            print("没有找到 call stack 数据")
+            return
+        
+        print(f"找到 {len(call_stack_analysis)} 个唯一的 call stack")
+        
+        # 生成单文件分析结果
+        self.generate_single_file_call_stack_analysis(call_stack_analysis, label, output_dir, output_formats)
+        
+        print(f"=== 单文件 call stack 分析完成 ===")
+
+    def generate_single_file_call_stack_analysis(self, call_stack_analysis: Dict, label: str, output_dir: str, output_formats: List[str] = None) -> None:
+        """
+        生成单文件的 call stack 分析结果
+        
+        Args:
+            call_stack_analysis: call stack 分析结果
+            label: 文件标签
+            output_dir: 输出目录
+            output_formats: 输出格式列表，如 ['json', 'xlsx']
+        """
+        # 生成 JSON 格式的多级结构数据
+        json_data = []
+        excel_rows = []
+        
+        for call_stack_key, call_stack_data in call_stack_analysis.items():
+            call_stack = call_stack_data['call_stack']
+            ops = call_stack_data['ops']
+            
+            # 为每个 op 创建条目
+            for op_name in sorted(ops.keys()):
+                op_events = ops[op_name]
+                
+                # 收集该 op 的所有事件信息
+                input_dims_list = []
+                input_strides_list = []
+                input_types_list = []
+                kernel_names_list = []
+                
+                for event_info in op_events:
+                    input_dims_list.append(str(event_info['input_dims']))
+                    input_strides_list.append(str(event_info['input_strides']))
+                    input_types_list.append(str(event_info['input_type']))
+                    kernel_names_list.extend(event_info['kernel_names'])
+                
+                # JSON 数据结构
+                json_entry = {
+                    'call_stack': ' -> '.join(call_stack),
+                    'call_stack_depth': len(call_stack),
+                    'op_name': op_name,
+                    'input_dims': input_dims_list,
+                    'input_strides': input_strides_list,
+                    'input_types': input_types_list,
+                    'kernel_names': list(set(kernel_names_list)),
+                    'event_count': len(op_events)
+                }
+                
+                # Excel 行数据
+                excel_row = {
+                    'call_stack': ' -> '.join(call_stack),
+                    'call_stack_depth': len(call_stack),
+                    'op_name': op_name,
+                    'input_dims': '||'.join(input_dims_list) if input_dims_list else '',
+                    'input_strides': '||'.join(input_strides_list) if input_strides_list else '',
+                    'input_types': '||'.join(input_types_list) if input_types_list else '',
+                    'kernel_names': '||'.join(set(kernel_names_list)) if kernel_names_list else '',
+                    'event_count': len(op_events)
+                }
+                
+                json_data.append(json_entry)
+                excel_rows.append(excel_row)
+        
+        # 生成文件名
+        base_name = f"{label}_single_file_call_stack_analysis"
+        
+        # 默认输出格式
+        if output_formats is None:
+            output_formats = ['json', 'xlsx']
+        
+        # 生成 JSON 文件
+        if 'json' in output_formats:
+            json_file = f"{output_dir}/{base_name}.json"
+            with open(json_file, 'w', encoding='utf-8') as f:
+                json.dump(json_data, f, indent=2, ensure_ascii=False)
+            print(f"单文件 call stack 分析 JSON 文件已生成: {json_file}")
+            print(f"包含 {len(json_data)} 个 call stack-op 组合")
+        
+        # 生成 Excel 文件
+        if 'xlsx' in output_formats and excel_rows:
+            df = pd.DataFrame(excel_rows)
+            xlsx_file = f"{output_dir}/{base_name}.xlsx"
+            try:
+                df.to_excel(xlsx_file, index=False)
+                print(f"单文件 call stack 分析 Excel 文件已生成: {xlsx_file}")
+                print(f"包含 {len(excel_rows)} 行数据")
+            except ImportError:
+                csv_file = f"{output_dir}/{base_name}.csv"
+                self._safe_csv_output(df, csv_file)
+                print(f"单文件 call stack 分析 CSV 文件已生成: {csv_file}")
+        elif 'xlsx' in output_formats and not excel_rows:
+            print("没有数据可以生成单文件 call stack 分析文件")
+
     def merge_call_stack_analyses(self, all_call_stack_analyses: Dict) -> Dict:
         """
         合并多个文件的 call stack 分析
