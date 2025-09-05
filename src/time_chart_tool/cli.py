@@ -23,17 +23,29 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
-  # 分析单个文件 (基于CPU操作，默认方法)
+  # 分析单个文件 (基于CPU操作，默认方法，不包含kernel信息)
   time-chart-tool single file.json --label "baseline" --method on_cpu_op --output-format json,xlsx
   
-  # 分析单个文件 (基于调用栈)
+  # 分析单个文件 (基于CPU操作，包含kernel信息)
+  time-chart-tool single file.json --label "baseline" --method on_cpu_op --include-kernel --output-format json,xlsx
+  
+  # 分析单个文件 (基于调用栈，不包含kernel信息)
   time-chart-tool single file.json --label "baseline" --method on_call_stack --output-format json,xlsx
   
-  # 基于CPU操作对比多个文件 (默认方法)
+  # 分析单个文件 (基于调用栈，包含kernel信息)
+  time-chart-tool single file.json --label "baseline" --method on_call_stack --include-kernel --output-format json,xlsx
+  
+  # 基于CPU操作对比多个文件 (默认方法，不包含kernel信息)
   time-chart-tool compare file1.json:label1 file2.json:label2 --method on_cpu_op --output-format json,xlsx
   
-  # 基于调用栈对比多个文件
+  # 基于CPU操作对比多个文件 (包含kernel信息)
+  time-chart-tool compare file1.json:label1 file2.json:label2 --method on_cpu_op --include-kernel --output-format json,xlsx
+  
+  # 基于调用栈对比多个文件 (不包含kernel信息)
   time-chart-tool compare file1.json:label1 file2.json:label2 --method on_call_stack --output-format json,xlsx
+  
+  # 基于调用栈对比多个文件 (包含kernel信息)
+  time-chart-tool compare file1.json:label1 file2.json:label2 --method on_call_stack --include-kernel --output-format json,xlsx
   
   # 专门分析matmul算子
   time-chart-tool matmul file1.json:fp32 file2.json:bf16 --output-format json,xlsx
@@ -57,6 +69,8 @@ def parse_arguments():
     single_parser.add_argument('--method', choices=['on_cpu_op', 'on_call_stack'], 
                               default='on_cpu_op',
                               help='分析方法: on_cpu_op (基于CPU操作) 或 on_call_stack (基于调用栈) (默认: on_cpu_op)')
+    single_parser.add_argument('--include-kernel', action='store_true', 
+                              help='是否包含性能数据和 kernel name (默认: False)')
     single_parser.add_argument('--output-format', default='json,xlsx', 
                               choices=['json', 'xlsx', 'json,xlsx'],
                               help='输出格式 (默认: json,xlsx)')
@@ -69,6 +83,8 @@ def parse_arguments():
     compare_parser.add_argument('--method', choices=['on_cpu_op', 'on_call_stack'], 
                                default='on_cpu_op',
                                help='对比方法: on_cpu_op (基于CPU操作) 或 on_call_stack (基于调用栈) (默认: on_cpu_op)')
+    compare_parser.add_argument('--include-kernel', action='store_true', 
+                               help='是否包含性能数据和 kernel name (默认: False)')
     compare_parser.add_argument('--output-format', default='json,xlsx',
                                choices=['json', 'xlsx', 'json,xlsx'],
                                help='输出格式 (默认: json,xlsx)')
@@ -142,33 +158,55 @@ def run_single_analysis(args):
         if args.method == 'on_cpu_op':
             print("\n使用 on_cpu_op 方法进行分析...")
             
-            # 分析 cpu_op 和 kernel 的映射关系
-            print("正在分析 cpu_op 和 kernel 的映射关系...")
-            mapping = analyzer.analyze_cpu_op_kernel_mapping(data)
-            print(f"找到 {len(mapping)} 个 cpu_op 的映射关系")
-            
-            # 生成cpu_op性能统计摘要
-            print("正在生成cpu_op性能统计摘要...")
-            analyzer.generate_cpu_op_performance_summary(data, str(output_dir), args.label)
-            
-            # 生成输出文件
-            base_name = f"{args.label}_single_file_analysis"
-            
-            if 'json' in args.output_format:
-                json_file = output_dir / f"{base_name}.json"
-                print(f"正在生成 JSON 文件: {json_file}")
-                analyzer.save_mapping_to_json(mapping, str(json_file))
-            
-            if 'xlsx' in args.output_format:
-                xlsx_file = output_dir / f"{base_name}.xlsx"
-                print(f"正在生成 XLSX 文件: {xlsx_file}")
-                analyzer.generate_excel_from_mapping(mapping, str(xlsx_file))
+            # 根据 --include-kernel 选项决定分析方式
+            if args.include_kernel:
+                print("包含 kernel 信息分析...")
+                # 分析 cpu_op 和 kernel 的映射关系
+                print("正在分析 cpu_op 和 kernel 的映射关系...")
+                mapping = analyzer.analyze_cpu_op_kernel_mapping(data)
+                print(f"找到 {len(mapping)} 个 cpu_op 的映射关系")
+                
+                # 生成cpu_op性能统计摘要
+                print("正在生成cpu_op性能统计摘要...")
+                analyzer.generate_cpu_op_performance_summary(data, str(output_dir), args.label)
+                
+                # 生成输出文件
+                base_name = f"{args.label}_single_file_analysis"
+                
+                if 'json' in args.output_format:
+                    json_file = output_dir / f"{base_name}.json"
+                    print(f"正在生成 JSON 文件: {json_file}")
+                    analyzer.save_mapping_to_json(mapping, str(json_file))
+                
+                if 'xlsx' in args.output_format:
+                    xlsx_file = output_dir / f"{base_name}.xlsx"
+                    print(f"正在生成 XLSX 文件: {xlsx_file}")
+                    analyzer.generate_excel_from_mapping(mapping, str(xlsx_file))
+            else:
+                print("只分析 cpu_op 信息，不包含 kernel 信息...")
+                # 只分析 cpu_op 信息
+                print("正在分析 cpu_op 信息...")
+                mapping = analyzer.analyze_cpu_op_only(data)
+                print(f"找到 {len(mapping)} 个 cpu_op")
+                
+                # 生成输出文件
+                base_name = f"{args.label}_single_file_analysis"
+                
+                if 'json' in args.output_format:
+                    json_file = output_dir / f"{base_name}.json"
+                    print(f"正在生成 JSON 文件: {json_file}")
+                    analyzer.save_cpu_op_mapping_to_json(mapping, str(json_file))
+                
+                if 'xlsx' in args.output_format:
+                    xlsx_file = output_dir / f"{base_name}.xlsx"
+                    print(f"正在生成 XLSX 文件: {xlsx_file}")
+                    analyzer.generate_excel_from_cpu_op_mapping(mapping, str(xlsx_file))
                 
         elif args.method == 'on_call_stack':
             print("\n使用 on_call_stack 方法进行分析...")
             
             # 分析 call stack
-            analyzer.analyze_single_file_by_call_stack(data, args.label, str(output_dir), args.output_format.split(','))
+            analyzer.analyze_single_file_by_call_stack(data, args.label, str(output_dir), args.output_format.split(','), args.include_kernel)
             
         else:
             print(f"错误: 未知的分析方法: {args.method}")
@@ -226,7 +264,7 @@ def run_compare_analysis(args):
                                          output_formats=args.output_format.split(','))
         elif args.method == 'on_call_stack':
             print("\n使用 on_call_stack 方法进行分析...")
-            analyzer.compare_by_call_stack(file_labels, str(output_dir))
+            analyzer.compare_by_call_stack(file_labels, str(output_dir), args.include_kernel)
         else:
             print(f"错误: 未知的对比方法: {args.method}")
             return 1

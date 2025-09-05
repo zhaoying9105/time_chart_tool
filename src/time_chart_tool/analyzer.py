@@ -188,6 +188,170 @@ class Analyzer:
         
         return mapping
     
+    def _build_cpu_op_mapping_structure(self, data: ProfilerData, include_kernel: bool = True) -> Dict:
+        """
+        构建 cpu_op 映射结构的公共方法
+        
+        Args:
+            data: ProfilerData 对象
+            include_kernel: 是否包含 kernel 信息
+            
+        Returns:
+            Dict: cpu_op 映射结构
+        """
+        # 首先按 External id 重组数据
+        external_id_map = self.reorganize_by_external_id(data)
+        
+        # 映射结构: Map[cpu_op_name][cpu_op_input_strides][cpu_op_input_dims][cpu_op_input_type] -> List[events]
+        mapping = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list))))
+        
+        for external_id, events in external_id_map.items():
+            cpu_op_events = [e for e in events if e.cat == 'cpu_op']
+            kernel_events = [e for e in events if e.cat == 'kernel']
+            
+            if not cpu_op_events:
+                continue
+            
+            # 根据 include_kernel 决定是否需要有对应的 kernel 事件
+            if include_kernel and not kernel_events:
+                continue
+            
+            # 为每个 cpu_op 事件创建映射
+            for cpu_op_event in cpu_op_events:
+                name, input_strides, input_dims, input_type = self.get_cpu_op_info(cpu_op_event)
+                
+                # 将 input_strides, input_dims, input_type 转换为可哈希的类型
+                def make_hashable(obj):
+                    if isinstance(obj, list):
+                        return tuple(make_hashable(item) for item in obj)
+                    elif isinstance(obj, dict):
+                        return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
+                    else:
+                        return obj
+                
+                input_strides_key = make_hashable(input_strides)
+                input_dims_key = make_hashable(input_dims)
+                input_type_key = make_hashable(input_type)
+                
+                if include_kernel:
+                    # 包含 kernel 信息时，存储 kernel 事件
+                    mapping[name][input_strides_key][input_dims_key][input_type_key].extend(kernel_events)
+                else:
+                    # 不包含 kernel 信息时，只存储 cpu_op 事件
+                    mapping[name][input_strides_key][input_dims_key][input_type_key].append(cpu_op_event)
+        
+        return mapping
+    
+    def analyze_cpu_op_kernel_mapping(self, data: ProfilerData) -> Dict:
+        """
+        功能5.2: 分析 cpu_op 和 kernel 的映射关系
+        
+        Args:
+            data: ProfilerData 对象
+            
+        Returns:
+            Dict: 逐级映射的数据结构
+        """
+        return self._build_cpu_op_mapping_structure(data, include_kernel=True)
+    
+    def analyze_cpu_op_only(self, data: ProfilerData) -> Dict:
+        """
+        只分析 cpu_op 信息，不包含 kernel 映射关系
+        
+        Args:
+            data: ProfilerData 对象
+            
+        Returns:
+            Dict: cpu_op 信息映射
+        """
+        return self._build_cpu_op_mapping_structure(data, include_kernel=False)
+    
+    def generate_excel_from_cpu_op_mapping(self, mapping: Dict, output_file: str = "cpu_op_analysis.xlsx") -> None:
+        """
+        将只包含 cpu_op 信息的映射数据生成 Excel 表格
+        
+        Args:
+            mapping: cpu_op 映射数据
+            output_file: 输出文件名
+        """
+        rows = []
+        
+        for cpu_op_name, strides_map in mapping.items():
+            for input_strides, dims_map in strides_map.items():
+                for input_dims, types_map in dims_map.items():
+                    for input_type, cpu_op_events in types_map.items():
+                        row = {
+                            'cpu_op_name': cpu_op_name,
+                            'cpu_op_input_strides': str(input_strides),
+                            'cpu_op_input_dims': str(input_dims),
+                            'cpu_op_input_type': str(input_type),
+                            'cpu_op_count': len(cpu_op_events)
+                        }
+                        rows.append(row)
+        
+        if rows:
+            df = pd.DataFrame(rows)
+            try:
+                df.to_excel(output_file, index=False)
+                print(f"Excel 文件已生成: {output_file}")
+                print(f"包含 {len(rows)} 行数据")
+            except ImportError:
+                # 如果没有 openpyxl，保存为 CSV 和 JSON
+                csv_file = output_file.replace('.xlsx', '.csv')
+                json_file = output_file.replace('.xlsx', '.json')
+                
+                # 使用安全的 CSV 输出方法
+                self._safe_csv_output(df, csv_file)
+                print(f"包含 {len(rows)} 行数据")
+                
+                # 同时保存为 JSON 格式，便于查看
+                df.to_json(json_file, orient='records', indent=2, force_ascii=False)
+                print(f"JSON 文件已生成: {json_file}")
+        else:
+            print("没有找到 cpu_op 数据，跳过 Excel 文件生成")
+    
+    def save_cpu_op_mapping_to_json(self, mapping: Dict, output_file: str = "cpu_op_analysis.json") -> None:
+        """
+        将只包含 cpu_op 信息的映射数据保存为 JSON 文件
+        
+        Args:
+            mapping: cpu_op 映射数据
+            output_file: 输出文件名
+        """
+        # 转换为可序列化的格式
+        serializable_mapping = {}
+        
+        for cpu_op_name, strides_map in mapping.items():
+            serializable_mapping[cpu_op_name] = {}
+            
+            for input_strides, dims_map in strides_map.items():
+                strides_key = str(input_strides)
+                serializable_mapping[cpu_op_name][strides_key] = {}
+                
+                for input_dims, types_map in dims_map.items():
+                    dims_key = str(input_dims)
+                    serializable_mapping[cpu_op_name][strides_key][dims_key] = {}
+                    
+                    for input_type, cpu_op_events in types_map.items():
+                        type_key = str(input_type)
+                        
+                        # 只保存 cpu_op 事件的基本信息
+                        events_info = []
+                        for event in cpu_op_events:
+                            event_info = {
+                                'name': event.name,
+                                'external_id': event.external_id
+                            }
+                            events_info.append(event_info)
+                        
+                        serializable_mapping[cpu_op_name][strides_key][dims_key][type_key] = events_info
+        
+        # 保存为 JSON 文件
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(serializable_mapping, f, indent=2, ensure_ascii=False)
+        
+        print(f"JSON 文件已生成: {output_file}")
+    
     def generate_excel_from_mapping(self, mapping: Dict, output_file: str = "cpu_op_kernel_analysis.xlsx") -> None:
         """
         功能5.3: 将映射数据生成 Excel 表格
@@ -1153,48 +1317,50 @@ class Analyzer:
     def _normalize_call_stack(self, call_stack: List[str]) -> List[str]:
         """
         标准化 call stack，只保留包含 nn.Module 的有价值部分
+        特殊处理：去掉 Runstep 模块及其之后的模块（面向 lg-torch 的特殊逻辑）
         
         Args:
             call_stack: 原始 call stack
             
         Returns:
-            List[str]: 标准化后的 call stack，只包含模型相关的层级
+            List[str]: 标准化后的 call stack，只包含模型相关的层级，去掉 'nn.Module: ' 前缀
         """
         if not call_stack:
             return call_stack
         
-        # 找到第一个包含 nn.Module 的层级
-        model_start_idx = -1
-        for i, frame in enumerate(call_stack):
+        # 过滤出所有的 nn.Module
+        nn_modules = []
+        for frame in call_stack:
             if 'nn.Module:' in frame:
-                model_start_idx = i
-                break
+                # 去掉 'nn.Module: ' 前缀
+                module_name = frame.replace('nn.Module: ', '')
+                nn_modules.append(module_name)
         
-        if model_start_idx == -1:
-            # 如果没有找到 nn.Module，返回空列表
+        if not nn_modules:
             return []
         
-        # 从第一个 nn.Module 开始，收集所有相关的层级
-        # 包括 nn.Module 层级和它们之间的调用层级
-        normalized = []
-        in_model_context = False
+        # 找到包含 Runstep 的模块
+        runstep_idx = -1
+        for i, module_name in enumerate(nn_modules):
+            if 'Runstep' in module_name:
+                runstep_idx = i
+                break
         
-        for i, frame in enumerate(call_stack):
-            if i >= model_start_idx:
-                # 检查是否是 nn.Module 层级
-                if 'nn.Module:' in frame:
-                    in_model_context = True
-                    normalized.append(frame)
-                # 检查是否是模型内部的调用（在 nn.Module 之间的层级）
+        # 如果找到 Runstep，去掉它及其之后的模块
+        if runstep_idx != -1:
+            normalized = nn_modules[:runstep_idx]
+        else:
+            normalized = nn_modules
         
         return normalized
 
-    def analyze_cpu_op_by_call_stack(self, data: ProfilerData) -> Dict:
+    def analyze_cpu_op_by_call_stack(self, data: ProfilerData, include_kernel: bool = True) -> Dict:
         """
         基于 call stack 分析 cpu_op 事件
         
         Args:
             data: ProfilerData 对象
+            include_kernel: 是否包含 kernel 信息
             
         Returns:
             Dict: 按 call stack 组织的 cpu_op 数据，结构为 call_stack -> op_name -> [event_info]
@@ -1227,13 +1393,25 @@ class Analyzer:
                 input_strides = args.get('Input Strides', [])
                 input_type = args.get('Input type', [])
                 
-                # 获取对应的 kernel 事件
-                kernel_names = []
-                if event.external_id is not None:
-                    kernel_events = data.get_events_by_external_id(event.external_id)
-                    for kernel_event in kernel_events:
-                        if kernel_event.cat == 'kernel':
-                            kernel_names.append(kernel_event.name)
+                # 根据 include_kernel 参数决定是否获取 kernel 信息
+                if include_kernel:
+                    # 获取对应的 kernel 事件
+                    kernel_names = []
+                    kernel_durations = []
+                    external_id = event.external_id
+                    
+                    if event.external_id is not None:
+                        kernel_events = data.get_events_by_external_id(event.external_id)
+                        for kernel_event in kernel_events:
+                            if kernel_event.cat == 'kernel':
+                                kernel_names.append(kernel_event.name)
+                                if kernel_event.dur is not None:
+                                    kernel_durations.append(kernel_event.dur)
+                else:
+                    # 不包含 kernel 信息
+                    kernel_names = []
+                    kernel_durations = []
+                    external_id = None
                 
                 # 收集每个 op 的详细信息
                 op_info = {
@@ -1242,9 +1420,8 @@ class Analyzer:
                     'input_strides': input_strides,
                     'input_type': input_type,
                     'kernel_names': kernel_names,
-                    'external_id': event.external_id,
-                    'ts': event.ts,
-                    'dur': event.dur
+                    'kernel_durations': kernel_durations,
+                    'external_id': external_id
                 }
                 op_groups[name].append(op_info)
             
@@ -1256,13 +1433,14 @@ class Analyzer:
         
         return call_stack_analysis
 
-    def compare_by_call_stack(self, file_labels: List[Tuple[str, str]], output_dir: str = ".") -> None:
+    def compare_by_call_stack(self, file_labels: List[Tuple[str, str]], output_dir: str = ".", include_kernel: bool = True) -> None:
         """
         基于 call stack 对比多个文件
         
         Args:
             file_labels: List of (file_path, label) tuples
             output_dir: 输出目录
+            include_kernel: 是否包含 kernel 信息
         """
         print("=== 开始基于 call stack 的对比分析 ===")
         
@@ -1274,7 +1452,7 @@ class Analyzer:
             
             try:
                 data = self.parser.load_json_file(file_path)
-                call_stack_analysis = self.analyze_cpu_op_by_call_stack(data)
+                call_stack_analysis = self.analyze_cpu_op_by_call_stack(data, include_kernel)
                 all_call_stack_analyses[label] = call_stack_analysis
                 print(f"  完成分析，找到 {len(call_stack_analysis)} 个唯一的 call stack")
                 
@@ -1293,11 +1471,11 @@ class Analyzer:
         labels = list(all_call_stack_analyses.keys())
         
         # 生成对比结果
-        self.generate_call_stack_comparison_excel(merged_call_stack_analysis, output_dir, labels)
+        self.generate_call_stack_comparison_excel(merged_call_stack_analysis, output_dir, labels, include_kernel)
         
         print("=== 基于 call stack 的对比分析完成 ===")
 
-    def analyze_single_file_by_call_stack(self, data: ProfilerData, label: str, output_dir: str, output_formats: List[str] = None) -> None:
+    def analyze_single_file_by_call_stack(self, data: ProfilerData, label: str, output_dir: str, output_formats: List[str] = None, include_kernel: bool = True) -> None:
         """
         分析单个文件的 call stack
         
@@ -1306,11 +1484,12 @@ class Analyzer:
             label: 文件标签
             output_dir: 输出目录
             output_formats: 输出格式列表，如 ['json', 'xlsx']
+            include_kernel: 是否包含 kernel 信息
         """
         print(f"=== 开始单文件 call stack 分析 (标签: {label}) ===")
         
         # 分析 call stack
-        call_stack_analysis = self.analyze_cpu_op_by_call_stack(data)
+        call_stack_analysis = self.analyze_cpu_op_by_call_stack(data, include_kernel)
         
         if not call_stack_analysis:
             print("没有找到 call stack 数据")
@@ -1319,11 +1498,11 @@ class Analyzer:
         print(f"找到 {len(call_stack_analysis)} 个唯一的 call stack")
         
         # 生成单文件分析结果
-        self.generate_single_file_call_stack_analysis(call_stack_analysis, label, output_dir, output_formats)
+        self.generate_single_file_call_stack_analysis(call_stack_analysis, label, output_dir, output_formats, include_kernel)
         
         print(f"=== 单文件 call stack 分析完成 ===")
 
-    def generate_single_file_call_stack_analysis(self, call_stack_analysis: Dict, label: str, output_dir: str, output_formats: List[str] = None) -> None:
+    def generate_single_file_call_stack_analysis(self, call_stack_analysis: Dict, label: str, output_dir: str, output_formats: List[str] = None, include_kernel: bool = True) -> None:
         """
         生成单文件的 call stack 分析结果
         
@@ -1332,6 +1511,7 @@ class Analyzer:
             label: 文件标签
             output_dir: 输出目录
             output_formats: 输出格式列表，如 ['json', 'xlsx']
+            include_kernel: 是否包含 kernel 信息
         """
         # 生成 JSON 格式的多级结构数据
         json_data = []
@@ -1346,16 +1526,28 @@ class Analyzer:
                 op_events = ops[op_name]
                 
                 # 收集该 op 的所有事件信息
-                input_dims_list = []
-                input_strides_list = []
-                input_types_list = []
+                input_dims_set = set()
+                input_strides_set = set()
+                input_types_set = set()
                 kernel_names_list = []
+                kernel_durations_list = []
+                external_ids_list = []
                 
                 for event_info in op_events:
-                    input_dims_list.append(str(event_info['input_dims']))
-                    input_strides_list.append(str(event_info['input_strides']))
-                    input_types_list.append(str(event_info['input_type']))
-                    kernel_names_list.extend(event_info['kernel_names'])
+                    input_dims_set.add(str(event_info['input_dims']))
+                    input_strides_set.add(str(event_info['input_strides']))
+                    input_types_set.add(str(event_info['input_type']))
+                    
+                    if include_kernel:
+                        kernel_names_list.extend(event_info['kernel_names'])
+                        kernel_durations_list.extend(event_info['kernel_durations'])
+                        if event_info['external_id'] is not None:
+                            external_ids_list.append(str(event_info['external_id']))
+                
+                # 转换为列表并排序，确保输出的一致性
+                input_dims_list = sorted(list(input_dims_set))
+                input_strides_list = sorted(list(input_strides_set))
+                input_types_list = sorted(list(input_types_set))
                 
                 # JSON 数据结构
                 json_entry = {
@@ -1365,9 +1557,16 @@ class Analyzer:
                     'input_dims': input_dims_list,
                     'input_strides': input_strides_list,
                     'input_types': input_types_list,
-                    'kernel_names': list(set(kernel_names_list)),
                     'event_count': len(op_events)
                 }
+                
+                # 根据 include_kernel 参数决定是否包含 kernel 相关信息
+                if include_kernel:
+                    json_entry.update({
+                        'kernel_names': list(set(kernel_names_list)),
+                        'kernel_durations': kernel_durations_list,
+                        'external_ids': list(set(external_ids_list))
+                    })
                 
                 # Excel 行数据
                 excel_row = {
@@ -1377,9 +1576,16 @@ class Analyzer:
                     'input_dims': '||'.join(input_dims_list) if input_dims_list else '',
                     'input_strides': '||'.join(input_strides_list) if input_strides_list else '',
                     'input_types': '||'.join(input_types_list) if input_types_list else '',
-                    'kernel_names': '||'.join(set(kernel_names_list)) if kernel_names_list else '',
                     'event_count': len(op_events)
                 }
+                
+                # 根据 include_kernel 参数决定是否包含 kernel 相关列
+                if include_kernel:
+                    excel_row.update({
+                        'kernel_names': '||'.join(set(kernel_names_list)) if kernel_names_list else '',
+                        'kernel_durations': '||'.join([str(d) for d in kernel_durations_list]) if kernel_durations_list else '',
+                        'external_ids': '||'.join(set(external_ids_list)) if external_ids_list else ''
+                    })
                 
                 json_data.append(json_entry)
                 excel_rows.append(excel_row)
@@ -1469,7 +1675,7 @@ class Analyzer:
         
         return sorted_merged
 
-    def generate_call_stack_comparison_excel(self, merged_analysis: Dict, output_dir: str, labels: List[str] = None) -> None:
+    def generate_call_stack_comparison_excel(self, merged_analysis: Dict, output_dir: str, labels: List[str] = None, include_kernel: bool = True) -> None:
         """
         生成基于 call stack 的对比 Excel 文件，使用多级结构：call stack -> op -> event_info
         
@@ -1477,6 +1683,7 @@ class Analyzer:
             merged_analysis: 合并的 call stack 分析
             output_dir: 输出目录
             labels: 标签列表，用于生成文件名
+            include_kernel: 是否包含 kernel 信息
         """
         # 生成 JSON 格式的多级结构数据
         json_data = []
@@ -1517,47 +1724,83 @@ class Analyzer:
                     if op_name in ops:
                         op_events = ops[op_name]
                         # 收集该 op 的所有事件信息
-                        input_dims_list = []
-                        input_strides_list = []
-                        input_types_list = []
+                        input_dims_set = set()
+                        input_strides_set = set()
+                        input_types_set = set()
                         kernel_names_list = []
+                        kernel_durations_list = []
+                        external_ids_list = []
                         
                         for event_info in op_events:
-                            input_dims_list.append(str(event_info['input_dims']))
-                            input_strides_list.append(str(event_info['input_strides']))
-                            input_types_list.append(str(event_info['input_type']))
-                            kernel_names_list.extend(event_info['kernel_names'])
+                            input_dims_set.add(str(event_info['input_dims']))
+                            input_strides_set.add(str(event_info['input_strides']))
+                            input_types_set.add(str(event_info['input_type']))
+                            
+                            if include_kernel:
+                                kernel_names_list.extend(event_info['kernel_names'])
+                                kernel_durations_list.extend(event_info['kernel_durations'])
+                                if event_info['external_id'] is not None:
+                                    external_ids_list.append(str(event_info['external_id']))
+                        
+                        # 转换为列表并排序，确保输出的一致性
+                        input_dims_list = sorted(list(input_dims_set))
+                        input_strides_list = sorted(list(input_strides_set))
+                        input_types_list = sorted(list(input_types_set))
                         
                         # JSON 数据
                         json_entry['labels'][label] = {
                             'input_dims': input_dims_list,
                             'input_strides': input_strides_list,
                             'input_types': input_types_list,
-                            'kernel_names': list(set(kernel_names_list)),
                             'event_count': len(op_events)
                         }
+                        
+                        # 根据 include_kernel 参数决定是否包含 kernel 相关信息
+                        if include_kernel:
+                            json_entry['labels'][label].update({
+                                'kernel_names': list(set(kernel_names_list)),
+                                'kernel_durations': kernel_durations_list,
+                                'external_ids': list(set(external_ids_list))
+                            })
                         
                         # Excel 数据
                         excel_row[f'{label}_input_dims'] = '||'.join(input_dims_list) if input_dims_list else ''
                         excel_row[f'{label}_input_strides'] = '||'.join(input_strides_list) if input_strides_list else ''
                         excel_row[f'{label}_input_types'] = '||'.join(input_types_list) if input_types_list else ''
-                        excel_row[f'{label}_kernel_names'] = '||'.join(set(kernel_names_list)) if kernel_names_list else ''
                         excel_row[f'{label}_event_count'] = len(op_events)
+                        
+                        # 根据 include_kernel 参数决定是否包含 kernel 相关列
+                        if include_kernel:
+                            excel_row[f'{label}_kernel_names'] = '||'.join(set(kernel_names_list)) if kernel_names_list else ''
+                            excel_row[f'{label}_kernel_durations'] = '||'.join([str(d) for d in kernel_durations_list]) if kernel_durations_list else ''
+                            excel_row[f'{label}_external_ids'] = '||'.join(set(external_ids_list)) if external_ids_list else ''
                     else:
                         # 该标签没有这个 op
                         json_entry['labels'][label] = {
                             'input_dims': [],
                             'input_strides': [],
                             'input_types': [],
-                            'kernel_names': [],
                             'event_count': 0
                         }
+                        
+                        # 根据 include_kernel 参数决定是否包含 kernel 相关信息
+                        if include_kernel:
+                            json_entry['labels'][label].update({
+                                'kernel_names': [],
+                                'kernel_durations': [],
+                                'external_ids': []
+                            })
                         
                         excel_row[f'{label}_input_dims'] = ''
                         excel_row[f'{label}_input_strides'] = ''
                         excel_row[f'{label}_input_types'] = ''
-                        excel_row[f'{label}_kernel_names'] = ''
                         excel_row[f'{label}_event_count'] = 0
+                        
+                        # 根据 include_kernel 参数决定是否包含 kernel 相关列
+                        if include_kernel:
+                            excel_row[f'{label}_kernel_names'] = ''
+                            excel_row[f'{label}_kernel_durations'] = ''
+                            excel_row[f'{label}_external_ids'] = ''
                 
                 json_data.append(json_entry)
                 excel_rows.append(excel_row)
