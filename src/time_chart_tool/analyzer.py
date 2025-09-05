@@ -62,7 +62,7 @@ class Analyzer:
                 if event.cat in ['cpu_op', 'kernel']:
                     external_id_map[event.external_id].append(event)
         
-        # 过滤：只保留有对应 kernel 事件的 cpu_op
+        # 过滤：只保留有对应 kernel 事件的 cpu_op，并处理同一 external_id 下的多个 cpu_op
         filtered_external_id_map = {}
         for external_id, events in external_id_map.items():
             cpu_op_events = [e for e in events if e.cat == 'cpu_op']
@@ -70,9 +70,119 @@ class Analyzer:
             
             # 只有当既有 cpu_op 又有 kernel 事件时，才保留这个 external_id
             if cpu_op_events and kernel_events:
-                filtered_external_id_map[external_id] = events
+                # 处理同一 external_id 下的多个 cpu_op 事件
+                filtered_cpu_op_events = self._filter_cpu_op_events_by_call_stack(cpu_op_events)
+                
+                # 创建过滤后的事件列表
+                filtered_events = filtered_cpu_op_events + kernel_events
+                filtered_external_id_map[external_id] = filtered_events
         
         return filtered_external_id_map
+    
+    def _filter_cpu_op_events_by_call_stack(self, cpu_op_events: List[ActivityEvent]) -> List[ActivityEvent]:
+        """
+        过滤同一 external_id 下的多个 cpu_op 事件
+        如果它们有相同的 name 且 call stack 存在前缀关系，只保留 call stack 最长的
+        
+        Args:
+            cpu_op_events: 同一 external_id 下的 cpu_op 事件列表
+            
+        Returns:
+            List[ActivityEvent]: 过滤后的 cpu_op 事件列表
+        """
+        if len(cpu_op_events) <= 1:
+            return cpu_op_events
+        
+        # 按 name 分组
+        name_groups = {}
+        for event in cpu_op_events:
+            name = event.name
+            if name not in name_groups:
+                name_groups[name] = []
+            name_groups[name].append(event)
+        
+        filtered_events = []
+        
+        for name, events in name_groups.items():
+            if len(events) == 1:
+                # 只有一个事件，直接保留
+                filtered_events.append(events[0])
+            else:
+                # 多个事件，检查 call stack 关系
+                filtered_events.extend(self._filter_events_by_call_stack_prefix(events))
+        
+        return filtered_events
+    
+    def _filter_events_by_call_stack_prefix(self, events: List[ActivityEvent]) -> List[ActivityEvent]:
+        """
+        过滤具有相同 name 的多个 cpu_op 事件
+        如果它们的 call stack 存在前缀关系，只保留最长的
+        
+        Args:
+            events: 具有相同 name 的 cpu_op 事件列表
+            
+        Returns:
+            List[ActivityEvent]: 过滤后的事件列表
+        """
+        if len(events) <= 1:
+            return events
+        
+        # 检查是否所有事件都有 call stack
+        events_with_call_stack = [e for e in events if e.call_stack is not None]
+        events_without_call_stack = [e for e in events if e.call_stack is None]
+        
+        if not events_with_call_stack:
+            # 都没有 call stack，保留所有
+            return events
+        
+        if len(events_without_call_stack) > 0:
+            # 有些有 call stack，有些没有，这是异常情况
+            raise ValueError(
+                f"在同一个 external_id 下发现 {len(events)} 个相同 name 的 cpu_op 事件，"
+                f"其中 {len(events_with_call_stack)} 个有 call stack，{len(events_without_call_stack)} 个没有 call stack。"
+                f"这不符合预期，请检查数据。"
+            )
+        
+        # 标准化 call stack 并检查前缀关系
+        normalized_events = []
+        for event in events_with_call_stack:
+            normalized_call_stack = self._normalize_call_stack(event.call_stack)
+            if normalized_call_stack:  # 只保留有有效 call stack 的事件
+                normalized_events.append((event, normalized_call_stack))
+        
+        if not normalized_events:
+            # 标准化后没有有效的事件，返回原始事件
+            return events
+        
+        # 检查是否存在前缀关系
+        call_stack_strings = []
+        for event, normalized_call_stack in normalized_events:
+            call_stack_str = ' -> '.join(normalized_call_stack)
+            call_stack_strings.append((event, call_stack_str))
+        
+        # 按长度排序，从长到短
+        call_stack_strings.sort(key=lambda x: len(x[1]), reverse=True)
+        
+        # 检查前缀关系
+        filtered_events = []
+        for i, (event, call_stack_str) in enumerate(call_stack_strings):
+            is_prefix_of_longer = False
+            
+            # 检查是否是更长的 call stack 的前缀
+            for j in range(i):
+                longer_call_stack_str = call_stack_strings[j][1]
+                if longer_call_stack_str.startswith(call_stack_str):
+                    is_prefix_of_longer = True
+                    break
+            
+            if not is_prefix_of_longer:
+                filtered_events.append(event)
+        
+        if not filtered_events:
+            # 如果过滤后没有事件，保留最长的那个
+            filtered_events = [call_stack_strings[0][0]]
+        
+        return filtered_events
     
     def get_cpu_op_info(self, event: ActivityEvent) -> Tuple[str, List, List, List]:
         """
@@ -1634,6 +1744,7 @@ class Analyzer:
     def merge_call_stack_analyses(self, all_call_stack_analyses: Dict) -> Dict:
         """
         合并多个文件的 call stack 分析
+        使用 startswith 匹配策略：call stack 只要一个是另一个的前缀且 cpu_op 相同就合并
         
         Args:
             all_call_stack_analyses: Dict[label, call_stack_analysis]
@@ -1641,27 +1752,74 @@ class Analyzer:
         Returns:
             Dict: 合并后的 call stack 分析
         """
+        # 第一步：对每个 analysis 内部进行 call stack 合并
+        preprocessed_analyses = {}
+        for label, analysis in all_call_stack_analyses.items():
+            preprocessed_analyses[label] = self._merge_call_stacks_within_analysis(analysis)
+        
+        # 第二步：检查是否会出现多对一的情况（使用预处理后的数据）
+        self._validate_call_stack_merge_strategy(preprocessed_analyses)
+        
         merged = {}
         
         # 收集所有唯一的 call stack
         all_call_stacks = set()
-        for label, analysis in all_call_stack_analyses.items():
+        for label, analysis in preprocessed_analyses.items():
             all_call_stacks.update(analysis.keys())
         
         # 为每个 call stack 创建合并条目
         for call_stack_key in all_call_stacks:
             call_stack_list = list(call_stack_key)
+            call_stack_str = ' -> '.join(call_stack_list)
+            
             merged_entry = {
                 'call_stack': call_stack_list,
                 'labels': {}
             }
             
-            # 收集每个标签的数据
-            for label, analysis in all_call_stack_analyses.items():
+            # 收集每个标签的数据，使用子字符串匹配
+            for label, analysis in preprocessed_analyses.items():
+                matched_data = None
+                matched_call_stack_key = None
+                
+                # 首先尝试完全匹配
                 if call_stack_key in analysis:
-                    merged_entry['labels'][label] = analysis[call_stack_key]
+                    matched_data = analysis[call_stack_key]
+                    matched_call_stack_key = call_stack_key
                 else:
-                    # 如果某个标签没有这个 call stack，创建空条目
+                    # 尝试 startswith 匹配，优先选择更长的 call stack
+                    best_match = None
+                    best_match_key = None
+                    best_length = 0
+                    
+                    for other_call_stack_key, other_data in analysis.items():
+                        other_call_stack_str = ' -> '.join(list(other_call_stack_key))
+                        
+                        # 检查是否是 startswith 关系
+                        if (other_call_stack_str.startswith(call_stack_str) or 
+                            call_stack_str.startswith(other_call_stack_str)):
+                            
+                            # 选择更长的 call stack
+                            current_length = len(other_call_stack_key)
+                            if current_length > best_length:
+                                best_match = other_data
+                                best_match_key = other_call_stack_key
+                                best_length = current_length
+                    
+                    if best_match:
+                        matched_data = best_match
+                        matched_call_stack_key = best_match_key
+                
+                if matched_data:
+                    # 如果匹配到的是更长的 call stack，更新 merged_entry 的 call_stack
+                    if matched_call_stack_key != call_stack_key:
+                        matched_call_stack_list = list(matched_call_stack_key)
+                        merged_entry['call_stack'] = matched_call_stack_list
+                        merged_entry['labels'][label] = matched_data
+                    else:
+                        merged_entry['labels'][label] = matched_data
+                else:
+                    # 如果某个标签没有匹配的 call stack，创建空条目
                     merged_entry['labels'][label] = {
                         'call_stack': call_stack_list,
                         'ops': {},
@@ -1679,12 +1837,292 @@ class Analyzer:
             else:
                 merged_entry['earliest_occurrence_time'] = float('inf')
             
-            merged[call_stack_key] = merged_entry
+            # 使用最终的 call_stack 作为 key
+            final_call_stack_key = tuple(merged_entry['call_stack'])
+            merged[final_call_stack_key] = merged_entry
         
         # 按最早出现时间排序
         sorted_merged = dict(sorted(merged.items(), key=lambda x: x[1]['earliest_occurrence_time']))
         
         return sorted_merged
+    
+    def _add_comparison_columns(self, excel_row: Dict, json_entry: Dict, labels: List[str]) -> None:
+        """
+        添加比较列到 Excel 行数据中，检查不同标签之间的 input_types、input_dims & input_strides 和 event_count 是否一致
+        
+        Args:
+            excel_row: Excel 行数据字典
+            json_entry: JSON 条目数据
+            labels: 标签列表
+        """
+        if len(labels) < 2:
+            # 如果只有一个标签，无法比较
+            excel_row['dtype_consistent'] = 'N/A'
+            excel_row['shape_strides_consistent'] = 'N/A'
+            excel_row['event_count_consistent'] = 'N/A'
+            return
+        
+        # 收集所有标签的 input_types、input_dims、input_strides 和 event_count
+        all_input_types = {}
+        all_input_dims = {}
+        all_input_strides = {}
+        all_event_counts = {}
+        
+        for label in labels:
+            label_data = json_entry['labels'].get(label, {})
+            # 将列表转换为 set 进行比较
+            all_input_types[label] = set(label_data.get('input_types', []))
+            all_input_dims[label] = set(label_data.get('input_dims', []))
+            all_input_strides[label] = set(label_data.get('input_strides', []))
+            all_event_counts[label] = label_data.get('event_count', 0)
+        
+        # 检查是否有标签没有事件（event_count = 0）
+        has_empty_labels = any(count == 0 for count in all_event_counts.values())
+        has_non_empty_labels = any(count > 0 for count in all_event_counts.values())
+        
+        # 构建 shape & strides 数据（无论哪种情况都需要）
+        all_shape_strides = {}
+        for label in labels:
+            # 将 dims 和 strides 合并为一个 set
+            combined_set = all_input_dims[label] | all_input_strides[label]
+            all_shape_strides[label] = combined_set
+        
+        # 如果有些标签有事件，有些没有，那么所有一致性都应该为 False
+        if has_empty_labels and has_non_empty_labels:
+            dtype_consistent = False
+            shape_strides_consistent = False
+            event_count_consistent = False
+        else:
+            # 所有标签都有事件或都没有事件，进行正常比较
+            # 检查 dtype 一致性 - 只比较有事件的标签
+            dtype_consistent = self._check_set_consistency_with_filter(all_input_types, all_event_counts)
+            
+            # 检查 shape & strides 一致性
+            shape_strides_consistent = self._check_set_consistency_with_filter(all_shape_strides, all_event_counts)
+            
+            # 检查 event_count 一致性
+            event_count_consistent = self._check_event_count_consistency(all_event_counts)
+        
+        # 添加比较结果到 Excel 行
+        excel_row['dtype_consistent'] = 'Yes' if dtype_consistent else 'No'
+        excel_row['shape_strides_consistent'] = 'Yes' if shape_strides_consistent else 'No'
+        excel_row['event_count_consistent'] = 'Yes' if event_count_consistent else 'No'
+        
+        # 添加详细信息到 JSON 条目
+        json_entry['dtype_comparison'] = {
+            'consistent': dtype_consistent,
+            'details': {label: list(types) for label, types in all_input_types.items()}
+        }
+        json_entry['shape_strides_comparison'] = {
+            'consistent': shape_strides_consistent,
+            'details': {label: list(combined) for label, combined in all_shape_strides.items()}
+        }
+        json_entry['event_count_comparison'] = {
+            'consistent': event_count_consistent,
+            'details': {label: count for label, count in all_event_counts.items()}
+        }
+    
+    def _check_set_consistency(self, all_sets: Dict[str, set]) -> bool:
+        """
+        检查多个 set 是否一致
+        
+        Args:
+            all_sets: 标签到 set 的映射
+            
+        Returns:
+            bool: 是否一致
+        """
+        if not all_sets:
+            return True
+        
+        # 获取第一个非空的 set 作为基准
+        base_set = None
+        for s in all_sets.values():
+            if s:
+                base_set = s
+                break
+        
+        if base_set is None:
+            # 所有 set 都是空的，认为是一致的
+            return True
+        
+        # 检查所有非空的 set 是否与基准 set 相等
+        for label, s in all_sets.items():
+            if s and s != base_set:
+                return False
+        
+        return True
+    
+    def _check_set_consistency_with_filter(self, all_sets: Dict[str, set], event_counts: Dict[str, int]) -> bool:
+        """
+        检查多个 set 是否一致，只比较有事件的标签
+        
+        Args:
+            all_sets: 标签到 set 的映射
+            event_counts: 标签到事件数量的映射
+            
+        Returns:
+            bool: 是否一致
+        """
+        if not all_sets:
+            return True
+        
+        # 只考虑有事件的标签
+        non_empty_sets = {label: s for label, s in all_sets.items() if event_counts.get(label, 0) > 0}
+        
+        if not non_empty_sets:
+            # 所有标签都没有事件，认为是一致的
+            return True
+        
+        # 获取第一个非空的 set 作为基准
+        base_set = None
+        for s in non_empty_sets.values():
+            if s:
+                base_set = s
+                break
+        
+        if base_set is None:
+            # 所有有事件的标签的 set 都是空的，认为是一致的
+            return True
+        
+        # 检查所有非空的 set 是否与基准 set 相等
+        for label, s in non_empty_sets.items():
+            if s and s != base_set:
+                return False
+        
+        return True
+    
+    def _check_event_count_consistency(self, all_event_counts: Dict[str, int]) -> bool:
+        """
+        检查所有标签的 event_count 是否一致
+        
+        Args:
+            all_event_counts: 标签到事件数量的映射
+            
+        Returns:
+            bool: 是否一致
+        """
+        if not all_event_counts:
+            return True
+        
+        # 获取第一个非零的事件数量作为基准
+        base_count = None
+        for count in all_event_counts.values():
+            if count > 0:
+                base_count = count
+                break
+        
+        if base_count is None:
+            # 所有标签的事件数量都是 0，认为是一致的
+            return True
+        
+        # 检查所有非零的事件数量是否与基准相等
+        for label, count in all_event_counts.items():
+            if count > 0 and count != base_count:
+                return False
+        
+        return True
+    
+    def _merge_call_stacks_within_analysis(self, analysis: Dict) -> Dict:
+        """
+        在单个 analysis 内部合并具有 startswith 关系的 call stack
+        
+        Args:
+            analysis: 单个 call stack 分析结果
+            
+        Returns:
+            Dict: 合并后的分析结果
+        """
+        if not analysis:
+            return analysis
+        
+        # 按 call stack 长度排序，从长到短
+        sorted_call_stacks = sorted(analysis.items(), key=lambda x: len(x[0]), reverse=True)
+        
+        merged = {}
+        processed_keys = set()
+        
+        for call_stack_key, data in sorted_call_stacks:
+            if call_stack_key in processed_keys:
+                continue
+            
+            call_stack_str = ' -> '.join(list(call_stack_key))
+            merged_entry = data.copy()
+            
+            # 查找所有与当前 call stack 有 startswith 关系的其他 call stack
+            for other_call_stack_key, other_data in sorted_call_stacks:
+                if other_call_stack_key in processed_keys or other_call_stack_key == call_stack_key:
+                    continue
+                
+                other_call_stack_str = ' -> '.join(list(other_call_stack_key))
+                
+                # 检查 startswith 关系
+                if (other_call_stack_str.startswith(call_stack_str) or 
+                    call_stack_str.startswith(other_call_stack_str)):
+                    
+                    # 合并 ops 数据
+                    for op_name, op_events_list in other_data.get('ops', {}).items():
+                        if 'ops' not in merged_entry:
+                            merged_entry['ops'] = {}
+                        
+                        if op_name in merged_entry['ops']:
+                            # 如果已存在，将事件列表合并
+                            merged_entry['ops'][op_name].extend(op_events_list)
+                        else:
+                            # 如果不存在，直接添加
+                            merged_entry['ops'][op_name] = op_events_list.copy()
+                    
+                    # 更新最早出现时间
+                    if other_data.get('first_occurrence_time') is not None:
+                        if merged_entry.get('first_occurrence_time') is None:
+                            merged_entry['first_occurrence_time'] = other_data['first_occurrence_time']
+                        else:
+                            merged_entry['first_occurrence_time'] = min(
+                                merged_entry['first_occurrence_time'],
+                                other_data['first_occurrence_time']
+                            )
+                    
+                    processed_keys.add(other_call_stack_key)
+            
+            merged[call_stack_key] = merged_entry
+            processed_keys.add(call_stack_key)
+        
+        return merged
+    
+    def _validate_call_stack_merge_strategy(self, all_call_stack_analyses: Dict) -> None:
+        """
+        验证合并策略不会导致多对一的情况
+        
+        Args:
+            all_call_stack_analyses: Dict[label, call_stack_analysis]
+        """
+        for label, analysis in all_call_stack_analyses.items():
+            call_stacks = list(analysis.keys())
+            
+            # 检查是否存在多对一的情况
+            for i, call_stack_key1 in enumerate(call_stacks):
+                call_stack_str1 = ' -> '.join(list(call_stack_key1))
+                
+                for j, call_stack_key2 in enumerate(call_stacks):
+                    if i >= j:  # 避免重复检查
+                        continue
+                    
+                    call_stack_str2 = ' -> '.join(list(call_stack_key2))
+                    
+                    # 检查是否是 startswith 关系
+                    if (call_stack_str2.startswith(call_stack_str1) or 
+                        call_stack_str1.startswith(call_stack_str2)):
+                        
+                        # 检查是否有相同的 cpu_op
+                        ops1 = set(analysis[call_stack_key1]['ops'].keys())
+                        ops2 = set(analysis[call_stack_key2]['ops'].keys())
+                        
+                        if ops1 & ops2:  # 如果有交集
+                            raise ValueError(
+                                f"检测到多对一的情况：在标签 '{label}' 中，"
+                                f"call stack '{call_stack_str1}' 和 '{call_stack_str2}' "
+                                f"存在子字符串关系且包含相同的 cpu_op: {ops1 & ops2}"
+                            )
 
     def generate_call_stack_comparison_excel(self, merged_analysis: Dict, output_dir: str, labels: List[str] = None, include_kernel: bool = True) -> None:
         """
@@ -1812,6 +2250,9 @@ class Analyzer:
                             excel_row[f'{label}_kernel_names'] = ''
                             excel_row[f'{label}_kernel_durations'] = ''
                             excel_row[f'{label}_external_ids'] = ''
+                
+                # 添加比较列：检查不同标签之间的 input_types 和 input_dims & input_strides 是否一致
+                self._add_comparison_columns(excel_row, json_entry, labels_list)
                 
                 json_data.append(json_entry)
                 excel_rows.append(excel_row)
