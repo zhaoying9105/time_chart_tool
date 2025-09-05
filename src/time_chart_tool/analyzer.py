@@ -1146,6 +1146,319 @@ class Analyzer:
         
         print(f"=== CPU Op性能统计完成 ===")
 
+    def _normalize_call_stack(self, call_stack: List[str]) -> List[str]:
+        """
+        标准化 call stack，只保留包含 nn.Module 的有价值部分
+        
+        Args:
+            call_stack: 原始 call stack
+            
+        Returns:
+            List[str]: 标准化后的 call stack，只包含模型相关的层级
+        """
+        if not call_stack:
+            return call_stack
+        
+        # 找到第一个包含 nn.Module 的层级
+        model_start_idx = -1
+        for i, frame in enumerate(call_stack):
+            if 'nn.Module:' in frame:
+                model_start_idx = i
+                break
+        
+        if model_start_idx == -1:
+            # 如果没有找到 nn.Module，返回空列表
+            return []
+        
+        # 从第一个 nn.Module 开始，收集所有相关的层级
+        # 包括 nn.Module 层级和它们之间的调用层级
+        normalized = []
+        in_model_context = False
+        
+        for i, frame in enumerate(call_stack):
+            if i >= model_start_idx:
+                # 检查是否是 nn.Module 层级
+                if 'nn.Module:' in frame:
+                    in_model_context = True
+                    normalized.append(frame)
+                # 检查是否是模型内部的调用（在 nn.Module 之间的层级）
+        
+        return normalized
+
+    def analyze_cpu_op_by_call_stack(self, data: ProfilerData) -> Dict:
+        """
+        基于 call stack 分析 cpu_op 事件
+        
+        Args:
+            data: ProfilerData 对象
+            
+        Returns:
+            Dict: 按 call stack 组织的 cpu_op 数据，结构为 call_stack -> op_name -> [event_info]
+        """
+        # 获取所有包含 call stack 的 cpu_op 事件
+        cpu_op_events = []
+        for event in data.events:
+            if event.cat == 'cpu_op' and event.call_stack is not None:
+                cpu_op_events.append(event)
+        
+        # 按标准化后的 call stack 分组
+        call_stack_groups = defaultdict(list)
+        for event in cpu_op_events:
+            normalized_call_stack = self._normalize_call_stack(event.call_stack)
+            if normalized_call_stack:  # 只处理有有效 call stack 的事件
+                call_stack_key = tuple(normalized_call_stack)
+                call_stack_groups[call_stack_key].append(event)
+        
+        # 为每个 call stack 收集信息
+        call_stack_analysis = {}
+        for call_stack_key, events in call_stack_groups.items():
+            call_stack_list = list(call_stack_key)
+            
+            # 按 op_name 分组收集信息
+            op_groups = defaultdict(list)
+            for event in events:
+                name = event.name
+                args = event.args or {}
+                input_dims = args.get('Input Dims', [])
+                input_strides = args.get('Input Strides', [])
+                input_type = args.get('Input type', [])
+                
+                # 获取对应的 kernel 事件
+                kernel_names = []
+                if event.external_id is not None:
+                    kernel_events = data.get_events_by_external_id(event.external_id)
+                    for kernel_event in kernel_events:
+                        if kernel_event.cat == 'kernel':
+                            kernel_names.append(kernel_event.name)
+                
+                # 收集每个 op 的详细信息
+                op_info = {
+                    'op_name': name,
+                    'input_dims': input_dims,
+                    'input_strides': input_strides,
+                    'input_type': input_type,
+                    'kernel_names': kernel_names,
+                    'external_id': event.external_id,
+                    'ts': event.ts,
+                    'dur': event.dur
+                }
+                op_groups[name].append(op_info)
+            
+            call_stack_analysis[call_stack_key] = {
+                'call_stack': call_stack_list,
+                'ops': dict(op_groups),
+                'first_occurrence_time': min(event.ts for event in events)
+            }
+        
+        return call_stack_analysis
+
+    def compare_by_call_stack(self, file_labels: List[Tuple[str, str]], output_dir: str = ".") -> None:
+        """
+        基于 call stack 对比多个文件
+        
+        Args:
+            file_labels: List of (file_path, label) tuples
+            output_dir: 输出目录
+        """
+        print("=== 开始基于 call stack 的对比分析 ===")
+        
+        # 分析每个文件的 call stack
+        all_call_stack_analyses = {}
+        
+        for file_path, label in file_labels:
+            print(f"正在分析文件: {file_path} (标签: {label})")
+            
+            try:
+                data = self.parser.load_json_file(file_path)
+                call_stack_analysis = self.analyze_cpu_op_by_call_stack(data)
+                all_call_stack_analyses[label] = call_stack_analysis
+                print(f"  完成分析，找到 {len(call_stack_analysis)} 个唯一的 call stack")
+                
+            except Exception as e:
+                print(f"  分析文件失败: {e}")
+                continue
+        
+        if not all_call_stack_analyses:
+            print("没有成功分析任何文件")
+            return
+        
+        # 合并所有 call stack 分析
+        merged_call_stack_analysis = self.merge_call_stack_analyses(all_call_stack_analyses)
+        
+        # 生成对比结果
+        self.generate_call_stack_comparison_excel(merged_call_stack_analysis, output_dir)
+        
+        print("=== 基于 call stack 的对比分析完成 ===")
+
+    def merge_call_stack_analyses(self, all_call_stack_analyses: Dict) -> Dict:
+        """
+        合并多个文件的 call stack 分析
+        
+        Args:
+            all_call_stack_analyses: Dict[label, call_stack_analysis]
+            
+        Returns:
+            Dict: 合并后的 call stack 分析
+        """
+        merged = {}
+        
+        # 收集所有唯一的 call stack
+        all_call_stacks = set()
+        for label, analysis in all_call_stack_analyses.items():
+            all_call_stacks.update(analysis.keys())
+        
+        # 为每个 call stack 创建合并条目
+        for call_stack_key in all_call_stacks:
+            call_stack_list = list(call_stack_key)
+            merged_entry = {
+                'call_stack': call_stack_list,
+                'labels': {}
+            }
+            
+            # 收集每个标签的数据
+            for label, analysis in all_call_stack_analyses.items():
+                if call_stack_key in analysis:
+                    merged_entry['labels'][label] = analysis[call_stack_key]
+                else:
+                    # 如果某个标签没有这个 call stack，创建空条目
+                    merged_entry['labels'][label] = {
+                        'call_stack': call_stack_list,
+                        'ops': {},
+                        'first_occurrence_time': None
+                    }
+            
+            # 按第一次出现的时间排序
+            first_occurrence_times = []
+            for label_data in merged_entry['labels'].values():
+                if label_data['first_occurrence_time'] is not None:
+                    first_occurrence_times.append(label_data['first_occurrence_time'])
+            
+            if first_occurrence_times:
+                merged_entry['earliest_occurrence_time'] = min(first_occurrence_times)
+            else:
+                merged_entry['earliest_occurrence_time'] = float('inf')
+            
+            merged[call_stack_key] = merged_entry
+        
+        # 按最早出现时间排序
+        sorted_merged = dict(sorted(merged.items(), key=lambda x: x[1]['earliest_occurrence_time']))
+        
+        return sorted_merged
+
+    def generate_call_stack_comparison_excel(self, merged_analysis: Dict, output_dir: str) -> None:
+        """
+        生成基于 call stack 的对比 Excel 文件，使用多级结构：call stack -> op -> event_info
+        
+        Args:
+            merged_analysis: 合并的 call stack 分析
+            output_dir: 输出目录
+        """
+        # 生成 JSON 格式的多级结构数据
+        json_data = []
+        excel_rows = []
+        
+        for call_stack_key, call_stack_data in merged_analysis.items():
+            call_stack = call_stack_data['call_stack']
+            labels_data = call_stack_data['labels']
+            labels = list(labels_data.keys())
+            
+            # 收集所有 op 名称
+            all_ops = set()
+            for label_data in labels_data.values():
+                all_ops.update(label_data['ops'].keys())
+            
+            # 为每个 op 创建条目
+            for op_name in sorted(all_ops):
+                # JSON 数据结构
+                json_entry = {
+                    'call_stack': ' -> '.join(call_stack),
+                    'call_stack_depth': len(call_stack),
+                    'op_name': op_name,
+                    'labels': {}
+                }
+                
+                # Excel 行数据
+                excel_row = {
+                    'call_stack': ' -> '.join(call_stack),
+                    'call_stack_depth': len(call_stack),
+                    'op_name': op_name
+                }
+                
+                # 为每个标签收集该 op 的数据
+                for label in labels:
+                    label_data = labels_data[label]
+                    ops = label_data['ops']
+                    
+                    if op_name in ops:
+                        op_events = ops[op_name]
+                        # 收集该 op 的所有事件信息
+                        input_dims_list = []
+                        input_strides_list = []
+                        input_types_list = []
+                        kernel_names_list = []
+                        
+                        for event_info in op_events:
+                            input_dims_list.append(str(event_info['input_dims']))
+                            input_strides_list.append(str(event_info['input_strides']))
+                            input_types_list.append(str(event_info['input_type']))
+                            kernel_names_list.extend(event_info['kernel_names'])
+                        
+                        # JSON 数据
+                        json_entry['labels'][label] = {
+                            'input_dims': input_dims_list,
+                            'input_strides': input_strides_list,
+                            'input_types': input_types_list,
+                            'kernel_names': list(set(kernel_names_list)),
+                            'event_count': len(op_events)
+                        }
+                        
+                        # Excel 数据
+                        excel_row[f'{label}_input_dims'] = '||'.join(input_dims_list) if input_dims_list else ''
+                        excel_row[f'{label}_input_strides'] = '||'.join(input_strides_list) if input_strides_list else ''
+                        excel_row[f'{label}_input_types'] = '||'.join(input_types_list) if input_types_list else ''
+                        excel_row[f'{label}_kernel_names'] = '||'.join(set(kernel_names_list)) if kernel_names_list else ''
+                        excel_row[f'{label}_event_count'] = len(op_events)
+                    else:
+                        # 该标签没有这个 op
+                        json_entry['labels'][label] = {
+                            'input_dims': [],
+                            'input_strides': [],
+                            'input_types': [],
+                            'kernel_names': [],
+                            'event_count': 0
+                        }
+                        
+                        excel_row[f'{label}_input_dims'] = ''
+                        excel_row[f'{label}_input_strides'] = ''
+                        excel_row[f'{label}_input_types'] = ''
+                        excel_row[f'{label}_kernel_names'] = ''
+                        excel_row[f'{label}_event_count'] = 0
+                
+                json_data.append(json_entry)
+                excel_rows.append(excel_row)
+        
+        # 生成 JSON 文件
+        json_file = f"{output_dir}/call_stack_comparison.json"
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, indent=2, ensure_ascii=False)
+        print(f"Call stack 对比 JSON 文件已生成: {json_file}")
+        print(f"包含 {len(json_data)} 个 call stack-op 组合")
+        
+        # 生成 Excel 文件
+        if excel_rows:
+            df = pd.DataFrame(excel_rows)
+            xlsx_file = f"{output_dir}/call_stack_comparison.xlsx"
+            try:
+                df.to_excel(xlsx_file, index=False)
+                print(f"Call stack 对比 Excel 文件已生成: {xlsx_file}")
+                print(f"包含 {len(excel_rows)} 行数据")
+            except ImportError:
+                csv_file = f"{output_dir}/call_stack_comparison.csv"
+                self._safe_csv_output(df, csv_file)
+                print(f"Call stack 对比 CSV 文件已生成: {csv_file}")
+        else:
+            print("没有数据可以生成 call stack 对比文件")
+
     def _print_cpu_op_summary_markdown_table(self, summary_data: List[Dict]) -> None:
         """
         以markdown表格形式打印cpu_op性能统计摘要

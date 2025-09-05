@@ -338,6 +338,77 @@ class PyTorchProfilerParser:
         
         return external_events, correlation_events
     
+    def search_by_call_stack(self, call_stack: List[str]) -> List[ActivityEvent]:
+        """
+        根据 call stack 搜索事件
+        
+        Args:
+            call_stack: call stack 列表
+            
+        Returns:
+            List[ActivityEvent]: 匹配的事件列表
+        """
+        if not self.data:
+            return []
+        
+        events = []
+        for event in self.data.events:
+            if event.call_stack == call_stack:
+                events.append(event)
+        
+        print(f"Call stack 匹配的事件数: {len(events)}")
+        return events
+    
+    def get_cpu_op_events_with_call_stack(self) -> List[ActivityEvent]:
+        """
+        获取所有包含 call stack 的 cpu_op 事件
+        
+        Returns:
+            List[ActivityEvent]: 包含 call stack 的 cpu_op 事件列表
+        """
+        if not self.data:
+            return []
+        
+        events = []
+        for event in self.data.events:
+            if event.cat == 'cpu_op' and event.call_stack is not None:
+                events.append(event)
+        
+        print(f"包含 call stack 的 cpu_op 事件数: {len(events)}")
+        return events
+    
+    def get_unique_call_stacks(self) -> List[List[str]]:
+        """
+        获取所有唯一的 call stack
+        
+        Returns:
+            List[List[str]]: 唯一的 call stack 列表
+        """
+        if not self.data:
+            return []
+        
+        call_stacks = set()
+        for event in self.data.events:
+            if event.call_stack is not None:
+                # 将 list 转换为 tuple 以便可以放入 set
+                call_stacks.add(tuple(event.call_stack))
+        
+        # 转换回 list 并排序（按第一次出现的时间）
+        unique_call_stacks = [list(cs) for cs in call_stacks]
+        
+        # 按第一次出现的时间排序
+        call_stack_first_occurrence = {}
+        for event in self.data.events:
+            if event.call_stack is not None:
+                cs_tuple = tuple(event.call_stack)
+                if cs_tuple not in call_stack_first_occurrence:
+                    call_stack_first_occurrence[cs_tuple] = event.ts
+        
+        unique_call_stacks.sort(key=lambda cs: call_stack_first_occurrence[tuple(cs)])
+        
+        print(f"唯一的 call stack 数量: {len(unique_call_stacks)}")
+        return unique_call_stacks
+
     def print_events_summary(self, events: List[ActivityEvent], title: str = "事件摘要") -> None:
         """
         打印事件摘要信息

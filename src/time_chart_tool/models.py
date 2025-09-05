@@ -61,6 +61,17 @@ class ActivityEvent:
         return self.args.get('Python parent id', None) if self.args else None
     
     @property
+    def call_stack(self) -> Optional[List[str]]:
+        """获取 call stack 信息"""
+        if not self.args:
+            return None
+        call_stack_str = self.args.get('Call stack', None)
+        if call_stack_str is None:
+            return None
+        # 将字符串按分号分割成列表
+        return [frame.strip() for frame in call_stack_str.split(';') if frame.strip()]
+    
+    @property
     def is_kernel(self) -> bool:
         """判断是否为 kernel 事件"""
         return self.cat == 'kernel' or 'kernel' in self.name.lower()
