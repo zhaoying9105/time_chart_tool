@@ -46,6 +46,7 @@ class Analyzer:
     def reorganize_by_external_id(self, data: ProfilerData) -> Dict[Union[int, str], List[ActivityEvent]]:
         """
         功能5.1: 用'External id'重新组织数据
+        只保留有对应 kernel 事件的 cpu_op 事件
         
         Args:
             data: ProfilerData 对象
@@ -55,14 +56,23 @@ class Analyzer:
         """
         external_id_map = defaultdict(list)
         
+        # 首先收集所有有 External id 的事件
         for event in data.events:
-            # 只保留有 External id 的事件
             if event.external_id is not None:
-                # 只保留 cpu_op 和 kernel 两个类别
                 if event.cat in ['cpu_op', 'kernel']:
                     external_id_map[event.external_id].append(event)
         
-        return dict(external_id_map)
+        # 过滤：只保留有对应 kernel 事件的 cpu_op
+        filtered_external_id_map = {}
+        for external_id, events in external_id_map.items():
+            cpu_op_events = [e for e in events if e.cat == 'cpu_op']
+            kernel_events = [e for e in events if e.cat == 'kernel']
+            
+            # 只有当既有 cpu_op 又有 kernel 事件时，才保留这个 external_id
+            if cpu_op_events and kernel_events:
+                filtered_external_id_map[external_id] = events
+        
+        return filtered_external_id_map
     
     def get_cpu_op_info(self, event: ActivityEvent) -> Tuple[str, List, List, List]:
         """
@@ -191,15 +201,16 @@ class Analyzer:
     def _build_cpu_op_mapping_structure(self, data: ProfilerData, include_kernel: bool = True) -> Dict:
         """
         构建 cpu_op 映射结构的公共方法
+        现在所有 cpu_op 都已经有对应的 kernel 事件
         
         Args:
             data: ProfilerData 对象
-            include_kernel: 是否包含 kernel 信息
+            include_kernel: 在输出结果时是否保留 kernel 相关信息
             
         Returns:
             Dict: cpu_op 映射结构
         """
-        # 首先按 External id 重组数据
+        # 首先按 External id 重组数据（已经过滤了只有对应 kernel 的 cpu_op）
         external_id_map = self.reorganize_by_external_id(data)
         
         # 映射结构: Map[cpu_op_name][cpu_op_input_strides][cpu_op_input_dims][cpu_op_input_type] -> List[events]
@@ -209,12 +220,7 @@ class Analyzer:
             cpu_op_events = [e for e in events if e.cat == 'cpu_op']
             kernel_events = [e for e in events if e.cat == 'kernel']
             
-            if not cpu_op_events:
-                continue
-            
-            # 根据 include_kernel 决定是否需要有对应的 kernel 事件
-            if include_kernel and not kernel_events:
-                continue
+            # 现在所有 cpu_op 都有对应的 kernel 事件，所以不需要额外检查
             
             # 为每个 cpu_op 事件创建映射
             for cpu_op_event in cpu_op_events:
@@ -1357,19 +1363,24 @@ class Analyzer:
     def analyze_cpu_op_by_call_stack(self, data: ProfilerData, include_kernel: bool = True) -> Dict:
         """
         基于 call stack 分析 cpu_op 事件
+        现在只分析有对应 kernel 事件的 cpu_op
         
         Args:
             data: ProfilerData 对象
-            include_kernel: 是否包含 kernel 信息
+            include_kernel: 在输出结果时是否保留 kernel 相关信息
             
         Returns:
             Dict: 按 call stack 组织的 cpu_op 数据，结构为 call_stack -> op_name -> [event_info]
         """
-        # 获取所有包含 call stack 的 cpu_op 事件
+        # 首先按 External id 重组数据，只保留有对应 kernel 的 cpu_op
+        external_id_map = self.reorganize_by_external_id(data)
+        
+        # 获取所有包含 call stack 的 cpu_op 事件（这些 cpu_op 都有对应的 kernel）
         cpu_op_events = []
-        for event in data.events:
-            if event.cat == 'cpu_op' and event.call_stack is not None:
-                cpu_op_events.append(event)
+        for events in external_id_map.values():
+            for event in events:
+                if event.cat == 'cpu_op' and event.call_stack is not None:
+                    cpu_op_events.append(event)
         
         # 按标准化后的 call stack 分组
         call_stack_groups = defaultdict(list)
@@ -1400,13 +1411,13 @@ class Analyzer:
                     kernel_durations = []
                     external_id = event.external_id
                     
-                    if event.external_id is not None:
-                        kernel_events = data.get_events_by_external_id(event.external_id)
+                    # 从已经过滤的 external_id_map 中获取 kernel 事件
+                    if event.external_id in external_id_map:
+                        kernel_events = [e for e in external_id_map[event.external_id] if e.cat == 'kernel']
                         for kernel_event in kernel_events:
-                            if kernel_event.cat == 'kernel':
-                                kernel_names.append(kernel_event.name)
-                                if kernel_event.dur is not None:
-                                    kernel_durations.append(kernel_event.dur)
+                            kernel_names.append(kernel_event.name)
+                            if kernel_event.dur is not None:
+                                kernel_durations.append(kernel_event.dur)
                 else:
                     # 不包含 kernel 信息
                     kernel_names = []
