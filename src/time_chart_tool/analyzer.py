@@ -17,61 +17,6 @@ from .models import ActivityEvent, ProfilerData
 from .parser import PyTorchProfilerParser
 
 
-@dataclass
-class PythonFunctionNode:
-    """Python函数节点"""
-    event: ActivityEvent
-    children: List['PythonFunctionNode']
-    
-    def __post_init__(self):
-        if self.children is None:
-            self.children = []
-    
-    @property
-    def python_id(self) -> Optional[Union[int, str]]:
-        return self.event.python_id
-    
-    @property
-    def python_parent_id(self) -> Optional[Union[int, str]]:
-        return self.event.python_parent_id
-    
-    @property
-    def name(self) -> str:
-        return self.event.name
-    
-    @property
-    def start_time(self) -> float:
-        return self.event.ts
-    
-    @property
-    def end_time(self) -> float:
-        return self.event.ts + (self.event.dur or 0)
-    
-    @property
-    def time_range(self) -> Tuple[float, float]:
-        return (self.start_time, self.end_time)
-    
-    def contains_time_range(self, start_time: float, end_time: float) -> bool:
-        """检查是否包含指定的时间范围"""
-        return self.start_time <= start_time and self.end_time >= end_time
-    
-    def get_call_stack(self) -> List[str]:
-        """获取从根节点到当前节点的调用栈"""
-        stack = [self.name]
-        current = self
-        while current.children:
-            # 找到父节点（这里简化处理，实际应该通过python_parent_id查找）
-            parent = None
-            for child in current.children:
-                if child.python_id == current.python_parent_id:
-                    parent = child
-                    break
-            if parent:
-                stack.append(parent.name)
-                current = parent
-            else:
-                break
-        return list(reversed(stack))
 
 
 @dataclass
@@ -94,172 +39,9 @@ class Analyzer:
     def __init__(self):
         self.parser = PyTorchProfilerParser()
     
-    def build_python_function_tree(self, data: ProfilerData) -> Dict[int, Dict[Union[int, str], PythonFunctionNode]]:
-        """
-        构建python_function树，按线程分组
-        
-        Args:
-            data: ProfilerData 对象
-            
-        Returns:
-            Dict[thread_id, Dict[python_id, PythonFunctionNode]]: 按线程分组的python_function节点映射
-        """
-        # 获取所有python_function事件
-        python_events = [event for event in data.events if event.cat == 'python_function']
-        
-        if not python_events:
-            return {}
-        
-        # 按线程分组
-        thread_groups = defaultdict(list)
-        for event in python_events:
-            thread_groups[event.tid].append(event)
-        
-        # 为每个线程构建独立的python_function树
-        thread_trees = {}
-        
-        for thread_id, thread_events in thread_groups.items():
-            # 创建节点映射
-            node_map = {}
-            root_nodes = []
-            
-            # 第一遍：创建所有节点
-            for event in thread_events:
-                node = PythonFunctionNode(event=event, children=[])
-                node_map[event.python_id] = node
-                
-                # 识别root节点（python_parent_id为null或不存在）
-                if event.python_parent_id is None:
-                    root_nodes.append(node)
-            
-            # 第二遍：建立父子关系（只在同一线程内）
-            for event in thread_events:
-                if event.python_parent_id is not None and event.python_parent_id in node_map:
-                    parent_node = node_map[event.python_parent_id]
-                    child_node = node_map[event.python_id]
-                    parent_node.children.append(child_node)
-            
-            # 将root_nodes信息添加到节点映射中，便于后续查找
-            node_map['_root_nodes'] = root_nodes
-            
-            thread_trees[thread_id] = node_map
-        
-        return thread_trees
     
-    def find_containing_python_function(self, cpu_op_event: ActivityEvent, 
-                                      thread_trees: Dict[int, Dict[Union[int, str], PythonFunctionNode]]) -> Optional[PythonFunctionNode]:
-        """
-        找到包含cpu_op时间范围的python_function（在同一线程内）
-        
-        Args:
-            cpu_op_event: cpu_op事件
-            thread_trees: 按线程分组的python_function树
-            
-        Returns:
-            Optional[PythonFunctionNode]: 包含cpu_op的最小python_function节点
-        """
-        # 根据cpu_op的线程ID找到对应的python_function树
-        thread_id = cpu_op_event.tid
-        if thread_id not in thread_trees:
-            return None
-        
-        python_tree = thread_trees[thread_id]
-        if not python_tree or '_root_nodes' not in python_tree:
-            return None
-        
-        cpu_start = cpu_op_event.ts
-        cpu_end = cpu_op_event.ts + (cpu_op_event.dur or 0)
-        
-        # 从root节点开始递归查找
-        root_nodes = python_tree['_root_nodes']
-        best_match = None
-        
-        for root_node in root_nodes:
-            match = self._find_containing_node_recursive(root_node, cpu_start, cpu_end)
-            if match:
-                # 如果找到匹配的节点，选择时间范围最小的
-                if best_match is None or (match.end_time - match.start_time) < (best_match.end_time - best_match.start_time):
-                    best_match = match
-        
-        return best_match
     
-    def _find_containing_node_recursive(self, node: PythonFunctionNode, 
-                                      cpu_start: float, cpu_end: float) -> Optional[PythonFunctionNode]:
-        """
-        递归查找包含cpu_op时间范围的python_function节点
-        
-        Args:
-            node: 当前节点
-            cpu_start: cpu_op开始时间
-            cpu_end: cpu_op结束时间
-            
-        Returns:
-            Optional[PythonFunctionNode]: 包含cpu_op的最小python_function节点
-        """
-        # 检查当前节点是否包含cpu_op时间范围
-        contains = node.contains_time_range(cpu_start, cpu_end)
-        
-        if not contains:
-            return None
-        
-        # 当前节点包含cpu_op时间范围，检查是否有子节点也包含
-        best_match = node  # 当前节点作为候选
-        
-        # 递归检查所有子节点
-        for child in node.children:
-            child_match = self._find_containing_node_recursive(child, cpu_start, cpu_end)
-            if child_match:
-                # 如果子节点也包含，选择时间范围更小的
-                if (child_match.end_time - child_match.start_time) < (best_match.end_time - best_match.start_time):
-                    best_match = child_match
-        
-        return best_match
     
-    def get_python_call_stack(self, python_node: PythonFunctionNode, 
-                             thread_trees: Dict[int, Dict[Union[int, str], PythonFunctionNode]]) -> List[str]:
-        """
-        获取python_function的调用栈（在同一线程内）
-        
-        Args:
-            python_node: python_function节点
-            thread_trees: 按线程分组的python_function树
-            
-        Returns:
-            List[str]: 调用栈（从根到叶子）
-        """
-        if python_node is None:
-            return []
-        
-        # 找到python_node所在的线程树
-        thread_id = python_node.event.tid
-        if thread_id not in thread_trees:
-            return []
-        
-        python_tree = thread_trees[thread_id]
-        
-        # 过滤掉无意义的函数名
-        def is_meaningful_function(name: str) -> bool:
-            # 过滤掉无意义的函数名
-            return not ('<built-in method' in name or 'object at' in name or name.startswith('torch/nn'))
-        
-        # 构建调用栈
-        stack = []
-        current = python_node
-        
-        # 向上遍历到根节点
-        while current:
-            if is_meaningful_function(current.name):
-                stack.append(current.name)
-            
-            # 查找父节点（在同一线程内）
-            parent = None
-            if current.python_parent_id and current.python_parent_id in python_tree:
-                parent = python_tree[current.python_parent_id]
-            
-            current = parent
-        
-        # 反转栈（从根到叶子）
-        return list(reversed(stack))
     
     def reorganize_by_external_id(self, data: ProfilerData) -> Dict[Union[int, str], List[ActivityEvent]]:
         """
@@ -356,19 +138,16 @@ class Analyzer:
     
     def analyze_cpu_op_kernel_mapping(self, data: ProfilerData) -> Dict:
         """
-        功能5.2: 分析 cpu_op 和 kernel 的映射关系，并添加python_function call stack
+        功能5.2: 分析 cpu_op 和 kernel 的映射关系
         
         Args:
             data: ProfilerData 对象
             
         Returns:
-            Dict: 逐级映射的数据结构，包含call stack信息
+            Dict: 逐级映射的数据结构
         """
         # 首先按 External id 重组数据
         external_id_map = self.reorganize_by_external_id(data)
-        
-        # 构建python_function树（按线程分组）
-        thread_trees = self.build_python_function_tree(data)
         
         # 逐级映射: Map[cpu_op_name][cpu_op_input_strides][cpu_op_input_dims][cpu_op_input_type] -> List[kernel_events]
         mapping = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list))))
@@ -392,10 +171,6 @@ class Analyzer:
             for cpu_op_event in cpu_op_events:
                 name, input_strides, input_dims, input_type = self.get_cpu_op_info(cpu_op_event)
                 
-                # 找到包含此cpu_op的python_function（在同一线程内）
-                python_node = self.find_containing_python_function(cpu_op_event, thread_trees)
-                call_stack = self.get_python_call_stack(python_node, thread_trees) if python_node else []
-                
                 # 将 input_strides, input_dims, input_type 转换为可哈希的类型
                 def make_hashable(obj):
                     if isinstance(obj, list):
@@ -408,10 +183,6 @@ class Analyzer:
                 input_strides_key = make_hashable(input_strides)
                 input_dims_key = make_hashable(input_dims)
                 input_type_key = make_hashable(input_type)
-                
-                # 添加call stack信息到kernel_events
-                for kernel_event in kernel_events:
-                    kernel_event.call_stack = call_stack
                 
                 mapping[name][input_strides_key][input_dims_key][input_type_key].extend(kernel_events)
         
@@ -445,8 +216,7 @@ class Analyzer:
                                 'kernel_min_duration': stats.min_duration,
                                 'kernel_max_duration': stats.max_duration,
                                 'kernel_mean_duration': stats.mean_duration,
-                                'kernel_std_duration': stats.variance ** 0.5,
-                                'call_stack': ' -> '.join(kernel_events[0].call_stack) if kernel_events and kernel_events[0].call_stack else ''
+                                'kernel_std_duration': stats.variance ** 0.5
                             }
                             rows.append(row)
         
@@ -509,7 +279,7 @@ class Analyzer:
             all_mappings: Dict[label, mapping]
             
         Returns:
-            Dict: 合并后的映射，key为(cpu_op_name, input_strides, input_dims, call_stack)，value为Dict[label, Dict[input_type, kernel_events]]
+            Dict: 合并后的映射，key为(cpu_op_name, input_strides, input_dims)，value为Dict[label, Dict[input_type, kernel_events]]
         """
         merged = defaultdict(lambda: defaultdict(dict))
         
@@ -518,11 +288,7 @@ class Analyzer:
                 for input_strides, dims_map in strides_map.items():
                     for input_dims, types_map in dims_map.items():
                         for input_type, kernel_events in types_map.items():
-                            # 获取call stack（从第一个kernel_event中获取）
-                            call_stack = kernel_events[0].call_stack if kernel_events else []
-                            call_stack_key = tuple(call_stack)
-                            
-                            key = (cpu_op_name, input_strides, input_dims, call_stack_key)
+                            key = (cpu_op_name, input_strides, input_dims)
                             merged[key][label][input_type] = kernel_events
         
         return dict(merged)
@@ -537,7 +303,7 @@ class Analyzer:
         """
         rows = []
         
-        for (cpu_op_name, input_strides, input_dims, call_stack), label_types_map in merged_mapping.items():
+        for (cpu_op_name, input_strides, input_dims), label_types_map in merged_mapping.items():
             # 收集所有标签
             labels = list(label_types_map.keys())
             
@@ -545,8 +311,7 @@ class Analyzer:
             row = {
                 'cpu_op_name': cpu_op_name,
                 'cpu_op_input_strides': str(input_strides),
-                'cpu_op_input_dims': str(input_dims),
-                'call_stack': ' -> '.join(call_stack) if call_stack else ''
+                'cpu_op_input_dims': str(input_dims)
             }
             
             # 为每个标签收集数据
@@ -752,12 +517,7 @@ class Analyzer:
         serializable_data = []
         
         for key, label_types_map in merged_mapping.items():
-            # 处理包含call_stack的键
-            if len(key) == 4:
-                cpu_op_name, input_strides, input_dims, call_stack = key
-            else:
-                cpu_op_name, input_strides, input_dims = key
-                call_stack = []
+            cpu_op_name, input_strides, input_dims = key
             
             # 收集所有标签
             labels = list(label_types_map.keys())
@@ -766,8 +526,7 @@ class Analyzer:
             row = {
                 'cpu_op_name': cpu_op_name,
                 'cpu_op_input_strides': str(input_strides),
-                'cpu_op_input_dims': str(input_dims),
-                'call_stack': ' -> '.join(call_stack) if call_stack else ''
+                'cpu_op_input_dims': str(input_dims)
             }
             
             # 为每个标签收集数据
@@ -1258,216 +1017,7 @@ class Analyzer:
         
         print("=== 分析流程完成 ===")
 
-    def analyze_by_call_stack(self, file_labels: List[Tuple[str, str]], 
-                            output_dir: str = ".", 
-                            output_formats: List[str] = None) -> None:
-        """
-        基于call stack的比较分析功能
-        
-        专注于比较不同time chart中相同call stack的cpu_op对应的input type是否一致
-        
-        Args:
-            file_labels: List of (file_path, label) tuples
-            output_dir: 输出目录
-            output_formats: 输出格式列表，支持 ['json', 'xlsx']
-        """
-        if output_formats is None:
-            output_formats = ['json', 'xlsx']
-        
-        print("=== 开始基于call stack的比较分析 ===")
-        
-        # 分析多个文件
-        all_mappings = self.analyze_multiple_files(file_labels)
-        
-        if not all_mappings:
-            print("没有成功分析任何文件")
-            return
-        
-        # 生成基于call stack的比较分析
-        self.generate_call_stack_comparison(all_mappings, file_labels, output_dir, output_formats)
-        
-        print("=== 基于call stack的分析完成 ===")
 
-    def generate_call_stack_comparison(self, all_mappings: Dict[str, Dict], 
-                                     file_labels: List[Tuple[str, str]], 
-                                     output_dir: str, 
-                                     output_formats: List[str]) -> None:
-        """
-        生成基于call stack的比较分析
-        
-        专注于比较相同call stack的cpu_op的input type一致性
-        
-        Args:
-            all_mappings: 所有文件的映射数据 {label: mapping}
-            file_labels: 文件标签列表
-            output_dir: 输出目录
-            output_formats: 输出格式
-        """
-        print("正在生成基于call stack的比较分析...")
-        
-        # 收集所有call stack信息
-        call_stack_data = {}  # {call_stack_key: {label: [cpu_op_info]}}
-        
-        for label, mapping in all_mappings.items():
-            # 遍历嵌套的mapping结构
-            for cpu_op_name, strides_map in mapping.items():
-                for input_strides, dims_map in strides_map.items():
-                    for input_dims, types_map in dims_map.items():
-                        for input_type, kernel_events in types_map.items():
-                            # 获取第一个kernel_event的call_stack（所有kernel_event应该有相同的call_stack）
-                            if kernel_events:
-                                call_stack = kernel_events[0].call_stack or []
-                                call_stack_key = ' -> '.join(call_stack) if call_stack else 'NO_CALL_STACK'
-                                
-                                # 收集cpu_op信息
-                                cpu_op_info = {
-                                    'cpu_op_name': cpu_op_name,
-                                    'input_strides': input_strides,
-                                    'input_dims': input_dims,
-                                    'input_type': input_type,
-                                    'pid': kernel_events[0].pid,
-                                    'tid': kernel_events[0].tid,
-                                    'kernel_count': len(kernel_events)
-                                }
-                                
-                                if call_stack_key not in call_stack_data:
-                                    call_stack_data[call_stack_key] = {}
-                                
-                                if label not in call_stack_data[call_stack_key]:
-                                    call_stack_data[call_stack_key][label] = []
-                                
-                                call_stack_data[call_stack_key][label].append(cpu_op_info)
-        
-        # 生成比较分析数据
-        rows = []
-        labels = [label for _, label in file_labels]
-        
-        for call_stack_key, label_data in call_stack_data.items():
-            # 按pid, tid排序（先排pid，再排tid）
-            sorted_labels = sorted(labels, key=lambda label: (
-                label_data.get(label, [{}])[0].get('pid', 0) if label_data.get(label) else 0,
-                label_data.get(label, [{}])[0].get('tid', 0) if label_data.get(label) else 0
-            ))
-            
-            # 使用第一个标签作为base
-            base_label = sorted_labels[0] if sorted_labels else labels[0]
-            
-            # 基础行数据
-            row = {
-                'call_stack': call_stack_key,
-                'base_label': base_label
-            }
-            
-            # 为每个标签收集数据
-            for label in labels:
-                if label in label_data:
-                    cpu_op_infos = label_data[label]
-                    
-                    # 收集所有cpu_op信息
-                    cpu_op_names = []
-                    input_types = []
-                    pids = []
-                    tids = []
-                    kernel_counts = []
-                    
-                    for cpu_op_info in cpu_op_infos:
-                        cpu_op_names.append(str(cpu_op_info['cpu_op_name']))
-                        input_types.append(str(cpu_op_info['input_type']))
-                        pids.append(str(cpu_op_info['pid']))
-                        tids.append(str(cpu_op_info['tid']))
-                        kernel_counts.append(str(cpu_op_info['kernel_count']))
-                    
-                    # 用||连接多个值
-                    row[f'{label}_cpu_op_names'] = '||'.join(cpu_op_names) if cpu_op_names else ''
-                    row[f'{label}_input_types'] = '||'.join(input_types) if input_types else ''
-                    row[f'{label}_pids'] = '||'.join(pids) if pids else ''
-                    row[f'{label}_tids'] = '||'.join(tids) if tids else ''
-                    row[f'{label}_kernel_counts'] = '||'.join(kernel_counts) if kernel_counts else ''
-                else:
-                    # 如果某个标签没有数据，设置默认值
-                    row[f'{label}_cpu_op_names'] = ''
-                    row[f'{label}_input_types'] = ''
-                    row[f'{label}_pids'] = ''
-                    row[f'{label}_tids'] = ''
-                    row[f'{label}_kernel_counts'] = ''
-            
-            # 计算比较信息（如果有多个标签）
-            if len(labels) >= 2:
-                # 检查input_types是否一致
-                all_input_types = []
-                for label in labels:
-                    input_types_str = row.get(f'{label}_input_types', '')
-                    if input_types_str:
-                        all_input_types.append(set(input_types_str.split('||')))
-                    else:
-                        all_input_types.append(set())
-                
-                # 检查input_types是否相等（不考虑顺序）
-                input_types_equal = len(set(frozenset(types) for types in all_input_types)) == 1
-                row['input_types_equal'] = input_types_equal
-                
-                # 检查cpu_op_names是否一致
-                all_cpu_op_names = []
-                for label in labels:
-                    cpu_op_names_str = row.get(f'{label}_cpu_op_names', '')
-                    if cpu_op_names_str:
-                        all_cpu_op_names.append(set(cpu_op_names_str.split('||')))
-                    else:
-                        all_cpu_op_names.append(set())
-                
-                # 检查cpu_op_names是否相等（不考虑顺序）
-                cpu_op_names_equal = len(set(frozenset(names) for names in all_cpu_op_names)) == 1
-                row['cpu_op_names_equal'] = cpu_op_names_equal
-                
-                # 标记不一致的标签
-                inconsistent_labels = []
-                for label in labels:
-                    if label != base_label:
-                        label_input_types = set(row.get(f'{label}_input_types', '').split('||') if row.get(f'{label}_input_types') else [])
-                        base_input_types = set(row.get(f'{base_label}_input_types', '').split('||') if row.get(f'{base_label}_input_types') else [])
-                        
-                        if label_input_types != base_input_types:
-                            inconsistent_labels.append(label)
-                
-                row['inconsistent_labels'] = '||'.join(inconsistent_labels) if inconsistent_labels else ''
-            else:
-                # 只有一个标签时，设置默认值
-                row['input_types_equal'] = ""
-                row['cpu_op_names_equal'] = ""
-                row['inconsistent_labels'] = ''
-            
-            rows.append(row)
-        
-        # 生成输出文件
-        if rows:
-            df = pd.DataFrame(rows)
-            base_name = "call_stack_comparison_analysis"
-            
-            if 'json' in output_formats:
-                json_file = f"{output_dir}/{base_name}.json"
-                df.to_json(json_file, orient='records', indent=2, force_ascii=False)
-                print(f"基于call stack的比较分析JSON文件已生成: {json_file}")
-            
-            if 'xlsx' in output_formats:
-                xlsx_file = f"{output_dir}/{base_name}.xlsx"
-                try:
-                    df.to_excel(xlsx_file, index=False)
-                    print(f"基于call stack的比较分析Excel文件已生成: {xlsx_file}")
-                except ImportError:
-                    csv_file = f"{output_dir}/{base_name}.csv"
-                    self._safe_csv_output(df, csv_file)
-                    print(f"基于call stack的比较分析CSV文件已生成: {csv_file}")
-            
-            # 打印统计信息
-            total_call_stacks = len(rows)
-            consistent_call_stacks = sum(1 for row in rows if row.get('input_types_equal', True))
-            inconsistent_call_stacks = total_call_stacks - consistent_call_stacks
-            
-            print(f"基于call stack的比较分析完成，共处理 {total_call_stacks} 个call stack")
-            print(f"其中 {consistent_call_stacks} 个call stack的input types一致")
-            print(f"其中 {inconsistent_call_stacks} 个call stack的input types不一致")
-        else:
-            print("没有数据可以生成基于call stack的比较分析文件")
 
     def generate_cpu_op_performance_summary(self, data: 'ProfilerData', output_dir: str = ".", label: str = "") -> None:
         """

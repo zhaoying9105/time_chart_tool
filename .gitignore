@@ -6,3 +6,4 @@ dist/
 .DS_Store
 src/.DS_Store
 *.jpg
+src/time_chart_tool.egg-info/

@@ -20,14 +20,11 @@ class ActivityEvent:
     args: Optional[Dict[str, Any]] = None
     id: Optional[str] = None
     stream_id: Optional[int] = None
-    call_stack: Optional[List[str]] = None
     
     def __post_init__(self):
         """初始化后处理"""
         if self.args is None:
             self.args = {}
-        if self.call_stack is None:
-            self.call_stack = []
         
         # 从 args 中提取 stream_id
         if self.stream_id is None and self.args:
