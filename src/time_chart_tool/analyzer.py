@@ -448,7 +448,11 @@ class Analyzer:
         # 合并映射并生成比较分析
         if len(all_mappings) > 1:
             merged_mapping = self.merge_mappings(all_mappings)
-            base_name = "comparison_analysis"
+            
+            # 生成包含标签的文件名
+            labels = list(all_mappings.keys())
+            labels_str = '_'.join(labels)
+            base_name = f"comparison_analysis_{labels_str}"
             
             if 'json' in output_formats:
                 json_file = f"{output_dir}/{base_name}.json"
@@ -1285,8 +1289,11 @@ class Analyzer:
         # 合并所有 call stack 分析
         merged_call_stack_analysis = self.merge_call_stack_analyses(all_call_stack_analyses)
         
+        # 提取标签列表
+        labels = list(all_call_stack_analyses.keys())
+        
         # 生成对比结果
-        self.generate_call_stack_comparison_excel(merged_call_stack_analysis, output_dir)
+        self.generate_call_stack_comparison_excel(merged_call_stack_analysis, output_dir, labels)
         
         print("=== 基于 call stack 的对比分析完成 ===")
 
@@ -1345,13 +1352,14 @@ class Analyzer:
         
         return sorted_merged
 
-    def generate_call_stack_comparison_excel(self, merged_analysis: Dict, output_dir: str) -> None:
+    def generate_call_stack_comparison_excel(self, merged_analysis: Dict, output_dir: str, labels: List[str] = None) -> None:
         """
         生成基于 call stack 的对比 Excel 文件，使用多级结构：call stack -> op -> event_info
         
         Args:
             merged_analysis: 合并的 call stack 分析
             output_dir: 输出目录
+            labels: 标签列表，用于生成文件名
         """
         # 生成 JSON 格式的多级结构数据
         json_data = []
@@ -1360,7 +1368,7 @@ class Analyzer:
         for call_stack_key, call_stack_data in merged_analysis.items():
             call_stack = call_stack_data['call_stack']
             labels_data = call_stack_data['labels']
-            labels = list(labels_data.keys())
+            labels_list = list(labels_data.keys())
             
             # 收集所有 op 名称
             all_ops = set()
@@ -1385,7 +1393,7 @@ class Analyzer:
                 }
                 
                 # 为每个标签收集该 op 的数据
-                for label in labels:
+                for label in labels_list:
                     label_data = labels_data[label]
                     ops = label_data['ops']
                     
@@ -1437,8 +1445,15 @@ class Analyzer:
                 json_data.append(json_entry)
                 excel_rows.append(excel_row)
         
+        # 生成文件名，包含标签信息
+        if labels:
+            labels_str = '_'.join(labels)
+            base_name = f"call_stack_comparison_{labels_str}"
+        else:
+            base_name = "call_stack_comparison"
+        
         # 生成 JSON 文件
-        json_file = f"{output_dir}/call_stack_comparison.json"
+        json_file = f"{output_dir}/{base_name}.json"
         with open(json_file, 'w', encoding='utf-8') as f:
             json.dump(json_data, f, indent=2, ensure_ascii=False)
         print(f"Call stack 对比 JSON 文件已生成: {json_file}")
@@ -1447,13 +1462,13 @@ class Analyzer:
         # 生成 Excel 文件
         if excel_rows:
             df = pd.DataFrame(excel_rows)
-            xlsx_file = f"{output_dir}/call_stack_comparison.xlsx"
+            xlsx_file = f"{output_dir}/{base_name}.xlsx"
             try:
                 df.to_excel(xlsx_file, index=False)
                 print(f"Call stack 对比 Excel 文件已生成: {xlsx_file}")
                 print(f"包含 {len(excel_rows)} 行数据")
             except ImportError:
-                csv_file = f"{output_dir}/call_stack_comparison.csv"
+                csv_file = f"{output_dir}/{base_name}.csv"
                 self._safe_csv_output(df, csv_file)
                 print(f"Call stack 对比 CSV 文件已生成: {csv_file}")
         else:

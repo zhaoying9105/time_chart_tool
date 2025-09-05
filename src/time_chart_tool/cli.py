@@ -26,18 +26,20 @@ def parse_arguments():
   # 分析单个文件
   time-chart-tool single file.json --label "baseline" --output-format json,xlsx
   
-  # 分析多个文件并对比
-  time-chart-tool compare file1.json:label1 file2.json:label2 --output-format json,xlsx
+  # 基于CPU操作对比多个文件 (默认方法)
+  time-chart-tool compare file1.json:label1 file2.json:label2 --method on_cpu_op --output-format json,xlsx
+  
+  # 基于调用栈对比多个文件
+  time-chart-tool compare file1.json:label1 file2.json:label2 --method on_call_stack --output-format json,xlsx
   
   # 专门分析matmul算子
   time-chart-tool matmul file1.json:fp32 file2.json:bf16 --output-format json,xlsx
   
-  
   # 只输出 JSON 格式
-  time-chart-tool compare file1.json:fp32 file2.json:tf32 --output-format json
+  time-chart-tool compare file1.json:fp32 file2.json:tf32 --method on_cpu_op --output-format json
   
   # 只输出 XLSX 格式
-  time-chart-tool compare file1.json:baseline file2.json:optimized --output-format xlsx
+  time-chart-tool compare file1.json:baseline file2.json:optimized --method on_call_stack --output-format xlsx
         """
     )
     
@@ -56,6 +58,9 @@ def parse_arguments():
     compare_parser = subparsers.add_parser('compare', help='分析多个 JSON 文件并对比')
     compare_parser.add_argument('files', nargs='+', 
                                help='文件列表，格式: file.json:label')
+    compare_parser.add_argument('--method', choices=['on_cpu_op', 'on_call_stack'], 
+                               default='on_cpu_op',
+                               help='对比方法: on_cpu_op (基于CPU操作) 或 on_call_stack (基于调用栈) (默认: on_cpu_op)')
     compare_parser.add_argument('--output-format', default='json,xlsx',
                                choices=['json', 'xlsx', 'json,xlsx'],
                                help='输出格式 (默认: json,xlsx)')
@@ -161,6 +166,7 @@ def run_single_analysis(args):
 def run_compare_analysis(args):
     """运行多文件对比分析"""
     print(f"=== 多文件对比分析 ===")
+    print(f"对比方法: {args.method}")
     print(f"输出格式: {args.output_format}")
     print(f"输出目录: {args.output_dir}")
     print()
@@ -190,17 +196,24 @@ def run_compare_analysis(args):
     try:
         start_time = time.time()
         
-        # 运行完整的多文件分析
-        print("\n开始分析...")
-        analyzer.run_complete_analysis(file_labels, output_dir=str(output_dir), 
-                                     output_formats=args.output_format.split(','))
+        # 根据方法选择不同的分析流程
+        if args.method == 'on_cpu_op':
+            print("\n使用 on_cpu_op 方法进行分析...")
+            analyzer.run_complete_analysis(file_labels, output_dir=str(output_dir), 
+                                         output_formats=args.output_format.split(','))
+        elif args.method == 'on_call_stack':
+            print("\n使用 on_call_stack 方法进行分析...")
+            analyzer.compare_by_call_stack(file_labels, str(output_dir))
+        else:
+            print(f"错误: 未知的对比方法: {args.method}")
+            return 1
         
         total_time = time.time() - start_time
         print(f"\n分析完成，总耗时: {total_time:.2f} 秒")
         
         # 显示生成的文件
         print("\n生成的文件:")
-        for file_path in output_dir.glob("*analysis*"):
+        for file_path in output_dir.glob("*"):
             if file_path.suffix in ['.json', '.xlsx']:
                 print(f"  {file_path}")
         
