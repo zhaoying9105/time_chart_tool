@@ -539,7 +539,10 @@ class Analyzer:
                            show_shape: bool = True,
                            show_kernel: bool = True,
                            special_matmul: bool = False,
-                           aggregation_type: str = 'on_op_name') -> None:
+                           aggregation_type: str = 'on_op_name',
+                           compare_dtype: bool = False,
+                           compare_shape: bool = False,
+                           file_labels: List[str] = None) -> List[Path]:
         """
         Stage 4: 展示
         根据配置决定是否展示 dtype 信息，是否展示 shape 信息，是否展示kernel 信息
@@ -557,11 +560,11 @@ class Analyzer:
         print("=== Stage 4: 展示 ===")
         
         if comparison_result['type'] == 'single_file':
-            self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel, aggregation_type)
+            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel, aggregation_type)
         elif comparison_result['type'] == 'multiple_files':
-            self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel, special_matmul, aggregation_type)
+            return self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel, special_matmul, aggregation_type, compare_dtype, compare_shape, file_labels)
     
-    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel: bool, aggregation_type: str = 'on_op_name') -> None:
+    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel: bool, aggregation_type: str = 'on_op_name') -> List[Path]:
         """展示单文件数据"""
         print("生成单文件展示结果...")
         
@@ -641,9 +644,9 @@ class Analyzer:
             rows.append(row)
         
         # 生成文件
-        self._generate_output_files(rows, output_dir, "single_file_analysis")
+        return self._generate_output_files(rows, output_dir, "single_file_analysis")
     
-    def _present_multiple_files(self, data: Dict[str, Any], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel: bool, special_matmul: bool, aggregation_type: str = 'on_op_name') -> None:
+    def _present_multiple_files(self, data: Dict[str, Any], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel: bool, special_matmul: bool, aggregation_type: str = 'on_op_name', compare_dtype: bool = False, compare_shape: bool = False, file_labels: List[str] = None) -> List[Path]:
         """展示多文件数据"""
         print("生成多文件展示结果...")
         
@@ -716,16 +719,66 @@ class Analyzer:
                         row[f'{label}_kernel_names'] = ''
                         row[f'{label}_kernel_mean_duration'] = 0.0
             
+            # 添加比较列
+            if compare_dtype or compare_shape:
+                # 获取所有文件的标签
+                file_labels = list(entry['files'].keys())
+                if len(file_labels) >= 2:
+                    # 比较前两个文件的 dtype 和 shape
+                    label1, label2 = file_labels[0], file_labels[1]
+                    
+                    if compare_dtype:
+                        dtypes1 = set()
+                        dtypes2 = set()
+                        for cpu_event in entry['files'][label1]['cpu_events']:
+                            args = cpu_event.args or {}
+                            input_types = args.get('Input type', [])
+                            if input_types:
+                                # 将单个event的input_types转换为字符串
+                                dtypes1.add(str(input_types))
+                        for cpu_event in entry['files'][label2]['cpu_events']:
+                            args = cpu_event.args or {}
+                            input_types = args.get('Input type', [])
+                            if input_types:
+                                # 将单个event的input_types转换为字符串
+                                dtypes2.add(str(input_types))
+                        row['dtype_equal'] = dtypes1 == dtypes2
+                    
+                    if compare_shape:
+                        shapes1 = set()
+                        shapes2 = set()
+                        for cpu_event in entry['files'][label1]['cpu_events']:
+                            args = cpu_event.args or {}
+                            input_dims = args.get('Input Dims', [])
+                            if input_dims:
+                                # 将单个event的input_dims转换为字符串
+                                shapes1.add(str(input_dims))
+                        for cpu_event in entry['files'][label2]['cpu_events']:
+                            args = cpu_event.args or {}
+                            input_dims = args.get('Input Dims', [])
+                            if input_dims:
+                                # 将单个event的input_dims转换为字符串
+                                shapes2.add(str(input_dims))
+                        row['shape_equal'] = shapes1 == shapes2
+            
             rows.append(row)
         
-        # 生成文件
-        self._generate_output_files(rows, output_dir, "multiple_files_analysis")
+        # 生成文件，使用标签信息命名
+        if file_labels and len(file_labels) >= 2:
+            base_name = f"{file_labels[0]}_vs_{file_labels[1]}_analysis"
+        else:
+            base_name = "multiple_files_analysis"
+        
+        generated_files = self._generate_output_files(rows, output_dir, base_name)
         
         # 特殊的 matmul 展示
         if special_matmul:
-            self._present_special_matmul(data, output_dir)
+            matmul_files = self._present_special_matmul(data, output_dir)
+            generated_files.extend(matmul_files)
+        
+        return generated_files
     
-    def _present_special_matmul(self, data: Dict[str, Any], output_dir: str) -> None:
+    def _present_special_matmul(self, data: Dict[str, Any], output_dir: str) -> List[Path]:
         """特殊的 matmul 展示：抓取matmul 系列kernel 信息，形成 kernel mean duration ratio vs min(m,k,n) 的表格和折线图"""
         print("生成特殊的 matmul 展示...")
         
@@ -754,7 +807,9 @@ class Analyzer:
         
         if matmul_data:
             # 生成 matmul 分析文件
-            self._generate_matmul_analysis(matmul_data, output_dir)
+            return self._generate_matmul_analysis(matmul_data, output_dir)
+        else:
+            return []
     
     def _extract_matmul_dimensions(self, key: str) -> Optional[Tuple[int, int, int]]:
         """从键中提取 matmul 维度信息"""
@@ -818,16 +873,19 @@ class Analyzer:
         
         return statistics_list
     
-    def _generate_output_files(self, rows: List[Dict], output_dir: str, base_name: str) -> None:
+    def _generate_output_files(self, rows: List[Dict], output_dir: str, base_name: str) -> List[Path]:
         """生成输出文件（JSON 和 XLSX）"""
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
+        
+        generated_files = []
         
         # 生成 JSON 文件
         json_file = output_path / f"{base_name}.json"
         with open(json_file, 'w', encoding='utf-8') as f:
             json.dump(rows, f, indent=2, ensure_ascii=False)
         print(f"JSON 文件已生成: {json_file}")
+        generated_files.append(json_file)
         
         # 生成 Excel 文件
         if rows:
@@ -836,14 +894,18 @@ class Analyzer:
             try:
                 df.to_excel(xlsx_file, index=False)
                 print(f"Excel 文件已生成: {xlsx_file}")
+                generated_files.append(xlsx_file)
             except ImportError:
                 csv_file = output_path / f"{base_name}.csv"
                 df.to_csv(csv_file, index=False, encoding='utf-8')
                 print(f"CSV 文件已生成: {csv_file}")
+                generated_files.append(csv_file)
         else:
             print("没有数据可以生成 Excel 文件")
+        
+        return generated_files
     
-    def _generate_matmul_analysis(self, matmul_data: Dict[int, Dict[str, float]], output_dir: str) -> None:
+    def _generate_matmul_analysis(self, matmul_data: Dict[int, Dict[str, float]], output_dir: str) -> List[Path]:
         """生成 matmul 分析文件"""
         output_path = Path(output_dir)
         
@@ -856,12 +918,16 @@ class Analyzer:
             rows.append(row)
         
         # 生成文件
-        self._generate_output_files(rows, output_dir, "matmul_analysis")
+        generated_files = self._generate_output_files(rows, output_dir, "matmul_analysis")
         
         # 生成图表
-        self._generate_matmul_chart(matmul_data, output_path)
+        chart_file = self._generate_matmul_chart(matmul_data, output_path)
+        if chart_file:
+            generated_files.append(chart_file)
+        
+        return generated_files
     
-    def _generate_matmul_chart(self, matmul_data: Dict[int, Dict[str, float]], output_path: Path) -> None:
+    def _generate_matmul_chart(self, matmul_data: Dict[int, Dict[str, float]], output_path: Path) -> Optional[Path]:
         """生成 matmul 性能图表"""
         try:
             plt.figure(figsize=(12, 8))
@@ -897,14 +963,16 @@ class Analyzer:
             plt.close()
             
             print(f"Matmul 性能图表已生成: {chart_file}")
+            return chart_file
         except Exception as e:
             print(f"生成 matmul 图表时出错: {e}")
+            return None
     
     # ==================== 完整的分析流程 ====================
     
     def analyze_single_file(self, file_path: str, aggregation_type: str = 'on_op_name', 
                            show_dtype: bool = True, show_shape: bool = True, show_kernel: bool = True, 
-                           output_dir: str = ".") -> None:
+                           output_dir: str = ".") -> List[Path]:
         """
         分析单个文件的完整流程
         
@@ -931,13 +999,14 @@ class Analyzer:
         comparison_result = self.stage3_comparison(single_file_data=aggregated_data, aggregation_type=aggregation_type)
         
         # Stage 4: 展示
-        self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel, aggregation_type=aggregation_type)
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel, aggregation_type=aggregation_type)
         
         print("=== 单文件分析完成 ===")
+        return generated_files
     
     def analyze_multiple_files(self, file_labels: List[Tuple[str, str]], aggregation_type: str = 'on_op_name',
                               show_dtype: bool = True, show_shape: bool = True, show_kernel: bool = True, special_matmul: bool = False,
-                              output_dir: str = ".") -> None:
+                              output_dir: str = ".", compare_dtype: bool = False, compare_shape: bool = False) -> List[Path]:
         """
         分析多个文件的完整流程
         
@@ -973,6 +1042,8 @@ class Analyzer:
         comparison_result = self.stage3_comparison(multiple_files_data=multiple_files_data, aggregation_type=aggregation_type)
         
         # Stage 4: 展示
-        self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel, special_matmul, aggregation_type)
+        file_labels_list = [label for _, label in file_labels]
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel, special_matmul, aggregation_type, compare_dtype, compare_shape, file_labels_list)
         
         print("=== 多文件分析完成 ===")
+        return generated_files

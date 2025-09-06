@@ -95,6 +95,10 @@ def parse_arguments():
                                help='在输出结果时是否展示 kernel 信息 (默认: False)')
     compare_parser.add_argument('--special-matmul', action='store_true',
                                help='是否进行特殊的 matmul 分析 (默认: False)')
+    compare_parser.add_argument('--compare-dtype', action='store_true',
+                               help='是否添加 dtype 比较列 (默认: False)')
+    compare_parser.add_argument('--compare-shape', action='store_true',
+                               help='是否添加 shape 比较列 (默认: False)')
     compare_parser.add_argument('--output-format', default='json,xlsx',
                                choices=['json', 'xlsx', 'json,xlsx'],
                                help='输出格式 (默认: json,xlsx)')
@@ -152,7 +156,7 @@ def run_analysis(args):
         start_time = time.time()
         
         # 使用新的分析流程
-        analyzer.analyze_single_file(
+        generated_files = analyzer.analyze_single_file(
             file_path=args.file,
             aggregation_type=args.aggregation,
             show_dtype=args.show_dtype,
@@ -163,6 +167,11 @@ def run_analysis(args):
         
         total_time = time.time() - start_time
         print(f"\n分析完成，总耗时: {total_time:.2f} 秒")
+        
+        # 显示生成的文件
+        print("\n生成的文件:")
+        for file_path in generated_files:
+            print(f"  {file_path}")
         
         return 0
         
@@ -211,14 +220,16 @@ def run_compare_analysis(args):
         start_time = time.time()
         
         # 使用新的分析流程
-        analyzer.analyze_multiple_files(
+        generated_files = analyzer.analyze_multiple_files(
             file_labels=file_labels,
             aggregation_type=args.aggregation,
             show_dtype=args.show_dtype,
             show_shape=args.show_shape,
             show_kernel=args.show_kernel,
             special_matmul=args.special_matmul,
-            output_dir=str(output_dir)
+            output_dir=str(output_dir),
+            compare_dtype=args.compare_dtype,
+            compare_shape=args.compare_shape
         )
         
         total_time = time.time() - start_time
@@ -226,9 +237,8 @@ def run_compare_analysis(args):
         
         # 显示生成的文件
         print("\n生成的文件:")
-        for file_path in output_dir.glob("*"):
-            if file_path.suffix in ['.json', '.xlsx', '.jpg']:
-                print(f"  {file_path}")
+        for file_path in generated_files:
+            print(f"  {file_path}")
         
         return 0
         
