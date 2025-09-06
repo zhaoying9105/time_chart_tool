@@ -97,6 +97,10 @@ class ProfilerData:
             self.events = []
         if self.trace_events is None:
             self.trace_events = []
+        
+        # 初始化索引缓存
+        self._indexes = {}
+        self._indexes_built = False
     
     @property
     def total_events(self) -> int:
@@ -159,45 +163,122 @@ class ProfilerData:
         
         return sorted(numeric_streams) + sorted(string_streams)
     
+    def _build_indexes(self) -> None:
+        """构建所有索引"""
+        if self._indexes_built:
+            return
+        
+        # 初始化索引字典
+        self._indexes = {
+            'by_process': {},
+            'by_thread': {},
+            'by_stream': {},
+            'by_external_id': {},
+            'by_correlation_id': {},
+            'by_correlation': {},
+            'by_ev_idx': {},
+            'by_python_id': {},
+            'by_any_id': {}
+        }
+        
+        # 遍历所有事件构建索引
+        for event in self.events:
+            # 进程索引
+            if event.pid not in self._indexes['by_process']:
+                self._indexes['by_process'][event.pid] = []
+            self._indexes['by_process'][event.pid].append(event)
+            
+            # 线程索引
+            if event.tid not in self._indexes['by_thread']:
+                self._indexes['by_thread'][event.tid] = []
+            self._indexes['by_thread'][event.tid].append(event)
+            
+            # 流索引
+            if event.stream_id is not None:
+                if event.stream_id not in self._indexes['by_stream']:
+                    self._indexes['by_stream'][event.stream_id] = []
+                self._indexes['by_stream'][event.stream_id].append(event)
+            
+            # External id 索引
+            if event.external_id is not None:
+                if event.external_id not in self._indexes['by_external_id']:
+                    self._indexes['by_external_id'][event.external_id] = []
+                self._indexes['by_external_id'][event.external_id].append(event)
+            
+            # correlation id 索引
+            if event.correlation_id is not None:
+                if event.correlation_id not in self._indexes['by_correlation_id']:
+                    self._indexes['by_correlation_id'][event.correlation_id] = []
+                self._indexes['by_correlation_id'][event.correlation_id].append(event)
+            
+            # correlation 索引
+            if event.correlation is not None:
+                if event.correlation not in self._indexes['by_correlation']:
+                    self._indexes['by_correlation'][event.correlation] = []
+                self._indexes['by_correlation'][event.correlation].append(event)
+            
+            # Ev Idx 索引
+            if event.ev_idx is not None:
+                if event.ev_idx not in self._indexes['by_ev_idx']:
+                    self._indexes['by_ev_idx'][event.ev_idx] = []
+                self._indexes['by_ev_idx'][event.ev_idx].append(event)
+            
+            # Python id 索引
+            if event.python_id is not None:
+                if event.python_id not in self._indexes['by_python_id']:
+                    self._indexes['by_python_id'][event.python_id] = []
+                self._indexes['by_python_id'][event.python_id].append(event)
+            
+            # 任意 ID 索引
+            for id_value in [event.external_id, event.correlation, event.ev_idx, event.python_id]:
+                if id_value is not None:
+                    if id_value not in self._indexes['by_any_id']:
+                        self._indexes['by_any_id'][id_value] = []
+                    self._indexes['by_any_id'][id_value].append(event)
+        
+        self._indexes_built = True
+    
     def get_events_by_process(self, pid: Union[int, str]) -> List[ActivityEvent]:
         """根据进程 ID 获取事件"""
-        return [event for event in self.events if event.pid == pid]
+        self._build_indexes()
+        return self._indexes['by_process'].get(pid, [])
     
     def get_events_by_thread(self, tid: Union[int, str]) -> List[ActivityEvent]:
         """根据线程 ID 获取事件"""
-        return [event for event in self.events if event.tid == tid]
+        self._build_indexes()
+        return self._indexes['by_thread'].get(tid, [])
     
     def get_events_by_stream(self, stream_id: Union[int, str]) -> List[ActivityEvent]:
         """根据流 ID 获取事件"""
-        return [event for event in self.events if event.stream_id == stream_id]
+        self._build_indexes()
+        return self._indexes['by_stream'].get(stream_id, [])
     
     def get_events_by_external_id(self, external_id: Union[int, str]) -> List[ActivityEvent]:
         """根据 External id 获取事件"""
-        return [event for event in self.events if event.external_id == external_id]
+        self._build_indexes()
+        return self._indexes['by_external_id'].get(external_id, [])
     
     def get_events_by_correlation_id(self, correlation_id: Union[int, str]) -> List[ActivityEvent]:
         """根据 correlation id 获取事件"""
-        return [event for event in self.events if event.correlation_id == correlation_id]
+        self._build_indexes()
+        return self._indexes['by_correlation_id'].get(correlation_id, [])
     
     def get_events_by_correlation(self, correlation: Union[int, str]) -> List[ActivityEvent]:
         """根据 correlation 获取事件"""
-        return [event for event in self.events if event.correlation == correlation]
+        self._build_indexes()
+        return self._indexes['by_correlation'].get(correlation, [])
     
     def get_events_by_ev_idx(self, ev_idx: Union[int, str]) -> List[ActivityEvent]:
         """根据 Ev Idx 获取事件"""
-        return [event for event in self.events if event.ev_idx == ev_idx]
+        self._build_indexes()
+        return self._indexes['by_ev_idx'].get(ev_idx, [])
     
     def get_events_by_python_id(self, python_id: Union[int, str]) -> List[ActivityEvent]:
         """根据 Python id 获取事件"""
-        return [event for event in self.events if event.python_id == python_id]
+        self._build_indexes()
+        return self._indexes['by_python_id'].get(python_id, [])
     
     def get_events_by_any_id(self, id_value: Union[int, str]) -> List[ActivityEvent]:
         """根据任意 ID 字段获取事件（External id, correlation, Ev Idx, Python id）"""
-        events = []
-        for event in self.events:
-            if (event.external_id == id_value or 
-                event.correlation == id_value or 
-                event.ev_idx == id_value or 
-                event.python_id == id_value):
-                events.append(event)
-        return events
+        self._build_indexes()
+        return self._indexes['by_any_id'].get(id_value, [])

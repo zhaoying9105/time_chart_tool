@@ -1,6 +1,6 @@
 """
-PyTorch Profiler 高级分析器
-实现功能5和功能6：数据重组、统计分析和Excel输出
+PyTorch Profiler 高级分析器 - 重构版本
+按照4个stage重新组织：数据后处理、数据聚合、比较、展示
 """
 
 import json
@@ -17,8 +17,6 @@ from .models import ActivityEvent, ProfilerData
 from .parser import PyTorchProfilerParser
 
 
-
-
 @dataclass
 class KernelStatistics:
     """Kernel 统计信息"""
@@ -33,85 +31,104 @@ class KernelStatistics:
         return f"KernelStatistics({self.kernel_name}, count={self.count}, mean={self.mean_duration:.3f}, std={self.variance**0.5:.3f})"
 
 
+@dataclass
+class AggregatedData:
+    """聚合后的数据结构"""
+    cpu_events: List[ActivityEvent]
+    kernel_events: List[ActivityEvent]
+    key: str  # 聚合键（op_name, op_shape, call_stack等）
+
+
 class Analyzer:
-    """高级分析器"""
+    """重构后的分析器，按照4个stage组织"""
     
     def __init__(self):
         self.parser = PyTorchProfilerParser()
     
+    # ==================== Stage 1: 数据后处理 ====================
     
-    
-    
-    
-    def reorganize_by_external_id(self, data: ProfilerData) -> Dict[Union[int, str], List[ActivityEvent]]:
+    def stage1_data_postprocessing(self, data: ProfilerData) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
         """
-        功能5.1: 用'External id'重新组织数据
-        只保留有对应 kernel 事件的 cpu_op 事件
+        Stage 1: 数据后处理
+        根据 cpu_op event & kernel event 的external id 分类，形成两个map
+        然后对一个 external id 下的 cpu_event 进行call stack 合并，保留call stack 最长的哪个 event
         
         Args:
             data: ProfilerData 对象
             
         Returns:
-            Dict[External id, List[ActivityEvent]]: 按 External id 组织的事件映射
+            Tuple[Dict[external_id, cpu_events], Dict[external_id, kernel_events]]: 
+                两个映射字典，确保 external id 和 cpu_event 是一对一的关系
         """
-        external_id_map = defaultdict(list)
+        print("=== Stage 1: 数据后处理 ===")
         
-        # 首先收集所有有 External id 的事件
+        # 1. 根据 external id 分类
+        cpu_events_by_external_id = defaultdict(list)
+        kernel_events_by_external_id = defaultdict(list)
+        
         for event in data.events:
             if event.external_id is not None:
-                if event.cat in ['cpu_op', 'kernel']:
-                    external_id_map[event.external_id].append(event)
+                if event.cat == 'cpu_op':
+                    cpu_events_by_external_id[event.external_id].append(event)
+                elif event.cat == 'kernel':
+                    kernel_events_by_external_id[event.external_id].append(event)
         
-        # 过滤：只保留有对应 kernel 事件的 cpu_op，并处理同一 external_id 下的多个 cpu_op
-        filtered_external_id_map = {}
-        for external_id, events in external_id_map.items():
-            cpu_op_events = [e for e in events if e.cat == 'cpu_op']
-            kernel_events = [e for e in events if e.cat == 'kernel']
-            
-            # 只有当既有 cpu_op 又有 kernel 事件时，才保留这个 external_id
-            if cpu_op_events and kernel_events:
-                # 处理同一 external_id 下的多个 cpu_op 事件
-                filtered_cpu_op_events = self._filter_cpu_op_events_by_call_stack(cpu_op_events)
-                
-                # 创建过滤后的事件列表
-                filtered_events = filtered_cpu_op_events + kernel_events
-                filtered_external_id_map[external_id] = filtered_events
+        print(f"找到 {len(cpu_events_by_external_id)} 个有 cpu_op 的 external_id")
+        print(f"找到 {len(kernel_events_by_external_id)} 个有 kernel 的 external_id")
         
-        return filtered_external_id_map
+        # 2. 过滤：保留有对应 kernel 事件的 cpu_op，如果没有 kernel 事件则保留所有 cpu_op
+        filtered_cpu_events = {}
+        filtered_kernel_events = {}
+        
+        if kernel_events_by_external_id:
+            # 有 kernel 事件，只保留有对应 kernel 的 cpu_op
+            for external_id in cpu_events_by_external_id:
+                if external_id in kernel_events_by_external_id:
+                    # 3. 对同一 external_id 下的 cpu_op 进行 call stack 合并
+                    cpu_events = self._merge_cpu_events_by_call_stack(cpu_events_by_external_id[external_id])
+                    filtered_cpu_events[external_id] = cpu_events
+                    filtered_kernel_events[external_id] = kernel_events_by_external_id[external_id]
+            print(f"过滤后保留 {len(filtered_cpu_events)} 个有对应 kernel 的 external_id")
+        else:
+            # 没有 kernel 事件，保留所有 cpu_op
+            for external_id in cpu_events_by_external_id:
+                # 3. 对同一 external_id 下的 cpu_op 进行 call stack 合并
+                cpu_events = self._merge_cpu_events_by_call_stack(cpu_events_by_external_id[external_id])
+                filtered_cpu_events[external_id] = cpu_events
+                filtered_kernel_events[external_id] = []  # 空的 kernel 事件列表
+            print(f"没有找到 kernel 事件，保留所有 {len(filtered_cpu_events)} 个 cpu_op external_id")
+        
+        return filtered_cpu_events, filtered_kernel_events
     
-    def _filter_cpu_op_events_by_call_stack(self, cpu_op_events: List[ActivityEvent]) -> List[ActivityEvent]:
+    def _merge_cpu_events_by_call_stack(self, cpu_events: List[ActivityEvent]) -> List[ActivityEvent]:
         """
-        过滤同一 external_id 下的多个 cpu_op 事件
-        如果它们有相同的 name 且 call stack 存在前缀关系，只保留 call stack 最长的
+        对同一 external_id 下的多个 cpu_op 事件进行 call stack 合并
+        保留 call stack 最长的那个 event
         
         Args:
-            cpu_op_events: 同一 external_id 下的 cpu_op 事件列表
+            cpu_events: 同一 external_id 下的 cpu_op 事件列表
             
         Returns:
-            List[ActivityEvent]: 过滤后的 cpu_op 事件列表
+            List[ActivityEvent]: 合并后的事件列表
         """
-        if len(cpu_op_events) <= 1:
-            return cpu_op_events
+        if len(cpu_events) <= 1:
+            return cpu_events
         
         # 按 name 分组
-        name_groups = {}
-        for event in cpu_op_events:
-            name = event.name
-            if name not in name_groups:
-                name_groups[name] = []
-            name_groups[name].append(event)
+        name_groups = defaultdict(list)
+        for event in cpu_events:
+            name_groups[event.name].append(event)
         
-        filtered_events = []
+        merged_events = []
         
         for name, events in name_groups.items():
             if len(events) == 1:
-                # 只有一个事件，直接保留
-                filtered_events.append(events[0])
+                merged_events.append(events[0])
             else:
                 # 多个事件，检查 call stack 关系
-                filtered_events.extend(self._filter_events_by_call_stack_prefix(events))
+                merged_events.extend(self._filter_events_by_call_stack_prefix(events))
         
-        return filtered_events
+        return merged_events
     
     def _filter_events_by_call_stack_prefix(self, events: List[ActivityEvent]) -> List[ActivityEvent]:
         """
@@ -132,11 +149,9 @@ class Analyzer:
         events_without_call_stack = [e for e in events if e.call_stack is None]
         
         if not events_with_call_stack:
-            # 都没有 call stack，保留所有
             return events
         
         if len(events_without_call_stack) > 0:
-            # 有些有 call stack，有些没有，这是异常情况
             raise ValueError(
                 f"在同一个 external_id 下发现 {len(events)} 个相同 name 的 cpu_op 事件，"
                 f"其中 {len(events_with_call_stack)} 个有 call stack，{len(events_without_call_stack)} 个没有 call stack。"
@@ -147,11 +162,10 @@ class Analyzer:
         normalized_events = []
         for event in events_with_call_stack:
             normalized_call_stack = self._normalize_call_stack(event.call_stack)
-            if normalized_call_stack:  # 只保留有有效 call stack 的事件
+            if normalized_call_stack:
                 normalized_events.append((event, normalized_call_stack))
         
         if not normalized_events:
-            # 标准化后没有有效的事件，返回原始事件
             return events
         
         # 检查是否存在前缀关系
@@ -179,40 +193,588 @@ class Analyzer:
                 filtered_events.append(event)
         
         if not filtered_events:
-            # 如果过滤后没有事件，保留最长的那个
             filtered_events = [call_stack_strings[0][0]]
         
         return filtered_events
     
-    def get_cpu_op_info(self, event: ActivityEvent) -> Tuple[str, List, List, List]:
+    def _normalize_call_stack(self, call_stack: List[str]) -> List[str]:
         """
-        从 cpu_op 事件中提取信息
+        标准化 call stack，只保留包含 nn.Module 的有价值部分
+        特殊处理：去掉 Runstep 模块及其之后的模块（面向 lg-torch 的特殊逻辑）
         
         Args:
-            event: cpu_op 事件
+            call_stack: 原始 call stack
             
         Returns:
-            Tuple[name, input_strides, input_dims, input_type]
+            List[str]: 标准化后的 call stack，只包含模型相关的层级，去掉 'nn.Module: ' 前缀
         """
-        name = event.name
-        args = event.args or {}
+        if not call_stack:
+            return call_stack
         
-        input_strides = args.get('Input Strides', [])
-        input_dims = args.get('Input Dims', [])
-        input_type = args.get('Input type', [])
+        # 过滤出所有的 nn.Module
+        nn_modules = []
+        for frame in call_stack:
+            if 'nn.Module:' in frame:
+                # 去掉 'nn.Module: ' 前缀
+                module_name = frame.replace('nn.Module: ', '')
+                nn_modules.append(module_name)
         
-        return name, input_strides, input_dims, input_type
+        if not nn_modules:
+            return []
+        
+        # 找到包含 Runstep 的模块
+        runstep_idx = -1
+        for i, module_name in enumerate(nn_modules):
+            if 'Runstep' in module_name:
+                runstep_idx = i
+                break
+        
+        # 如果找到 Runstep，去掉它及其之后的模块
+        if runstep_idx != -1:
+            normalized = nn_modules[:runstep_idx]
+        else:
+            normalized = nn_modules
+        
+        return normalized
     
-    def calculate_kernel_statistics(self, kernel_events: List[ActivityEvent]) -> List[KernelStatistics]:
+    # ==================== Stage 2: 数据聚合 ====================
+    
+    def stage2_data_aggregation(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
+                               kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
+                               aggregation_type: str = 'on_op_name') -> Dict[Union[str, tuple], AggregatedData]:
         """
-        计算 kernel 事件的统计信息
+        Stage 2: 数据聚合
+        分成三种聚合方式：
+        - on_op_name: 形成cpu_op event name -> cpu_op event list & 对应 kernel event list extend
+        - on_op_shape: 形成cpu_op event name & shape & strides -> cpu_op event list & 对应 kernel event list extend  
+        - on_call_stack: 形成(cpu_op call stack & cpu_op_name) -> cpu_op event list & 对应 kernel event list extend
         
         Args:
-            kernel_events: kernel 事件列表
+            cpu_events_by_external_id: external_id -> cpu_events 映射
+            kernel_events_by_external_id: external_id -> kernel_events 映射
+            aggregation_type: 聚合类型 ('on_op_name', 'on_op_shape', 'on_call_stack')
             
         Returns:
-            List[KernelStatistics]: 统计信息列表
+            Dict[str, AggregatedData]: 聚合后的数据
         """
+        print(f"=== Stage 2: 数据聚合 ({aggregation_type}) ===")
+        
+        if aggregation_type == 'on_call_stack':
+            # on_call_stack 需要特殊处理，因为需要合并相似的调用栈
+            return self._aggregate_on_call_stack(cpu_events_by_external_id, kernel_events_by_external_id)
+        
+        aggregated_data = defaultdict(lambda: AggregatedData([], [], ""))
+        
+        for external_id in cpu_events_by_external_id:
+            cpu_events = cpu_events_by_external_id[external_id]
+            kernel_events = kernel_events_by_external_id.get(external_id, [])
+            
+            for cpu_event in cpu_events:
+                if aggregation_type == 'on_op_name':
+                    key = cpu_event.name
+                elif aggregation_type == 'on_op_shape':
+                    # 组合 name, shape, strides 为 tuple
+                    args = cpu_event.args or {}
+                    input_dims = args.get('Input Dims', [])
+                    input_strides = args.get('Input Strides', [])
+                    # 递归地将嵌套列表转换为元组，使其可哈希
+                    def list_to_tuple(obj):
+                        if isinstance(obj, list):
+                            return tuple(list_to_tuple(item) for item in obj)
+                        return obj
+                    key = (cpu_event.name, list_to_tuple(input_dims), list_to_tuple(input_strides))
+                else:
+                    raise ValueError(f"未知的聚合类型: {aggregation_type}")
+                
+                aggregated_data[key].cpu_events.append(cpu_event)
+                aggregated_data[key].kernel_events.extend(kernel_events)
+                aggregated_data[key].key = key
+        
+        print(f"聚合后得到 {len(aggregated_data)} 个不同的键")
+        
+        return dict(aggregated_data)
+    
+    def _aggregate_on_call_stack(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
+                                kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]]) -> Dict[Union[str, tuple], AggregatedData]:
+        """
+        专门处理 on_call_stack 聚合，实现 startswith 合并逻辑
+        
+        Args:
+            cpu_events_by_external_id: external_id -> cpu_events 映射
+            kernel_events_by_external_id: external_id -> kernel_events 映射
+            
+        Returns:
+            Dict[Union[str, tuple], AggregatedData]: 聚合后的数据
+        """
+        aggregated_data = defaultdict(lambda: AggregatedData([], [], ""))
+        
+        for external_id in cpu_events_by_external_id:
+            cpu_events = cpu_events_by_external_id[external_id]
+            kernel_events = kernel_events_by_external_id.get(external_id, [])
+            
+            for cpu_event in cpu_events:
+                if cpu_event.call_stack is not None:
+                    normalized_call_stack = self._normalize_call_stack(cpu_event.call_stack)
+                    if normalized_call_stack:
+                        # 组合键：调用栈 + 操作名称 为 tuple
+                        new_key = (tuple(normalized_call_stack), cpu_event.name)
+                        
+                        # 检查是否已有相似的调用栈（使用startswith判断）
+                        existing_key = None
+                        for existing_call_stack_tuple, existing_op_name in aggregated_data.keys():
+                            if existing_op_name == cpu_event.name:
+                                # 只有当操作名称相同时才比较调用栈
+                                existing_call_stack_list = list(existing_call_stack_tuple)
+                                new_call_stack_list = list(normalized_call_stack)
+                                
+                                # 检查是否是 startswith 关系（将列表转换为字符串进行比较）
+                                new_call_stack_str = ' -> '.join(new_call_stack_list)
+                                existing_call_stack_str = ' -> '.join(existing_call_stack_list)
+                                if (new_call_stack_str.startswith(existing_call_stack_str) or 
+                                    existing_call_stack_str.startswith(new_call_stack_str)):
+                                    # 保留较长的调用栈
+                                    if len(new_call_stack_list) > len(existing_call_stack_list):
+                                        existing_key = new_key
+                                    else:
+                                        existing_key = (existing_call_stack_tuple, existing_op_name)
+                                    break
+                        
+                        if existing_key:
+                            # 合并到现有键
+                            aggregated_data[existing_key].cpu_events.append(cpu_event)
+                            aggregated_data[existing_key].kernel_events.extend(kernel_events)
+                        else:
+                            # 创建新键
+                            aggregated_data[new_key] = AggregatedData(
+                                cpu_events=[cpu_event],
+                                kernel_events=kernel_events,
+                                key=new_key
+                            )
+                    else:
+                        continue  # 跳过没有有效 call stack 的事件
+                else:
+                    continue  # 跳过没有 call stack 的事件
+        
+        print(f"聚合后得到 {len(aggregated_data)} 个不同的键")
+        
+        return dict(aggregated_data)
+    
+    # ==================== Stage 3: 比较 ====================
+    
+    def stage3_comparison(self, single_file_data: Optional[Dict[Union[str, tuple], AggregatedData]] = None,
+                         multiple_files_data: Optional[Dict[str, Dict[Union[str, tuple], AggregatedData]]] = None,
+                         aggregation_type: str = 'on_op_name') -> Dict[str, Any]:
+        """
+        Stage 3: 比较
+        区分处理单个 time tracing json 还是 多个 time tracing json
+        
+        Args:
+            single_file_data: 单文件聚合数据
+            multiple_files_data: 多文件聚合数据 {label: {key: AggregatedData}}
+            
+        Returns:
+            Dict[str, Any]: 比较结果
+        """
+        print("=== Stage 3: 比较 ===")
+        
+        if single_file_data is not None and multiple_files_data is None:
+            # 单个 time tracing json - 没有比较，直接返回
+            print("处理单个文件，无需比较")
+            return {
+                'type': 'single_file',
+                'data': single_file_data
+            }
+        
+        elif single_file_data is None and multiple_files_data is not None:
+            # 多个 time tracing json - 进行跨文件聚合
+            print(f"处理多个文件，共 {len(multiple_files_data)} 个文件")
+            return self._merge_multiple_files_data(multiple_files_data, aggregation_type)
+        
+        else:
+            raise ValueError("必须提供 single_file_data 或 multiple_files_data 中的一个")
+    
+    def _merge_multiple_files_data(self, multiple_files_data: Dict[str, Dict[Union[str, tuple], AggregatedData]], aggregation_type: str = 'on_op_name') -> Dict[str, Any]:
+        """
+        合并多个文件的聚合数据
+        
+        Args:
+            multiple_files_data: {label: {key: AggregatedData}}
+            
+        Returns:
+            Dict[str, Any]: 合并后的数据
+        """
+        if aggregation_type == 'on_call_stack':
+            # on_call_stack 需要特殊处理，合并相似的调用栈
+            return self._merge_multiple_files_call_stack(multiple_files_data)
+        
+        # 收集所有唯一的键
+        all_keys = set()
+        for file_data in multiple_files_data.values():
+            all_keys.update(file_data.keys())
+        
+        merged_data = {}
+        
+        for key in all_keys:
+            merged_entry = {
+                'key': key,
+                'files': {}
+            }
+            
+            # 为每个文件收集该键的数据
+            for label, file_data in multiple_files_data.items():
+                if key in file_data:
+                    aggregated_data = file_data[key]
+                    merged_entry['files'][label] = {
+                        'cpu_events': aggregated_data.cpu_events,
+                        'kernel_events': aggregated_data.kernel_events
+                    }
+                else:
+                    merged_entry['files'][label] = {
+                        'cpu_events': [],
+                        'kernel_events': []
+                    }
+            
+            merged_data[key] = merged_entry
+        
+        return {
+            'type': 'multiple_files',
+            'data': merged_data
+        }
+    
+    def _merge_multiple_files_call_stack(self, multiple_files_data: Dict[str, Dict[Union[str, tuple], AggregatedData]]) -> Dict[str, Any]:
+        """
+        专门处理 on_call_stack 的多文件合并，实现 startswith 合并逻辑
+        
+        Args:
+            multiple_files_data: {label: {key: AggregatedData}}
+            
+        Returns:
+            Dict[str, Any]: 合并后的数据
+        """
+        # 收集所有唯一的键
+        all_keys = set()
+        for file_data in multiple_files_data.values():
+            all_keys.update(file_data.keys())
+        
+        # 合并相似的调用栈
+        merged_keys = {}
+        for key in all_keys:
+            call_stack_tuple, op_name = key
+            
+            # 检查是否已有相似的调用栈
+            existing_key = None
+            for existing_call_stack_tuple, existing_op_name in merged_keys.keys():
+                if existing_op_name == op_name:
+                    # 只有当操作名称相同时才比较调用栈
+                    existing_call_stack_list = list(existing_call_stack_tuple)
+                    new_call_stack_list = list(call_stack_tuple)
+                    
+                    # 检查是否是 startswith 关系（将列表转换为字符串进行比较）
+                    new_call_stack_str = ' -> '.join(new_call_stack_list)
+                    existing_call_stack_str = ' -> '.join(existing_call_stack_list)
+                    if (new_call_stack_str.startswith(existing_call_stack_str) or 
+                        existing_call_stack_str.startswith(new_call_stack_str)):
+                        # 保留较长的调用栈
+                        if len(new_call_stack_list) > len(existing_call_stack_list):
+                            # 删除旧的键，使用新的键
+                            del merged_keys[(existing_call_stack_tuple, existing_op_name)]
+                            existing_key = key
+                        else:
+                            existing_key = (existing_call_stack_tuple, existing_op_name)
+                        break
+            
+            if existing_key:
+                # 合并到现有键
+                merged_keys[existing_key] = True
+            else:
+                # 创建新键
+                merged_keys[key] = True
+        
+        # 构建合并后的数据
+        merged_data = {}
+        for key in merged_keys.keys():
+            merged_entry = {
+                'key': key,
+                'files': {}
+            }
+            
+            # 为每个文件收集该键的数据
+            for label, file_data in multiple_files_data.items():
+                # 查找该文件中是否有与当前键相似的调用栈
+                found_data = None
+                for file_key, aggregated_data in file_data.items():
+                    file_call_stack_tuple, file_op_name = file_key
+                    if file_op_name == key[1]:  # 操作名称相同
+                        # 检查调用栈是否是 startswith 关系（将列表转换为字符串进行比较）
+                        file_call_stack_str = ' -> '.join(list(file_call_stack_tuple))
+                        key_call_stack_str = ' -> '.join(list(key[0]))
+                        if (file_call_stack_str.startswith(key_call_stack_str) or 
+                            key_call_stack_str.startswith(file_call_stack_str)):
+                            found_data = aggregated_data
+                            break
+                
+                if found_data:
+                    merged_entry['files'][label] = {
+                        'cpu_events': found_data.cpu_events,
+                        'kernel_events': found_data.kernel_events
+                    }
+                else:
+                    merged_entry['files'][label] = {
+                        'cpu_events': [],
+                        'kernel_events': []
+                    }
+            
+            merged_data[key] = merged_entry
+        
+        return {
+            'type': 'multiple_files',
+            'data': merged_data
+        }
+    
+    # ==================== Stage 4: 展示 ====================
+    
+    def stage4_presentation(self, comparison_result: Dict[str, Any], 
+                           output_dir: str = ".", 
+                           show_dtype: bool = True,
+                           show_shape: bool = True,
+                           show_kernel: bool = True,
+                           special_matmul: bool = False,
+                           aggregation_type: str = 'on_op_name') -> None:
+        """
+        Stage 4: 展示
+        根据配置决定是否展示 dtype 信息，是否展示 shape 信息，是否展示kernel 信息
+        如果展示kernel 信息，那么包括kernel event 的name，duration的统计值，kernel event 的数量
+        展示的结果是 包括xlsx 和 json
+        
+        Args:
+            comparison_result: Stage 3 的比较结果
+            output_dir: 输出目录
+            show_dtype: 是否展示 dtype 信息
+            show_shape: 是否展示 shape 和 strides 信息
+            show_kernel: 是否展示 kernel 信息
+            special_matmul: 是否进行特殊的 matmul 展示
+        """
+        print("=== Stage 4: 展示 ===")
+        
+        if comparison_result['type'] == 'single_file':
+            self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel, aggregation_type)
+        elif comparison_result['type'] == 'multiple_files':
+            self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel, special_matmul, aggregation_type)
+    
+    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel: bool, aggregation_type: str = 'on_op_name') -> None:
+        """展示单文件数据"""
+        print("生成单文件展示结果...")
+        
+        rows = []
+        for key, aggregated_data in data.items():
+            # 根据聚合类型生成相应的列
+            if aggregation_type == 'on_op_name':
+                # 字符串键：操作名称
+                row = {
+                    'op_name': key,
+                    'cpu_event_count': len(aggregated_data.cpu_events)
+                }
+            elif aggregation_type == 'on_op_shape':
+                # tuple键：(op_name, input_dims, input_strides)
+                op_name, input_dims, input_strides = key
+                row = {
+                    'op_name': op_name,
+                    'input_dims': str(input_dims),
+                    'input_strides': str(input_strides),
+                    'cpu_event_count': len(aggregated_data.cpu_events)
+                }
+            elif aggregation_type == 'on_call_stack':
+                # tuple键：(call_stack_tuple, op_name)
+                call_stack_tuple, op_name = key
+                call_stack_str = ' -> '.join(call_stack_tuple)
+                row = {
+                    'call_stack': call_stack_str,
+                    'op_name': op_name,
+                    'cpu_event_count': len(aggregated_data.cpu_events)
+                }
+            else:
+                # 未知聚合类型，使用通用格式
+                row = {
+                    'key': str(key),
+                    'cpu_event_count': len(aggregated_data.cpu_events)
+                }
+            
+            if show_dtype:
+                # 收集 dtype 种类信息
+                dtypes = set()
+                for cpu_event in aggregated_data.cpu_events:
+                    args = cpu_event.args or {}
+                    input_types = args.get('Input type', [])
+                    # 将每个event的输入类型信息作为一个整体来记录
+                    if input_types:
+                        dtypes.add(str(input_types))
+                row['dtypes'] = '||'.join(sorted(dtypes)) if dtypes else ''
+            
+            if show_shape:
+                # 收集 shape 和 strides 种类信息
+                shapes = set()
+                strides = set()
+                for cpu_event in aggregated_data.cpu_events:
+                    args = cpu_event.args or {}
+                    input_dims = args.get('Input Dims', [])
+                    input_strides = args.get('Input Strides', [])
+                    # 将每个event的输入维度信息作为一个整体来记录
+                    if input_dims:
+                        shapes.add(str(input_dims))
+                    if input_strides:
+                        strides.add(str(input_strides))
+                row['shapes'] = '||'.join(sorted(shapes)) if shapes else ''
+                row['strides'] = '||'.join(sorted(strides)) if strides else ''
+            
+            if show_kernel:
+                # 收集 kernel 信息
+                kernel_stats = self._calculate_kernel_statistics(aggregated_data.kernel_events)
+                if kernel_stats:
+                    row['kernel_count'] = sum(stats.count for stats in kernel_stats)
+                    row['kernel_names'] = '||'.join(stats.kernel_name for stats in kernel_stats)
+                    row['kernel_mean_duration'] = sum(stats.mean_duration * stats.count for stats in kernel_stats) / sum(stats.count for stats in kernel_stats)
+                else:
+                    row['kernel_count'] = 0
+                    row['kernel_names'] = ''
+                    row['kernel_mean_duration'] = 0.0
+            
+            rows.append(row)
+        
+        # 生成文件
+        self._generate_output_files(rows, output_dir, "single_file_analysis")
+    
+    def _present_multiple_files(self, data: Dict[str, Any], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel: bool, special_matmul: bool, aggregation_type: str = 'on_op_name') -> None:
+        """展示多文件数据"""
+        print("生成多文件展示结果...")
+        
+        rows = []
+        for key, entry in data.items():
+            # 根据聚合类型生成相应的列
+            if aggregation_type == 'on_op_name':
+                # 字符串键：操作名称
+                row = {'op_name': key}
+            elif aggregation_type == 'on_op_shape':
+                # tuple键：(op_name, input_dims, input_strides)
+                op_name, input_dims, input_strides = key
+                row = {
+                    'op_name': op_name,
+                    'input_dims': str(input_dims),
+                    'input_strides': str(input_strides)
+                }
+            elif aggregation_type == 'on_call_stack':
+                # tuple键：(call_stack_tuple, op_name)
+                call_stack_tuple, op_name = key
+                call_stack_str = ' -> '.join(call_stack_tuple)
+                row = {
+                    'call_stack': call_stack_str,
+                    'op_name': op_name
+                }
+            else:
+                # 未知聚合类型，使用通用格式
+                row = {'key': str(key)}
+            
+            # 为每个文件添加数据
+            for label, file_data in entry['files'].items():
+                cpu_events = file_data['cpu_events']
+                kernel_events = file_data['kernel_events']
+                
+                row[f'{label}_cpu_event_count'] = len(cpu_events)
+                
+                if show_dtype:
+                    dtypes = set()
+                    for cpu_event in cpu_events:
+                        args = cpu_event.args or {}
+                        input_types = args.get('Input type', [])
+                        # 将每个event的输入类型信息作为一个整体来记录
+                        if input_types:
+                            dtypes.add(str(input_types))
+                    row[f'{label}_dtypes'] = '||'.join(sorted(dtypes)) if dtypes else ''
+                
+                if show_shape:
+                    shapes = set()
+                    strides = set()
+                    for cpu_event in cpu_events:
+                        args = cpu_event.args or {}
+                        input_dims = args.get('Input Dims', [])
+                        input_strides = args.get('Input Strides', [])
+                        # 将每个event的输入维度信息作为一个整体来记录
+                        if input_dims:
+                            shapes.add(str(input_dims))
+                        if input_strides:
+                            strides.add(str(input_strides))
+                    row[f'{label}_shapes'] = '||'.join(sorted(shapes)) if shapes else ''
+                    row[f'{label}_strides'] = '||'.join(sorted(strides)) if strides else ''
+                
+                if show_kernel:
+                    kernel_stats = self._calculate_kernel_statistics(kernel_events)
+                    if kernel_stats:
+                        row[f'{label}_kernel_count'] = sum(stats.count for stats in kernel_stats)
+                        row[f'{label}_kernel_names'] = '||'.join(stats.kernel_name for stats in kernel_stats)
+                        row[f'{label}_kernel_mean_duration'] = sum(stats.mean_duration * stats.count for stats in kernel_stats) / sum(stats.count for stats in kernel_stats)
+                    else:
+                        row[f'{label}_kernel_count'] = 0
+                        row[f'{label}_kernel_names'] = ''
+                        row[f'{label}_kernel_mean_duration'] = 0.0
+            
+            rows.append(row)
+        
+        # 生成文件
+        self._generate_output_files(rows, output_dir, "multiple_files_analysis")
+        
+        # 特殊的 matmul 展示
+        if special_matmul:
+            self._present_special_matmul(data, output_dir)
+    
+    def _present_special_matmul(self, data: Dict[str, Any], output_dir: str) -> None:
+        """特殊的 matmul 展示：抓取matmul 系列kernel 信息，形成 kernel mean duration ratio vs min(m,k,n) 的表格和折线图"""
+        print("生成特殊的 matmul 展示...")
+        
+        matmul_data = {}
+        
+        for key, entry in data.items():
+            # 检查是否是 matmul 相关的键
+            if 'aten::mm' in key or 'matmul' in key.lower():
+                # 提取维度信息
+                dimensions = self._extract_matmul_dimensions(key)
+                if dimensions:
+                    m, k, n = dimensions
+                    min_dim = min(m, k, n)
+                    
+                    if min_dim not in matmul_data:
+                        matmul_data[min_dim] = {}
+                    
+                    # 为每个文件收集数据
+                    for label, file_data in entry['files'].items():
+                        kernel_events = file_data['kernel_events']
+                        kernel_stats = self._calculate_kernel_statistics(kernel_events)
+                        
+                        if kernel_stats:
+                            mean_duration = sum(stats.mean_duration * stats.count for stats in kernel_stats) / sum(stats.count for stats in kernel_stats)
+                            matmul_data[min_dim][label] = mean_duration
+        
+        if matmul_data:
+            # 生成 matmul 分析文件
+            self._generate_matmul_analysis(matmul_data, output_dir)
+    
+    def _extract_matmul_dimensions(self, key: str) -> Optional[Tuple[int, int, int]]:
+        """从键中提取 matmul 维度信息"""
+        try:
+            # 使用正则表达式提取数字
+            pattern = r'\(\((\d+),\s*(\d+)\)\s*,\s*\((\d+),\s*(\d+)\)\)'
+            match = re.search(pattern, key)
+            
+            if match:
+                m, k1, k2, n = map(int, match.groups())
+                # 验证k1 == k2 (矩阵乘法的要求)
+                if k1 == k2:
+                    return (m, k1, n)
+            
+            return None
+        except Exception:
+            return None
+    
+    def _calculate_kernel_statistics(self, kernel_events: List[ActivityEvent]) -> List[KernelStatistics]:
+        """计算 kernel 事件的统计信息"""
         if not kernel_events:
             return []
         
@@ -256,2070 +818,161 @@ class Analyzer:
         
         return statistics_list
     
-    def analyze_cpu_op_kernel_mapping(self, data: ProfilerData) -> Dict:
-        """
-        功能5.2: 分析 cpu_op 和 kernel 的映射关系
+    def _generate_output_files(self, rows: List[Dict], output_dir: str, base_name: str) -> None:
+        """生成输出文件（JSON 和 XLSX）"""
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
         
-        Args:
-            data: ProfilerData 对象
-            
-        Returns:
-            Dict: 逐级映射的数据结构
-        """
-        # 首先按 External id 重组数据
-        external_id_map = self.reorganize_by_external_id(data)
-        
-        # 逐级映射: Map[cpu_op_name][cpu_op_input_strides][cpu_op_input_dims][cpu_op_input_type] -> List[kernel_events]
-        mapping = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list))))
-        
-        for external_id, events in external_id_map.items():
-            cpu_op_events = [e for e in events if e.cat == 'cpu_op']
-            kernel_events = [e for e in events if e.cat == 'kernel']
-            
-            if not cpu_op_events or not kernel_events:
-                continue
-            
-            # 检查是否有多个不同的 kernel name
-            kernel_names = set(e.name for e in kernel_events)
-            if len(kernel_names) > 1:
-                pass
-                # print(f"警告: External id {external_id} 对应的 kernel 事件有不同的名称: {kernel_names}")
-                # print(f"  cpu_op 事件: {[e.name for e in cpu_op_events]}")
-                # print(f"  kernel 事件: {[e.name for e in kernel_events]}")
-            
-            # 为每个 cpu_op 事件创建映射
-            for cpu_op_event in cpu_op_events:
-                name, input_strides, input_dims, input_type = self.get_cpu_op_info(cpu_op_event)
-                
-                # 将 input_strides, input_dims, input_type 转换为可哈希的类型
-                def make_hashable(obj):
-                    if isinstance(obj, list):
-                        return tuple(make_hashable(item) for item in obj)
-                    elif isinstance(obj, dict):
-                        return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
-                    else:
-                        return obj
-                
-                input_strides_key = make_hashable(input_strides)
-                input_dims_key = make_hashable(input_dims)
-                input_type_key = make_hashable(input_type)
-                
-                mapping[name][input_strides_key][input_dims_key][input_type_key].extend(kernel_events)
-        
-        return mapping
-    
-    def _build_cpu_op_mapping_structure(self, data: ProfilerData, include_kernel: bool = True) -> Dict:
-        """
-        构建 cpu_op 映射结构的公共方法
-        现在所有 cpu_op 都已经有对应的 kernel 事件
-        
-        Args:
-            data: ProfilerData 对象
-            include_kernel: 在输出结果时是否保留 kernel 相关信息
-            
-        Returns:
-            Dict: cpu_op 映射结构
-        """
-        # 首先按 External id 重组数据（已经过滤了只有对应 kernel 的 cpu_op）
-        external_id_map = self.reorganize_by_external_id(data)
-        
-        # 映射结构: Map[cpu_op_name][cpu_op_input_strides][cpu_op_input_dims][cpu_op_input_type] -> List[events]
-        mapping = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list))))
-        
-        for external_id, events in external_id_map.items():
-            cpu_op_events = [e for e in events if e.cat == 'cpu_op']
-            kernel_events = [e for e in events if e.cat == 'kernel']
-            
-            # 现在所有 cpu_op 都有对应的 kernel 事件，所以不需要额外检查
-            
-            # 为每个 cpu_op 事件创建映射
-            for cpu_op_event in cpu_op_events:
-                name, input_strides, input_dims, input_type = self.get_cpu_op_info(cpu_op_event)
-                
-                # 将 input_strides, input_dims, input_type 转换为可哈希的类型
-                def make_hashable(obj):
-                    if isinstance(obj, list):
-                        return tuple(make_hashable(item) for item in obj)
-                    elif isinstance(obj, dict):
-                        return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
-                    else:
-                        return obj
-                
-                input_strides_key = make_hashable(input_strides)
-                input_dims_key = make_hashable(input_dims)
-                input_type_key = make_hashable(input_type)
-                
-                if include_kernel:
-                    # 包含 kernel 信息时，存储 kernel 事件
-                    mapping[name][input_strides_key][input_dims_key][input_type_key].extend(kernel_events)
-                else:
-                    # 不包含 kernel 信息时，只存储 cpu_op 事件
-                    mapping[name][input_strides_key][input_dims_key][input_type_key].append(cpu_op_event)
-        
-        return mapping
-    
-    def analyze_cpu_op_kernel_mapping(self, data: ProfilerData) -> Dict:
-        """
-        功能5.2: 分析 cpu_op 和 kernel 的映射关系
-        
-        Args:
-            data: ProfilerData 对象
-            
-        Returns:
-            Dict: 逐级映射的数据结构
-        """
-        return self._build_cpu_op_mapping_structure(data, include_kernel=True)
-    
-    def analyze_cpu_op_only(self, data: ProfilerData) -> Dict:
-        """
-        只分析 cpu_op 信息，不包含 kernel 映射关系
-        
-        Args:
-            data: ProfilerData 对象
-            
-        Returns:
-            Dict: cpu_op 信息映射
-        """
-        return self._build_cpu_op_mapping_structure(data, include_kernel=False)
-    
-    def generate_excel_from_cpu_op_mapping(self, mapping: Dict, output_file: str = "cpu_op_analysis.xlsx") -> None:
-        """
-        将只包含 cpu_op 信息的映射数据生成 Excel 表格
-        
-        Args:
-            mapping: cpu_op 映射数据
-            output_file: 输出文件名
-        """
-        rows = []
-        
-        for cpu_op_name, strides_map in mapping.items():
-            for input_strides, dims_map in strides_map.items():
-                for input_dims, types_map in dims_map.items():
-                    for input_type, cpu_op_events in types_map.items():
-                        row = {
-                            'cpu_op_name': cpu_op_name,
-                            'cpu_op_input_strides': str(input_strides),
-                            'cpu_op_input_dims': str(input_dims),
-                            'cpu_op_input_type': str(input_type),
-                            'cpu_op_count': len(cpu_op_events)
-                        }
-                        rows.append(row)
-        
-        if rows:
-            df = pd.DataFrame(rows)
-            try:
-                df.to_excel(output_file, index=False)
-                print(f"Excel 文件已生成: {output_file}")
-                print(f"包含 {len(rows)} 行数据")
-            except ImportError:
-                # 如果没有 openpyxl，保存为 CSV 和 JSON
-                csv_file = output_file.replace('.xlsx', '.csv')
-                json_file = output_file.replace('.xlsx', '.json')
-                
-                # 使用安全的 CSV 输出方法
-                self._safe_csv_output(df, csv_file)
-                print(f"包含 {len(rows)} 行数据")
-                
-                # 同时保存为 JSON 格式，便于查看
-                df.to_json(json_file, orient='records', indent=2, force_ascii=False)
-                print(f"JSON 文件已生成: {json_file}")
-        else:
-            print("没有找到 cpu_op 数据，跳过 Excel 文件生成")
-    
-    def save_cpu_op_mapping_to_json(self, mapping: Dict, output_file: str = "cpu_op_analysis.json") -> None:
-        """
-        将只包含 cpu_op 信息的映射数据保存为 JSON 文件
-        
-        Args:
-            mapping: cpu_op 映射数据
-            output_file: 输出文件名
-        """
-        # 转换为可序列化的格式
-        serializable_mapping = {}
-        
-        for cpu_op_name, strides_map in mapping.items():
-            serializable_mapping[cpu_op_name] = {}
-            
-            for input_strides, dims_map in strides_map.items():
-                strides_key = str(input_strides)
-                serializable_mapping[cpu_op_name][strides_key] = {}
-                
-                for input_dims, types_map in dims_map.items():
-                    dims_key = str(input_dims)
-                    serializable_mapping[cpu_op_name][strides_key][dims_key] = {}
-                    
-                    for input_type, cpu_op_events in types_map.items():
-                        type_key = str(input_type)
-                        
-                        # 只保存 cpu_op 事件的基本信息
-                        events_info = []
-                        for event in cpu_op_events:
-                            event_info = {
-                                'name': event.name,
-                                'external_id': event.external_id
-                            }
-                            events_info.append(event_info)
-                        
-                        serializable_mapping[cpu_op_name][strides_key][dims_key][type_key] = events_info
-        
-        # 保存为 JSON 文件
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(serializable_mapping, f, indent=2, ensure_ascii=False)
-        
-        print(f"JSON 文件已生成: {output_file}")
-    
-    def generate_excel_from_mapping(self, mapping: Dict, output_file: str = "cpu_op_kernel_analysis.xlsx") -> None:
-        """
-        功能5.3: 将映射数据生成 Excel 表格
-        
-        Args:
-            mapping: 映射数据
-            output_file: 输出文件名
-        """
-        rows = []
-        
-        for cpu_op_name, strides_map in mapping.items():
-            for input_strides, dims_map in strides_map.items():
-                for input_dims, types_map in dims_map.items():
-                    for input_type, kernel_events in types_map.items():
-                        # 计算 kernel 统计信息
-                        kernel_stats = self.calculate_kernel_statistics(kernel_events)
-                        
-                        for stats in kernel_stats:
-                            row = {
-                                'cpu_op_name': cpu_op_name,
-                                'cpu_op_input_strides': str(input_strides),
-                                'cpu_op_input_dims': str(input_dims),
-                                'cpu_op_input_type': str(input_type),
-                                'kernel_name': stats.kernel_name,
-                                'kernel_count': stats.count,
-                                'kernel_min_duration': stats.min_duration,
-                                'kernel_max_duration': stats.max_duration,
-                                'kernel_mean_duration': stats.mean_duration,
-                                'kernel_std_duration': stats.variance ** 0.5
-                            }
-                            rows.append(row)
-        
-        if rows:
-            df = pd.DataFrame(rows)
-            try:
-                df.to_excel(output_file, index=False)
-                print(f"Excel 文件已生成: {output_file}")
-                print(f"包含 {len(rows)} 行数据")
-            except ImportError:
-                # 如果没有 openpyxl，保存为 CSV 和 JSON
-                csv_file = output_file.replace('.xlsx', '.csv')
-                json_file = output_file.replace('.xlsx', '.json')
-                
-                # 使用安全的 CSV 输出方法
-                self._safe_csv_output(df, csv_file)
-                print(f"包含 {len(rows)} 行数据")
-                
-                # 同时保存为 JSON 格式，便于查看
-                df.to_json(json_file, orient='records', indent=2, force_ascii=False)
-                print(f"JSON 文件已生成: {json_file}")
-                
-                print("注意: 需要安装 openpyxl 来生成 Excel 文件: pip install openpyxl")
-                print("注意: CSV 文件使用制表符分隔或带引号，请用 Excel 或支持这些格式的编辑器打开")
-        else:
-            print("没有数据可以生成文件")
-    
-    def analyze_multiple_files(self, file_labels: List[Tuple[str, str]]) -> Dict:
-        """
-        功能5.4: 分析多个 JSON 文件
-        
-        Args:
-            file_labels: List of (file_path, label) tuples
-            
-        Returns:
-            Dict: 合并后的映射数据
-        """
-        all_mappings = {}
-        
-        for file_path, label in file_labels:
-            print(f"正在分析文件: {file_path} (标签: {label})")
-            
-            try:
-                data = self.parser.load_json_file(file_path)
-                mapping = self.analyze_cpu_op_kernel_mapping(data)
-                all_mappings[label] = mapping
-                print(f"  完成分析，找到 {len(mapping)} 个 cpu_op")
-                
-            except Exception as e:
-                print(f"  分析文件失败: {e}")
-                continue
-        
-        return all_mappings
-    
-    def merge_mappings(self, all_mappings: Dict) -> Dict:
-        """
-        合并多个文件的映射数据
-        
-        Args:
-            all_mappings: Dict[label, mapping]
-            
-        Returns:
-            Dict: 合并后的映射，key为(cpu_op_name, input_strides, input_dims)，value为Dict[label, Dict[input_type, kernel_events]]
-        """
-        merged = defaultdict(lambda: defaultdict(dict))
-        
-        for label, mapping in all_mappings.items():
-            for cpu_op_name, strides_map in mapping.items():
-                for input_strides, dims_map in strides_map.items():
-                    for input_dims, types_map in dims_map.items():
-                        for input_type, kernel_events in types_map.items():
-                            key = (cpu_op_name, input_strides, input_dims)
-                            merged[key][label][input_type] = kernel_events
-        
-        return dict(merged)
-
-    def generate_comparison_excel(self, merged_mapping: Dict, output_file: str = "comparison_analysis.xlsx") -> None:
-        """
-        生成比较分析的 Excel 表格
-        
-        Args:
-            merged_mapping: 合并后的映射数据
-            output_file: 输出文件名
-        """
-        rows = []
-        
-        for (cpu_op_name, input_strides, input_dims), label_types_map in merged_mapping.items():
-            # 收集所有标签
-            labels = list(label_types_map.keys())
-            
-            # 基础行数据
-            row = {
-                'cpu_op_name': cpu_op_name,
-                'cpu_op_input_strides': str(input_strides),
-                'cpu_op_input_dims': str(input_dims)
-            }
-            
-            # 为每个标签收集数据
-            for label in labels:
-                types_map = label_types_map[label]
-                
-                # 收集所有input_type和kernel信息
-                input_types = []
-                kernel_names = []
-                kernel_stats_list = []
-                
-                for input_type, kernel_events in types_map.items():
-                    input_types.append(str(input_type))
-                    kernel_stats = self.calculate_kernel_statistics(kernel_events)
-                    
-                    for stats in kernel_stats:
-                        kernel_names.append(stats.kernel_name)
-                        kernel_stats_list.append(stats)
-                
-                # 用||连接多个值
-                row[f'{label}_input_types'] = '||'.join(input_types) if input_types else ''
-                row[f'{label}_kernel_names'] = '||'.join(kernel_names) if kernel_names else ''
-                
-                # 计算kernel统计信息
-                if kernel_stats_list:
-                    # 计算所有kernel的总调用次数和加权平均duration
-                    total_count = sum(stats.count for stats in kernel_stats_list)
-                    weighted_mean = sum(stats.mean_duration * stats.count for stats in kernel_stats_list) / total_count if total_count > 0 else 0.0
-                    
-                    row[f'{label}_kernel_count'] = total_count
-                    row[f'{label}_kernel_mean_duration'] = weighted_mean
-                else:
-                    row[f'{label}_kernel_count'] = 0
-                    row[f'{label}_kernel_mean_duration'] = 0.0
-            
-            # 计算相对变化和比较信息（如果有多个标签）
-            if len(labels) >= 2:
-                base_label = labels[0]
-                base_mean = row.get(f'{base_label}_kernel_mean_duration', 0.0)
-                
-                # 收集所有kernel_names和kernel_count进行比较
-                all_kernel_names = []
-                all_kernel_counts = []
-                
-                for label in labels:
-                    all_kernel_names.append(set(row.get(f'{label}_kernel_names', '').split('||') if row.get(f'{label}_kernel_names') else []))
-                    all_kernel_counts.append(row.get(f'{label}_kernel_count', 0))
-                
-                # 检查kernel_names是否相等（不考虑顺序）
-                kernel_names_equal = len(set(frozenset(names) for names in all_kernel_names)) == 1
-                row['kernel_names_equal'] = kernel_names_equal
-                
-                # 检查kernel_count是否相等
-                kernel_count_equal = len(set(all_kernel_counts)) == 1
-                row['kernel_count_equal'] = kernel_count_equal
-                
-                for label in labels[1:]:
-                    current_mean = row.get(f'{label}_kernel_mean_duration', 0.0)
-                    if base_mean > 0:
-                        ratio = current_mean / base_mean
-                        row[f'{label}_ratio_to_{base_label}'] = ratio
-                    else:
-                        row[f'{label}_ratio_to_{base_label}'] = float('inf') if current_mean > 0 else 1.0
-            else:
-                # 只有一个标签时，设置默认值
-                row['kernel_names_equal'] = True
-                row['kernel_count_equal'] = True
-            
-            rows.append(row)
-        
-        if rows:
-            df = pd.DataFrame(rows)
-            try:
-                df.to_excel(output_file, index=False)
-                print(f"比较分析 Excel 文件已生成: {output_file}")
-                print(f"包含 {len(rows)} 行数据")
-                
-                # 打印统计信息
-                print(f"分析了 {len(merged_mapping)} 个不同的 (cpu_op_name, input_strides, input_dims) 组合")
-                
-            except ImportError:
-                # 如果没有 openpyxl，保存为 CSV 和 JSON
-                csv_file = output_file.replace('.xlsx', '.csv')
-                json_file = output_file.replace('.xlsx', '.json')
-                
-                # 使用安全的 CSV 输出方法
-                self._safe_csv_output(df, csv_file)
-                print(f"包含 {len(rows)} 行数据")
-                
-                # 同时保存为 JSON 格式，便于查看
-                df.to_json(json_file, orient='records', indent=2, force_ascii=False)
-                print(f"比较分析 JSON 文件已生成: {json_file}")
-                
-                print("注意: 需要安装 openpyxl 来生成 Excel 文件: pip install openpyxl")
-                print("注意: CSV 文件使用制表符分隔或带引号，请用 Excel 或支持这些格式的编辑器打开")
-        else:
-            print("没有数据可以生成比较分析文件")
-    
-    def run_complete_analysis(self, file_labels: List[Tuple[str, str]], 
-                            output_dir: str = ".", 
-                            output_formats: List[str] = None) -> None:
-        """
-        运行完整的分析流程
-        
-        Args:
-            file_labels: List of (file_path, label) tuples
-            output_dir: 输出目录
-            output_formats: 输出格式列表，支持 ['json', 'xlsx']
-        """
-        if output_formats is None:
-            output_formats = ['json', 'xlsx']
-        
-        print("=== 开始完整分析流程 ===")
-        
-        # 分析多个文件
-        all_mappings = self.analyze_multiple_files(file_labels)
-        
-        if not all_mappings:
-            print("没有成功分析任何文件")
-            return
-        
-        # 为每个文件生成单独的分析
-        for label, mapping in all_mappings.items():
-            base_name = f"{label}_single_file_analysis"
-            
-            if 'json' in output_formats:
-                json_file = f"{output_dir}/{base_name}.json"
-                self.save_mapping_to_json(mapping, json_file)
-            
-            if 'xlsx' in output_formats:
-                xlsx_file = f"{output_dir}/{base_name}.xlsx"
-                self.generate_excel_from_mapping(mapping, xlsx_file)
-        
-        # 合并映射并生成比较分析
-        if len(all_mappings) > 1:
-            merged_mapping = self.merge_mappings(all_mappings)
-            
-            # 生成包含标签的文件名
-            labels = list(all_mappings.keys())
-            labels_str = '_'.join(labels)
-            base_name = f"comparison_analysis_{labels_str}"
-            
-            if 'json' in output_formats:
-                json_file = f"{output_dir}/{base_name}.json"
-                self.save_comparison_to_json(merged_mapping, json_file)
-            
-            if 'xlsx' in output_formats:
-                xlsx_file = f"{output_dir}/{base_name}.xlsx"
-                self.generate_comparison_excel(merged_mapping, xlsx_file)
-        
-        print("=== 分析流程完成 ===")
-
-    def save_mapping_to_json(self, mapping: Dict, output_file: str) -> None:
-        """
-        将映射数据保存为 JSON 格式
-        
-        Args:
-            mapping: 映射数据
-            output_file: 输出文件路径
-        """
-        # 转换数据为可序列化的格式
-        serializable_mapping = {}
-        
-        for cpu_op_name, strides_map in mapping.items():
-            serializable_mapping[cpu_op_name] = {}
-            
-            for strides, dims_map in strides_map.items():
-                serializable_mapping[cpu_op_name][str(strides)] = {}
-                
-                for dims, types_map in dims_map.items():
-                    serializable_mapping[cpu_op_name][str(strides)][str(dims)] = {}
-                    
-                    for input_type, kernel_events in types_map.items():
-                        # 转换 kernel 事件为可序列化的格式
-                        serializable_events = []
-                        for event in kernel_events:
-                            serializable_event = {
-                                'name': event.name,
-                                'cat': event.cat,
-                                'ph': event.ph,
-                                'ts': event.ts,
-                                'dur': event.dur,
-                                'tid': event.tid,
-                                'pid': event.pid,
-                                'args': event.args,
-                                'external_id': event.external_id
-                            }
-                            serializable_events.append(serializable_event)
-                        
-                        serializable_mapping[cpu_op_name][str(strides)][str(dims)][str(input_type)] = serializable_events
-        
-        # 保存为 JSON 文件
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(serializable_mapping, f, indent=2, ensure_ascii=False)
-        
-        print(f"映射数据已保存为 JSON: {output_file}")
-    
-    def save_comparison_to_json(self, merged_mapping: Dict, output_file: str) -> None:
-        """
-        将比较分析数据保存为 JSON 格式
-        
-        Args:
-            merged_mapping: 合并的映射数据
-            output_file: 输出文件路径
-        """
-        # 转换数据为可序列化的格式
-        serializable_data = []
-        
-        for key, label_types_map in merged_mapping.items():
-            cpu_op_name, input_strides, input_dims = key
-            
-            # 收集所有标签
-            labels = list(label_types_map.keys())
-            
-            # 基础行数据
-            row = {
-                'cpu_op_name': cpu_op_name,
-                'cpu_op_input_strides': str(input_strides),
-                'cpu_op_input_dims': str(input_dims)
-            }
-            
-            # 为每个标签收集数据
-            for label in labels:
-                types_map = label_types_map[label]
-                
-                # 收集所有input_type和kernel信息
-                input_types = []
-                kernel_names = []
-                kernel_stats_list = []
-                
-                for input_type, kernel_events in types_map.items():
-                    input_types.append(str(input_type))
-                    kernel_stats = self.calculate_kernel_statistics(kernel_events)
-                    
-                    for stats in kernel_stats:
-                        kernel_names.append(stats.kernel_name)
-                        kernel_stats_list.append(stats)
-                
-                # 用||连接多个值
-                row[f'{label}_input_types'] = '||'.join(input_types) if input_types else ''
-                row[f'{label}_kernel_names'] = '||'.join(kernel_names) if kernel_names else ''
-                
-                # 计算kernel统计信息
-                if kernel_stats_list:
-                    # 计算所有kernel的总调用次数和加权平均duration
-                    total_count = sum(stats.count for stats in kernel_stats_list)
-                    weighted_mean = sum(stats.mean_duration * stats.count for stats in kernel_stats_list) / total_count if total_count > 0 else 0.0
-                    
-                    row[f'{label}_kernel_count'] = total_count
-                    row[f'{label}_kernel_mean_duration'] = weighted_mean
-                else:
-                    row[f'{label}_kernel_count'] = 0
-                    row[f'{label}_kernel_mean_duration'] = 0.0
-            
-            # 计算相对变化和比较信息（如果有多个标签）
-            if len(labels) >= 2:
-                base_label = labels[0]
-                base_mean = row.get(f'{base_label}_kernel_mean_duration', 0.0)
-                
-                # 收集所有kernel_names和kernel_count进行比较
-                all_kernel_names = []
-                all_kernel_counts = []
-                
-                for label in labels:
-                    all_kernel_names.append(set(row.get(f'{label}_kernel_names', '').split('||') if row.get(f'{label}_kernel_names') else []))
-                    all_kernel_counts.append(row.get(f'{label}_kernel_count', 0))
-                
-                # 检查kernel_names是否相等（不考虑顺序）
-                kernel_names_equal = len(set(frozenset(names) for names in all_kernel_names)) == 1
-                row['kernel_names_equal'] = kernel_names_equal
-                
-                # 检查kernel_count是否相等
-                kernel_count_equal = len(set(all_kernel_counts)) == 1
-                row['kernel_count_equal'] = kernel_count_equal
-                
-                for label in labels[1:]:
-                    current_mean = row.get(f'{label}_kernel_mean_duration', 0.0)
-                    if base_mean > 0:
-                        ratio = current_mean / base_mean
-                        row[f'{label}_ratio_to_{base_label}'] = ratio
-                    else:
-                        row[f'{label}_ratio_to_{base_label}'] = float('inf') if current_mean > 0 else 1.0
-            else:
-                # 只有一个标签时，设置默认值
-                row['kernel_names_equal'] = True
-                row['kernel_count_equal'] = True
-            
-            serializable_data.append(row)
-        
-        # 保存为 JSON 文件
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(serializable_data, f, indent=2, ensure_ascii=False)
-        
-        print(f"比较分析数据已保存为 JSON: {output_file}")
-        print(f"包含 {len(serializable_data)} 条记录")
-
-    def _safe_csv_output(self, df: pd.DataFrame, csv_file: str) -> None:
-        """
-        安全地生成 CSV 文件，处理包含逗号的字段
-        
-        Args:
-            df: pandas DataFrame
-            csv_file: CSV 文件路径
-        """
-        # 方法1: 使用制表符分隔符
-        df.to_csv(csv_file, index=False, sep='\t', encoding='utf-8')
-        
-        # 方法2: 同时生成一个带引号的 CSV 文件
-        quoted_csv_file = csv_file.replace('.csv', '_quoted.csv')
-        df.to_csv(quoted_csv_file, index=False, quoting=1, encoding='utf-8')  # quoting=1 表示所有字段都用引号包围
-        
-        print(f"CSV 文件已生成 (制表符分隔): {csv_file}")
-        print(f"CSV 文件已生成 (带引号): {quoted_csv_file}")
-
-    def extract_matmul_dimensions(self, input_dims_str: str) -> Optional[Tuple[int, int, int]]:
-        """
-        从matmul算子的input_dims中提取m, k, n维度
-        
-        Args:
-            input_dims_str: 格式如 "((2048, 3), (3, 32))" 的字符串
-            
-        Returns:
-            Optional[Tuple[m, k, n]]: 提取的维度，如果解析失败返回None
-        """
-        try:
-            # 使用正则表达式提取数字
-            pattern = r'\(\((\d+),\s*(\d+)\)\s*,\s*\((\d+),\s*(\d+)\)\)'
-            match = re.match(pattern, input_dims_str)
-            
-            if match:
-                m, k1, k2, n = map(int, match.groups())
-                # 验证k1 == k2 (矩阵乘法的要求)
-                if k1 == k2:
-                    return (m, k1, n)
-            
-            return None
-        except Exception:
-            return None
-
-    def analyze_matmul_by_min_dim(self, comparison_data: List[Dict]) -> Dict[int, List]:
-        """
-        专门分析matmul算子，按最小维度分组
-        
-        Args:
-            comparison_data: 比较分析的数据列表
-            
-        Returns:
-            Dict[int, List]: 按min_dim分组的matmul数据
-        """
-        matmul_data = {}
-        
-        # 首先收集所有标签
-        labels = []
-        for item in comparison_data:
-            if item.get('cpu_op_name') == 'aten::mm':
-                for key in item.keys():
-                    if key.endswith('_input_types'):
-                        label = key.replace('_input_types', '')
-                        if label not in labels:
-                            labels.append(label)
-                break
-        
-        if not labels:
-            return {}
-        
-        # 按min_dim分组收集数据
-        min_dim_data = defaultdict(lambda: {label: [] for label in labels})
-        
-        for item in comparison_data:
-            if item.get('cpu_op_name') == 'aten::mm':
-                input_dims = item.get('cpu_op_input_dims', '')
-                dimensions = self.extract_matmul_dimensions(input_dims)
-                
-                if dimensions:
-                    m, k, n = dimensions
-                    min_dim = min(m, k, n)
-                    
-                    # 为每个标签收集数据
-                    for label in labels:
-                        input_types = item.get(f'{label}_input_types', '')
-                        kernel_count = item.get(f'{label}_kernel_count', 0)
-                        kernel_mean_duration = item.get(f'{label}_kernel_mean_duration', 0.0)
-                        
-                        # 只有当所有字段都有有效数据时才添加
-                        if input_types and kernel_count > 0 and kernel_mean_duration > 0:
-                            min_dim_data[min_dim][label].append([input_types, kernel_count, kernel_mean_duration])
-        
-        # 只保留在所有标签中都有数据的min_dim
-        filtered_matmul_data = {}
-        for min_dim, label_data in min_dim_data.items():
-            # 检查是否所有标签都有数据
-            all_labels_have_data = all(len(data_list) > 0 for data_list in label_data.values())
-            
-            if all_labels_have_data:
-                # 为每个标签选择第一个数据条目（或者可以取平均值）
-                filtered_entries = []
-                for label in labels:
-                    data_list = label_data[label]
-                    if data_list:
-                        # 取第一个条目，或者可以计算平均值
-                        filtered_entries.extend(data_list[0])
-                
-                filtered_matmul_data[min_dim] = [filtered_entries]
-        
-        return filtered_matmul_data
-
-    def generate_matmul_analysis(self, comparison_data: List[Dict], output_dir: str = ".") -> None:
-        """
-        生成matmul算子的专门分析
-        
-        Args:
-            comparison_data: 比较分析的数据列表
-            output_dir: 输出目录
-        """
-        print("=== 开始matmul算子专门分析 ===")
-        
-        # 分析matmul数据
-        matmul_data = self.analyze_matmul_by_min_dim(comparison_data)
-        
-        if not matmul_data:
-            print("没有找到matmul算子数据")
-            return
-        
-        # 获取标签信息
-        labels = []
-        for item in comparison_data:
-            if item.get('cpu_op_name') == 'aten::mm':
-                for key in item.keys():
-                    if key.endswith('_input_types'):
-                        label = key.replace('_input_types', '')
-                        if label not in labels:
-                            labels.append(label)
-                break
-        
-        # 生成JSON数据
-        json_data = []
-        for min_dim, entries in matmul_data.items():
-            for entry in entries:
-                row = {'mm_min_dim': min_dim}
-                
-                # 为每个标签添加数据
-                for i, label in enumerate(labels):
-                    start_idx = i * 3
-                    if start_idx + 2 < len(entry):
-                        row[f'{label}_input_types'] = entry[start_idx]
-                        row[f'{label}_kernel_count'] = entry[start_idx + 1]
-                        row[f'{label}_kernel_mean_duration'] = entry[start_idx + 2]
-                
-                # 添加input shape和input strides信息
-                # 从comparison_data中找到对应的原始数据
-                for item in comparison_data:
-                    if item.get('cpu_op_name') == 'aten::mm':
-                        input_dims = item.get('cpu_op_input_dims', '')
-                        input_strides = item.get('cpu_op_input_strides', '')
-                        dimensions = self.extract_matmul_dimensions(input_dims)
-                        
-                        if dimensions:
-                            m, k, n = dimensions
-                            current_min_dim = min(m, k, n)
-                            
-                            if current_min_dim == min_dim:
-                                # 为每个标签添加input shape和input strides
-                                for label in labels:
-                                    # 检查这个标签是否有数据
-                                    has_data = False
-                                    for i, label_check in enumerate(labels):
-                                        if label_check == label:
-                                            start_idx = i * 3
-                                            if start_idx + 2 < len(entry):
-                                                has_data = True
-                                                break
-                                    
-                                    if has_data:
-                                        row[f'{label}_input_shape'] = input_dims
-                                        row[f'{label}_input_strides'] = input_strides
-                                break
-                
-                # 计算比率（如果有多个标签）
-                if len(labels) >= 2:
-                    base_label = labels[0]
-                    base_duration = row.get(f'{base_label}_kernel_mean_duration', 0.0)
-                    
-                    for label in labels[1:]:
-                        current_duration = row.get(f'{label}_kernel_mean_duration', 0.0)
-                        if base_duration > 0:
-                            ratio = current_duration / base_duration
-                            row[f'{label}_ratio_to_{base_label}'] = ratio
-                        else:
-                            row[f'{label}_ratio_to_{base_label}'] = float('inf') if current_duration > 0 else 1.0
-                
-                json_data.append(row)
-        
-        # 保存JSON文件
-        json_file = f"{output_dir}/matmul_analysis.json"
+        # 生成 JSON 文件
+        json_file = output_path / f"{base_name}.json"
         with open(json_file, 'w', encoding='utf-8') as f:
-            json.dump(json_data, f, indent=2, ensure_ascii=False)
-        print(f"Matmul分析JSON文件已生成: {json_file}")
+            json.dump(rows, f, indent=2, ensure_ascii=False)
+        print(f"JSON 文件已生成: {json_file}")
         
-        # 生成Excel文件
-        if json_data:
-            df = pd.DataFrame(json_data)
-            xlsx_file = f"{output_dir}/matmul_analysis.xlsx"
+        # 生成 Excel 文件
+        if rows:
+            df = pd.DataFrame(rows)
+            xlsx_file = output_path / f"{base_name}.xlsx"
             try:
                 df.to_excel(xlsx_file, index=False)
-                print(f"Matmul分析Excel文件已生成: {xlsx_file}")
+                print(f"Excel 文件已生成: {xlsx_file}")
             except ImportError:
-                csv_file = f"{output_dir}/matmul_analysis.csv"
-                self._safe_csv_output(df, csv_file)
-                print(f"Matmul分析CSV文件已生成: {csv_file}")
+                csv_file = output_path / f"{base_name}.csv"
+                df.to_csv(csv_file, index=False, encoding='utf-8')
+                print(f"CSV 文件已生成: {csv_file}")
+        else:
+            print("没有数据可以生成 Excel 文件")
+    
+    def _generate_matmul_analysis(self, matmul_data: Dict[int, Dict[str, float]], output_dir: str) -> None:
+        """生成 matmul 分析文件"""
+        output_path = Path(output_dir)
         
-        # 生成折线图
-        if len(labels) >= 2:
-            self.generate_matmul_chart(json_data, labels, output_dir)
+        # 生成数据行
+        rows = []
+        for min_dim in sorted(matmul_data.keys()):
+            row = {'min_dim': min_dim}
+            for label, duration in matmul_data[min_dim].items():
+                row[f'{label}_mean_duration'] = duration
+            rows.append(row)
         
-        print(f"=== Matmul分析完成，共处理 {len(matmul_data)} 个不同的min_dim ===")
-
-    def generate_matmul_chart(self, json_data: List[Dict], labels: List[str], output_dir: str) -> None:
-        """
-        生成matmul算子的折线图
+        # 生成文件
+        self._generate_output_files(rows, output_dir, "matmul_analysis")
         
-        Args:
-            json_data: matmul分析数据
-            labels: 标签列表
-            output_dir: 输出目录
-        """
-        print(f"开始生成matmul图表，标签数量: {len(labels)}")
-        print(f"JSON数据数量: {len(json_data)}")
-        
-        if len(labels) < 2:
-            print("标签数量少于2，跳过图表生成")
-            return
-        
-        # 按min_dim分组数据
-        min_dim_data = defaultdict(list)
-        for item in json_data:
-            min_dim = item.get('mm_min_dim')
-            if min_dim is not None:
-                min_dim_data[min_dim].append(item)
-        
-        print(f"找到 {len(min_dim_data)} 个不同的min_dim")
-        
-        # 计算每个min_dim的平均比率，只考虑在所有标签中都有数据的点
-        chart_data = {}
-        base_label = labels[0]
-        
-        for min_dim, items in min_dim_data.items():
-            # 检查这个min_dim是否在所有标签中都有数据
-            all_labels_have_data = True
-            for label in labels:
-                has_data = False
-                for item in items:
-                    duration_key = f'{label}_kernel_mean_duration'
-                    if duration_key in item and item[duration_key] > 0:
-                        has_data = True
-                        break
-                if not has_data:
-                    all_labels_have_data = False
-                    break
-            
-            if all_labels_have_data:
-                chart_data[min_dim] = {}
-                for label in labels[1:]:
-                    ratios = []
-                    for item in items:
-                        ratio_key = f'{label}_ratio_to_{base_label}'
-                        if ratio_key in item and item[ratio_key] != float('inf'):
-                            ratios.append(item[ratio_key])
-                    
-                    if ratios:
-                        chart_data[min_dim][label] = sum(ratios) / len(ratios)
-        
-        print(f"在所有标签中都有数据的min_dim数量: {len(chart_data)}")
-        
-        if not chart_data:
-            print("没有找到在所有标签中都有数据的min_dim，跳过图表生成")
-            return
-        
+        # 生成图表
+        self._generate_matmul_chart(matmul_data, output_path)
+    
+    def _generate_matmul_chart(self, matmul_data: Dict[int, Dict[str, float]], output_path: Path) -> None:
+        """生成 matmul 性能图表"""
         try:
-            # 生成图表
             plt.figure(figsize=(12, 8))
             
+            # 收集所有标签
+            all_labels = set()
+            for data in matmul_data.values():
+                all_labels.update(data.keys())
+            
             # 为每个标签绘制一条线
-            for label in labels[1:]:
+            for label in sorted(all_labels):
                 x_values = []
                 y_values = []
                 
-                for min_dim in sorted(chart_data.keys()):
-                    if label in chart_data[min_dim]:
+                for min_dim in sorted(matmul_data.keys()):
+                    if label in matmul_data[min_dim]:
                         x_values.append(min_dim)
-                        y_values.append(chart_data[min_dim][label])
+                        y_values.append(matmul_data[min_dim][label])
                 
                 if x_values and y_values:
-                    plt.plot(x_values, y_values, marker='o', label=f'{label} ratio to {base_label}', linewidth=2, markersize=6)
+                    plt.plot(x_values, y_values, marker='o', label=label, linewidth=2, markersize=6)
             
             plt.xlabel('Matmul Min Dimension (m/k/n)', fontsize=12)
-            plt.ylabel(f'Performance Ratio ({base_label} = 1.0)', fontsize=12)
-            plt.title('Matmul Performance Analysis by Min Dimension\n(Only shapes present in all time charts)', fontsize=14, fontweight='bold')
+            plt.ylabel('Mean Duration (μs)', fontsize=12)
+            plt.title('Matmul Performance Analysis by Min Dimension', fontsize=14, fontweight='bold')
             plt.legend(fontsize=10)
             plt.grid(True, alpha=0.3)
             plt.tight_layout()
             
             # 保存图表
-            chart_file = f"{output_dir}/matmul_performance_chart.jpg"
+            chart_file = output_path / "matmul_performance_chart.jpg"
             plt.savefig(chart_file, dpi=300, bbox_inches='tight')
             plt.close()
             
-            print(f"Matmul性能图表已生成: {chart_file}")
-            print(f"图表包含 {len(chart_data)} 个在所有标签中都有数据的min_dim点")
+            print(f"Matmul 性能图表已生成: {chart_file}")
         except Exception as e:
-            print(f"生成图表时出错: {e}")
-            print("尝试使用Agg后端...")
-            try:
-                # 重新设置matplotlib后端
-                import matplotlib
-                matplotlib.use('Agg')
-                # 重新导入plt
-                import matplotlib.pyplot as plt_new
-                
-                # 重新生成图表
-                plt_new.figure(figsize=(12, 8))
-                
-                # 为每个标签绘制一条线
-                for label in labels[1:]:
-                    x_values = []
-                    y_values = []
-                    
-                    for min_dim in sorted(chart_data.keys()):
-                        if label in chart_data[min_dim]:
-                            x_values.append(min_dim)
-                            y_values.append(chart_data[min_dim][label])
-                    
-                    if x_values and y_values:
-                        plt_new.plot(x_values, y_values, marker='o', label=f'{label} ratio to {base_label}', linewidth=2, markersize=6)
-                
-                plt_new.xlabel('Matmul Min Dimension (m/k/n)', fontsize=12)
-                plt_new.ylabel(f'Performance Ratio ({base_label} = 1.0)', fontsize=12)
-                plt_new.title('Matmul Performance Analysis by Min Dimension\n(Only shapes present in all time charts)', fontsize=14, fontweight='bold')
-                plt_new.legend(fontsize=10)
-                plt_new.grid(True, alpha=0.3)
-                plt_new.tight_layout()
-                
-                # 保存图表
-                chart_file = f"{output_dir}/matmul_performance_chart.jpg"
-                plt_new.savefig(chart_file, dpi=300, bbox_inches='tight')
-                plt_new.close()
-                
-                print(f"Matmul性能图表已生成: {chart_file}")
-                print(f"图表包含 {len(chart_data)} 个在所有标签中都有数据的min_dim点")
-            except Exception as e2:
-                print(f"使用Agg后端仍然失败: {e2}")
-                print("无法生成matmul性能图表")
-
-    def run_complete_analysis_with_matmul(self, file_labels: List[Tuple[str, str]], 
-                                        output_dir: str = ".", 
-                                        output_formats: List[str] = None) -> None:
+            print(f"生成 matmul 图表时出错: {e}")
+    
+    # ==================== 完整的分析流程 ====================
+    
+    def analyze_single_file(self, file_path: str, aggregation_type: str = 'on_op_name', 
+                           show_dtype: bool = True, show_shape: bool = True, show_kernel: bool = True, 
+                           output_dir: str = ".") -> None:
         """
-        运行包含matmul专门分析的完整分析流程
+        分析单个文件的完整流程
         
         Args:
-            file_labels: List of (file_path, label) tuples
+            file_path: JSON 文件路径
+            aggregation_type: 聚合类型
+            show_dtype: 是否展示 dtype 信息
+            show_shape: 是否展示 shape 和 strides 信息
+            show_kernel: 是否展示 kernel 信息
             output_dir: 输出目录
-            output_formats: 输出格式列表，支持 ['json', 'xlsx']
         """
-        if output_formats is None:
-            output_formats = ['json', 'xlsx']
+        print(f"=== 开始分析单个文件: {file_path} ===")
         
-        print("=== 开始完整分析流程（包含matmul专门分析）===")
+        # 加载数据
+        data = self.parser.load_json_file(file_path)
         
-        # 分析多个文件
-        all_mappings = self.analyze_multiple_files(file_labels)
+        # Stage 1: 数据后处理
+        cpu_events_by_external_id, kernel_events_by_external_id = self.stage1_data_postprocessing(data)
         
-        if not all_mappings:
-            print("没有成功分析任何文件")
-            return
+        # Stage 2: 数据聚合
+        aggregated_data = self.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_type)
         
-        # 为每个文件生成单独的分析
-        for label, mapping in all_mappings.items():
-            base_name = f"{label}_single_file_analysis"
-            
-            if 'json' in output_formats:
-                json_file = f"{output_dir}/{base_name}.json"
-                self.save_mapping_to_json(mapping, json_file)
-            
-            if 'xlsx' in output_formats:
-                xlsx_file = f"{output_dir}/{base_name}.xlsx"
-                self.generate_excel_from_mapping(mapping, xlsx_file)
+        # Stage 3: 比较（单文件无需比较）
+        comparison_result = self.stage3_comparison(single_file_data=aggregated_data, aggregation_type=aggregation_type)
         
-        # 合并映射并生成比较分析
-        if len(all_mappings) > 1:
-            merged_mapping = self.merge_mappings(all_mappings)
-            base_name = "comparison_analysis"
-            
-            if 'json' in output_formats:
-                json_file = f"{output_dir}/{base_name}.json"
-                self.save_comparison_to_json(merged_mapping, json_file)
-                
-                # 读取比较分析数据用于matmul分析
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    comparison_data = json.load(f)
-                
-                # 生成matmul专门分析
-                self.generate_matmul_analysis(comparison_data, output_dir)
-            
-            if 'xlsx' in output_formats:
-                xlsx_file = f"{output_dir}/{base_name}.xlsx"
-                self.generate_comparison_excel(merged_mapping, xlsx_file)
+        # Stage 4: 展示
+        self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel, aggregation_type=aggregation_type)
         
-        print("=== 分析流程完成 ===")
-
-
-
-    def generate_cpu_op_performance_summary(self, data: 'ProfilerData', output_dir: str = ".", label: str = "") -> None:
+        print("=== 单文件分析完成 ===")
+    
+    def analyze_multiple_files(self, file_labels: List[Tuple[str, str]], aggregation_type: str = 'on_op_name',
+                              show_dtype: bool = True, show_shape: bool = True, show_kernel: bool = True, special_matmul: bool = False,
+                              output_dir: str = ".") -> None:
         """
-        生成cpu_op性能统计摘要（基于对应的kernel事件耗时）
+        分析多个文件的完整流程
         
         Args:
-            data: 分析的数据
+            file_labels: [(file_path, label), ...] 文件路径和标签的列表
+            aggregation_type: 聚合类型
+            show_dtype: 是否展示 dtype 信息
+            show_shape: 是否展示 shape 和 strides 信息
+            show_kernel: 是否展示 kernel 信息
+            special_matmul: 是否进行特殊的 matmul 展示
             output_dir: 输出目录
-            label: 文件标签，用于生成带前缀的输出文件名
         """
-        print("=== 开始生成cpu_op性能统计摘要（基于kernel耗时） ===")
+        print(f"=== 开始分析多个文件，共 {len(file_labels)} 个文件 ===")
         
-        # 首先获取cpu_op和kernel的映射关系
-        mapping = self.analyze_cpu_op_kernel_mapping(data)
-        
-        # 统计每种cpu_op对应的kernel性能数据
-        cpu_op_stats = {}
-        total_kernel_duration = 0.0
-        
-        # 遍历映射数据，统计每种cpu_op对应的kernel耗时
-        for cpu_op_name, strides_map in mapping.items():
-            if cpu_op_name not in cpu_op_stats:
-                cpu_op_stats[cpu_op_name] = {
-                    'call_count': 0,
-                    'total_kernel_duration': 0.0,
-                    'min_kernel_duration': float('inf'),
-                    'max_kernel_duration': 0.0,
-                    'kernel_count': 0
-                }
-            
-            stats = cpu_op_stats[cpu_op_name]
-            
-            # 遍历该cpu_op的所有配置
-            for strides, dims_map in strides_map.items():
-                for dims, types_map in dims_map.items():
-                    for input_type, kernel_events in types_map.items():
-                        # 统计该配置下的kernel事件
-                        for kernel_event in kernel_events:
-                            if kernel_event.dur is not None:
-                                stats['call_count'] += 1
-                                stats['total_kernel_duration'] += kernel_event.dur
-                                stats['min_kernel_duration'] = min(stats['min_kernel_duration'], kernel_event.dur)
-                                stats['max_kernel_duration'] = max(stats['max_kernel_duration'], kernel_event.dur)
-                                stats['kernel_count'] += 1
-                                total_kernel_duration += kernel_event.dur
-        
-        if not cpu_op_stats:
-            print("没有找到cpu_op对应的kernel事件")
-            return
-        
-        # 计算平均耗时和比例
-        summary_data = []
-        for cpu_op_name, stats in cpu_op_stats.items():
-            if stats['call_count'] > 0:
-                avg_duration = stats['total_kernel_duration'] / stats['call_count']
-                percentage = (stats['total_kernel_duration'] / total_kernel_duration * 100) if total_kernel_duration > 0 else 0.0
-                
-                summary_data.append({
-                    'cpu_op_name': cpu_op_name,
-                    'call_count': stats['call_count'],
-                    'total_kernel_duration': stats['total_kernel_duration'],
-                    'avg_kernel_duration': avg_duration,
-                    'min_kernel_duration': stats['min_kernel_duration'] if stats['min_kernel_duration'] != float('inf') else 0.0,
-                    'max_kernel_duration': stats['max_kernel_duration'],
-                    'kernel_count': stats['kernel_count'],
-                    'percentage_of_total': percentage
-                })
-        
-        # 按总kernel耗时降序排序
-        summary_data.sort(key=lambda x: x['total_kernel_duration'], reverse=True)
-        
-        # 添加总计行
-        if summary_data:
-            summary_data.append({
-                'cpu_op_name': 'TOTAL',
-                'call_count': sum(item['call_count'] for item in summary_data),
-                'total_kernel_duration': total_kernel_duration,
-                'avg_kernel_duration': total_kernel_duration / sum(item['call_count'] for item in summary_data) if sum(item['call_count'] for item in summary_data) > 0 else 0.0,
-                'min_kernel_duration': 0.0,
-                'max_kernel_duration': 0.0,
-                'kernel_count': sum(item['kernel_count'] for item in summary_data),
-                'percentage_of_total': 100.0
-            })
-        
-        # 生成Excel文件
-        import pandas as pd
-        df = pd.DataFrame(summary_data)
-        
-        # 使用label前缀生成文件名
-        base_name = f"{label}_cpu_op_performance_summary" if label else "cpu_op_performance_summary"
-        xlsx_file = f"{output_dir}/{base_name}.xlsx"
-        
-        try:
-            df.to_excel(xlsx_file, index=False)
-            print(f"CPU Op性能统计Excel文件已生成: {xlsx_file}")
-        except ImportError:
-            csv_file = f"{output_dir}/{base_name}.csv"
-            self._safe_csv_output(df, csv_file)
-            print(f"CPU Op性能统计CSV文件已生成: {csv_file}")
-        
-        # 生成JSON文件
-        json_file = f"{output_dir}/{base_name}.json"
-        with open(json_file, 'w', encoding='utf-8') as f:
-            json.dump(summary_data, f, indent=2, ensure_ascii=False)
-        print(f"CPU Op性能统计JSON文件已生成: {json_file}")
-        
-        # 打印统计信息
-        print(f"\n=== CPU Op性能统计摘要（基于kernel耗时） ===")
-        print(f"总共发现 {len(cpu_op_stats)} 种不同的cpu_op")
-        print(f"总kernel调用次数: {sum(item['call_count'] for item in summary_data[:-1]) if summary_data else 0}")
-        print(f"总kernel耗时: {total_kernel_duration:.2f} 微秒")
-        
-        # 打印markdown表格形式的summary结果
-        self._print_cpu_op_summary_markdown_table(summary_data)
-        
-        print(f"\n前5个最耗时的cpu_op（基于kernel耗时）:")
-        
-        for i, item in enumerate(summary_data[:5]):
-            if item['cpu_op_name'] != 'TOTAL':
-                print(f"  {i+1}. {item['cpu_op_name']}")
-                print(f"     kernel调用次数: {item['call_count']}")
-                print(f"     总kernel耗时: {item['total_kernel_duration']:.2f} 微秒")
-                print(f"     平均kernel耗时: {item['avg_kernel_duration']:.2f} 微秒")
-                print(f"     占总kernel耗时比例: {item['percentage_of_total']:.2f}%")
-                print()
-        
-        print(f"=== CPU Op性能统计完成 ===")
-
-    def _normalize_call_stack(self, call_stack: List[str]) -> List[str]:
-        """
-        标准化 call stack，只保留包含 nn.Module 的有价值部分
-        特殊处理：去掉 Runstep 模块及其之后的模块（面向 lg-torch 的特殊逻辑）
-        
-        Args:
-            call_stack: 原始 call stack
-            
-        Returns:
-            List[str]: 标准化后的 call stack，只包含模型相关的层级，去掉 'nn.Module: ' 前缀
-        """
-        if not call_stack:
-            return call_stack
-        
-        # 过滤出所有的 nn.Module
-        nn_modules = []
-        for frame in call_stack:
-            if 'nn.Module:' in frame:
-                # 去掉 'nn.Module: ' 前缀
-                module_name = frame.replace('nn.Module: ', '')
-                nn_modules.append(module_name)
-        
-        if not nn_modules:
-            return []
-        
-        # 找到包含 Runstep 的模块
-        runstep_idx = -1
-        for i, module_name in enumerate(nn_modules):
-            if 'Runstep' in module_name:
-                runstep_idx = i
-                break
-        
-        # 如果找到 Runstep，去掉它及其之后的模块
-        if runstep_idx != -1:
-            normalized = nn_modules[:runstep_idx]
-        else:
-            normalized = nn_modules
-        
-        return normalized
-
-    def analyze_cpu_op_by_call_stack(self, data: ProfilerData, include_kernel: bool = True) -> Dict:
-        """
-        基于 call stack 分析 cpu_op 事件
-        现在只分析有对应 kernel 事件的 cpu_op
-        
-        Args:
-            data: ProfilerData 对象
-            include_kernel: 在输出结果时是否保留 kernel 相关信息
-            
-        Returns:
-            Dict: 按 call stack 组织的 cpu_op 数据，结构为 call_stack -> op_name -> [event_info]
-        """
-        # 首先按 External id 重组数据，只保留有对应 kernel 的 cpu_op
-        external_id_map = self.reorganize_by_external_id(data)
-        
-        # 获取所有包含 call stack 的 cpu_op 事件（这些 cpu_op 都有对应的 kernel）
-        cpu_op_events = []
-        for events in external_id_map.values():
-            for event in events:
-                if event.cat == 'cpu_op' and event.call_stack is not None:
-                    cpu_op_events.append(event)
-        
-        # 按标准化后的 call stack 分组
-        call_stack_groups = defaultdict(list)
-        for event in cpu_op_events:
-            normalized_call_stack = self._normalize_call_stack(event.call_stack)
-            if normalized_call_stack:  # 只处理有有效 call stack 的事件
-                call_stack_key = tuple(normalized_call_stack)
-                call_stack_groups[call_stack_key].append(event)
-        
-        # 为每个 call stack 收集信息
-        call_stack_analysis = {}
-        for call_stack_key, events in call_stack_groups.items():
-            call_stack_list = list(call_stack_key)
-            
-            # 按 op_name 分组收集信息
-            op_groups = defaultdict(list)
-            for event in events:
-                name = event.name
-                args = event.args or {}
-                input_dims = args.get('Input Dims', [])
-                input_strides = args.get('Input Strides', [])
-                input_type = args.get('Input type', [])
-                
-                # 根据 include_kernel 参数决定是否获取 kernel 信息
-                if include_kernel:
-                    # 获取对应的 kernel 事件
-                    kernel_names = []
-                    kernel_durations = []
-                    external_id = event.external_id
-                    
-                    # 从已经过滤的 external_id_map 中获取 kernel 事件
-                    if event.external_id in external_id_map:
-                        kernel_events = [e for e in external_id_map[event.external_id] if e.cat == 'kernel']
-                        for kernel_event in kernel_events:
-                            kernel_names.append(kernel_event.name)
-                            if kernel_event.dur is not None:
-                                kernel_durations.append(kernel_event.dur)
-                else:
-                    # 不包含 kernel 信息
-                    kernel_names = []
-                    kernel_durations = []
-                    external_id = None
-                
-                # 收集每个 op 的详细信息
-                op_info = {
-                    'op_name': name,
-                    'input_dims': input_dims,
-                    'input_strides': input_strides,
-                    'input_type': input_type,
-                    'kernel_names': kernel_names,
-                    'kernel_durations': kernel_durations,
-                    'external_id': external_id
-                }
-                op_groups[name].append(op_info)
-            
-            call_stack_analysis[call_stack_key] = {
-                'call_stack': call_stack_list,
-                'ops': dict(op_groups),
-                'first_occurrence_time': min(event.ts for event in events)
-            }
-        
-        return call_stack_analysis
-
-    def compare_by_call_stack(self, file_labels: List[Tuple[str, str]], output_dir: str = ".", include_kernel: bool = True) -> None:
-        """
-        基于 call stack 对比多个文件
-        
-        Args:
-            file_labels: List of (file_path, label) tuples
-            output_dir: 输出目录
-            include_kernel: 是否包含 kernel 信息
-        """
-        print("=== 开始基于 call stack 的对比分析 ===")
-        
-        # 分析每个文件的 call stack
-        all_call_stack_analyses = {}
+        # 分析每个文件
+        multiple_files_data = {}
         
         for file_path, label in file_labels:
             print(f"正在分析文件: {file_path} (标签: {label})")
             
-            try:
-                data = self.parser.load_json_file(file_path)
-                call_stack_analysis = self.analyze_cpu_op_by_call_stack(data, include_kernel)
-                all_call_stack_analyses[label] = call_stack_analysis
-                print(f"  完成分析，找到 {len(call_stack_analysis)} 个唯一的 call stack")
-                
-            except Exception as e:
-                print(f"  分析文件失败: {e}")
-                continue
-        
-        if not all_call_stack_analyses:
-            print("没有成功分析任何文件")
-            return
-        
-        # 合并所有 call stack 分析
-        merged_call_stack_analysis = self.merge_call_stack_analyses(all_call_stack_analyses)
-        
-        # 提取标签列表
-        labels = list(all_call_stack_analyses.keys())
-        
-        # 生成对比结果
-        self.generate_call_stack_comparison_excel(merged_call_stack_analysis, output_dir, labels, include_kernel)
-        
-        print("=== 基于 call stack 的对比分析完成 ===")
-
-    def analyze_single_file_by_call_stack(self, data: ProfilerData, label: str, output_dir: str, output_formats: List[str] = None, include_kernel: bool = True) -> None:
-        """
-        分析单个文件的 call stack
-        
-        Args:
-            data: ProfilerData 对象
-            label: 文件标签
-            output_dir: 输出目录
-            output_formats: 输出格式列表，如 ['json', 'xlsx']
-            include_kernel: 是否包含 kernel 信息
-        """
-        print(f"=== 开始单文件 call stack 分析 (标签: {label}) ===")
-        
-        # 分析 call stack
-        call_stack_analysis = self.analyze_cpu_op_by_call_stack(data, include_kernel)
-        
-        if not call_stack_analysis:
-            print("没有找到 call stack 数据")
-            return
-        
-        print(f"找到 {len(call_stack_analysis)} 个唯一的 call stack")
-        
-        # 生成单文件分析结果
-        self.generate_single_file_call_stack_analysis(call_stack_analysis, label, output_dir, output_formats, include_kernel)
-        
-        print(f"=== 单文件 call stack 分析完成 ===")
-
-    def generate_single_file_call_stack_analysis(self, call_stack_analysis: Dict, label: str, output_dir: str, output_formats: List[str] = None, include_kernel: bool = True) -> None:
-        """
-        生成单文件的 call stack 分析结果
-        
-        Args:
-            call_stack_analysis: call stack 分析结果
-            label: 文件标签
-            output_dir: 输出目录
-            output_formats: 输出格式列表，如 ['json', 'xlsx']
-            include_kernel: 是否包含 kernel 信息
-        """
-        # 生成 JSON 格式的多级结构数据
-        json_data = []
-        excel_rows = []
-        
-        for call_stack_key, call_stack_data in call_stack_analysis.items():
-            call_stack = call_stack_data['call_stack']
-            ops = call_stack_data['ops']
+            # 加载数据
+            data = self.parser.load_json_file(file_path)
             
-            # 为每个 op 创建条目
-            for op_name in sorted(ops.keys()):
-                op_events = ops[op_name]
-                
-                # 收集该 op 的所有事件信息
-                input_dims_set = set()
-                input_strides_set = set()
-                input_types_set = set()
-                kernel_names_list = []
-                kernel_durations_list = []
-                external_ids_list = []
-                
-                for event_info in op_events:
-                    input_dims_set.add(str(event_info['input_dims']))
-                    input_strides_set.add(str(event_info['input_strides']))
-                    input_types_set.add(str(event_info['input_type']))
-                    
-                    if include_kernel:
-                        kernel_names_list.extend(event_info['kernel_names'])
-                        kernel_durations_list.extend(event_info['kernel_durations'])
-                        if event_info['external_id'] is not None:
-                            external_ids_list.append(str(event_info['external_id']))
-                
-                # 转换为列表并排序，确保输出的一致性
-                input_dims_list = sorted(list(input_dims_set))
-                input_strides_list = sorted(list(input_strides_set))
-                input_types_list = sorted(list(input_types_set))
-                
-                # JSON 数据结构
-                json_entry = {
-                    'call_stack': ' -> '.join(call_stack),
-                    'call_stack_depth': len(call_stack),
-                    'op_name': op_name,
-                    'input_dims': input_dims_list,
-                    'input_strides': input_strides_list,
-                    'input_types': input_types_list,
-                    'event_count': len(op_events)
-                }
-                
-                # 根据 include_kernel 参数决定是否包含 kernel 相关信息
-                if include_kernel:
-                    json_entry.update({
-                        'kernel_names': list(set(kernel_names_list)),
-                        'kernel_durations': kernel_durations_list,
-                        'external_ids': list(set(external_ids_list))
-                    })
-                
-                # Excel 行数据
-                excel_row = {
-                    'call_stack': ' -> '.join(call_stack),
-                    'call_stack_depth': len(call_stack),
-                    'op_name': op_name,
-                    'input_dims': '||'.join(input_dims_list) if input_dims_list else '',
-                    'input_strides': '||'.join(input_strides_list) if input_strides_list else '',
-                    'input_types': '||'.join(input_types_list) if input_types_list else '',
-                    'event_count': len(op_events)
-                }
-                
-                # 根据 include_kernel 参数决定是否包含 kernel 相关列
-                if include_kernel:
-                    excel_row.update({
-                        'kernel_names': '||'.join(set(kernel_names_list)) if kernel_names_list else '',
-                        'kernel_durations': '||'.join([str(d) for d in kernel_durations_list]) if kernel_durations_list else '',
-                        'external_ids': '||'.join(set(external_ids_list)) if external_ids_list else ''
-                    })
-                
-                json_data.append(json_entry)
-                excel_rows.append(excel_row)
-        
-        # 生成文件名
-        base_name = f"{label}_single_file_call_stack_analysis"
-        
-        # 默认输出格式
-        if output_formats is None:
-            output_formats = ['json', 'xlsx']
-        
-        # 生成 JSON 文件
-        if 'json' in output_formats:
-            json_file = f"{output_dir}/{base_name}.json"
-            with open(json_file, 'w', encoding='utf-8') as f:
-                json.dump(json_data, f, indent=2, ensure_ascii=False)
-            print(f"单文件 call stack 分析 JSON 文件已生成: {json_file}")
-            print(f"包含 {len(json_data)} 个 call stack-op 组合")
-        
-        # 生成 Excel 文件
-        if 'xlsx' in output_formats and excel_rows:
-            df = pd.DataFrame(excel_rows)
-            xlsx_file = f"{output_dir}/{base_name}.xlsx"
-            try:
-                df.to_excel(xlsx_file, index=False)
-                print(f"单文件 call stack 分析 Excel 文件已生成: {xlsx_file}")
-                print(f"包含 {len(excel_rows)} 行数据")
-            except ImportError:
-                csv_file = f"{output_dir}/{base_name}.csv"
-                self._safe_csv_output(df, csv_file)
-                print(f"单文件 call stack 分析 CSV 文件已生成: {csv_file}")
-        elif 'xlsx' in output_formats and not excel_rows:
-            print("没有数据可以生成单文件 call stack 分析文件")
-
-    def merge_call_stack_analyses(self, all_call_stack_analyses: Dict) -> Dict:
-        """
-        合并多个文件的 call stack 分析
-        使用 startswith 匹配策略：call stack 只要一个是另一个的前缀且 cpu_op 相同就合并
-        
-        Args:
-            all_call_stack_analyses: Dict[label, call_stack_analysis]
+            # Stage 1: 数据后处理
+            cpu_events_by_external_id, kernel_events_by_external_id = self.stage1_data_postprocessing(data)
             
-        Returns:
-            Dict: 合并后的 call stack 分析
-        """
-        # 第一步：对每个 analysis 内部进行 call stack 合并
-        preprocessed_analyses = {}
-        for label, analysis in all_call_stack_analyses.items():
-            preprocessed_analyses[label] = self._merge_call_stacks_within_analysis(analysis)
-        
-        # 第二步：检查是否会出现多对一的情况（使用预处理后的数据）
-        self._validate_call_stack_merge_strategy(preprocessed_analyses)
-        
-        merged = {}
-        
-        # 收集所有唯一的 call stack
-        all_call_stacks = set()
-        for label, analysis in preprocessed_analyses.items():
-            all_call_stacks.update(analysis.keys())
-        
-        # 为每个 call stack 创建合并条目
-        for call_stack_key in all_call_stacks:
-            call_stack_list = list(call_stack_key)
-            call_stack_str = ' -> '.join(call_stack_list)
+            # Stage 2: 数据聚合
+            aggregated_data = self.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_type)
             
-            merged_entry = {
-                'call_stack': call_stack_list,
-                'labels': {}
-            }
-            
-            # 收集每个标签的数据，使用子字符串匹配
-            for label, analysis in preprocessed_analyses.items():
-                matched_data = None
-                matched_call_stack_key = None
-                
-                # 首先尝试完全匹配
-                if call_stack_key in analysis:
-                    matched_data = analysis[call_stack_key]
-                    matched_call_stack_key = call_stack_key
-                else:
-                    # 尝试 startswith 匹配，优先选择更长的 call stack
-                    best_match = None
-                    best_match_key = None
-                    best_length = 0
-                    
-                    for other_call_stack_key, other_data in analysis.items():
-                        other_call_stack_str = ' -> '.join(list(other_call_stack_key))
-                        
-                        # 检查是否是 startswith 关系
-                        if (other_call_stack_str.startswith(call_stack_str) or 
-                            call_stack_str.startswith(other_call_stack_str)):
-                            
-                            # 选择更长的 call stack
-                            current_length = len(other_call_stack_key)
-                            if current_length > best_length:
-                                best_match = other_data
-                                best_match_key = other_call_stack_key
-                                best_length = current_length
-                    
-                    if best_match:
-                        matched_data = best_match
-                        matched_call_stack_key = best_match_key
-                
-                if matched_data:
-                    # 如果匹配到的是更长的 call stack，更新 merged_entry 的 call_stack
-                    if matched_call_stack_key != call_stack_key:
-                        matched_call_stack_list = list(matched_call_stack_key)
-                        merged_entry['call_stack'] = matched_call_stack_list
-                        merged_entry['labels'][label] = matched_data
-                    else:
-                        merged_entry['labels'][label] = matched_data
-                else:
-                    # 如果某个标签没有匹配的 call stack，创建空条目
-                    merged_entry['labels'][label] = {
-                        'call_stack': call_stack_list,
-                        'ops': {},
-                        'first_occurrence_time': None
-                    }
-            
-            # 按第一次出现的时间排序
-            first_occurrence_times = []
-            for label_data in merged_entry['labels'].values():
-                if label_data['first_occurrence_time'] is not None:
-                    first_occurrence_times.append(label_data['first_occurrence_time'])
-            
-            if first_occurrence_times:
-                merged_entry['earliest_occurrence_time'] = min(first_occurrence_times)
-            else:
-                merged_entry['earliest_occurrence_time'] = float('inf')
-            
-            # 使用最终的 call_stack 作为 key
-            final_call_stack_key = tuple(merged_entry['call_stack'])
-            merged[final_call_stack_key] = merged_entry
+            multiple_files_data[label] = aggregated_data
         
-        # 按最早出现时间排序
-        sorted_merged = dict(sorted(merged.items(), key=lambda x: x[1]['earliest_occurrence_time']))
+        # Stage 3: 比较（多文件比较）
+        comparison_result = self.stage3_comparison(multiple_files_data=multiple_files_data, aggregation_type=aggregation_type)
         
-        return sorted_merged
-    
-    def _add_comparison_columns(self, excel_row: Dict, json_entry: Dict, labels: List[str]) -> None:
-        """
-        添加比较列到 Excel 行数据中，检查不同标签之间的 input_types、input_dims & input_strides 和 event_count 是否一致
+        # Stage 4: 展示
+        self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel, special_matmul, aggregation_type)
         
-        Args:
-            excel_row: Excel 行数据字典
-            json_entry: JSON 条目数据
-            labels: 标签列表
-        """
-        if len(labels) < 2:
-            # 如果只有一个标签，无法比较
-            excel_row['dtype_consistent'] = 'N/A'
-            excel_row['shape_strides_consistent'] = 'N/A'
-            excel_row['event_count_consistent'] = 'N/A'
-            return
-        
-        # 收集所有标签的 input_types、input_dims、input_strides 和 event_count
-        all_input_types = {}
-        all_input_dims = {}
-        all_input_strides = {}
-        all_event_counts = {}
-        
-        for label in labels:
-            label_data = json_entry['labels'].get(label, {})
-            # 将列表转换为 set 进行比较
-            all_input_types[label] = set(label_data.get('input_types', []))
-            all_input_dims[label] = set(label_data.get('input_dims', []))
-            all_input_strides[label] = set(label_data.get('input_strides', []))
-            all_event_counts[label] = label_data.get('event_count', 0)
-        
-        # 检查是否有标签没有事件（event_count = 0）
-        has_empty_labels = any(count == 0 for count in all_event_counts.values())
-        has_non_empty_labels = any(count > 0 for count in all_event_counts.values())
-        
-        # 构建 shape & strides 数据（无论哪种情况都需要）
-        all_shape_strides = {}
-        for label in labels:
-            # 将 dims 和 strides 合并为一个 set
-            combined_set = all_input_dims[label] | all_input_strides[label]
-            all_shape_strides[label] = combined_set
-        
-        # 如果有些标签有事件，有些没有，那么所有一致性都应该为 False
-        if has_empty_labels and has_non_empty_labels:
-            dtype_consistent = False
-            shape_strides_consistent = False
-            event_count_consistent = False
-        else:
-            # 所有标签都有事件或都没有事件，进行正常比较
-            # 检查 dtype 一致性 - 只比较有事件的标签
-            dtype_consistent = self._check_set_consistency_with_filter(all_input_types, all_event_counts)
-            
-            # 检查 shape & strides 一致性
-            shape_strides_consistent = self._check_set_consistency_with_filter(all_shape_strides, all_event_counts)
-            
-            # 检查 event_count 一致性
-            event_count_consistent = self._check_event_count_consistency(all_event_counts)
-        
-        # 添加比较结果到 Excel 行
-        excel_row['dtype_consistent'] = 'Yes' if dtype_consistent else 'No'
-        excel_row['shape_strides_consistent'] = 'Yes' if shape_strides_consistent else 'No'
-        excel_row['event_count_consistent'] = 'Yes' if event_count_consistent else 'No'
-        
-        # 添加详细信息到 JSON 条目
-        json_entry['dtype_comparison'] = {
-            'consistent': dtype_consistent,
-            'details': {label: list(types) for label, types in all_input_types.items()}
-        }
-        json_entry['shape_strides_comparison'] = {
-            'consistent': shape_strides_consistent,
-            'details': {label: list(combined) for label, combined in all_shape_strides.items()}
-        }
-        json_entry['event_count_comparison'] = {
-            'consistent': event_count_consistent,
-            'details': {label: count for label, count in all_event_counts.items()}
-        }
-    
-    def _check_set_consistency(self, all_sets: Dict[str, set]) -> bool:
-        """
-        检查多个 set 是否一致
-        
-        Args:
-            all_sets: 标签到 set 的映射
-            
-        Returns:
-            bool: 是否一致
-        """
-        if not all_sets:
-            return True
-        
-        # 获取第一个非空的 set 作为基准
-        base_set = None
-        for s in all_sets.values():
-            if s:
-                base_set = s
-                break
-        
-        if base_set is None:
-            # 所有 set 都是空的，认为是一致的
-            return True
-        
-        # 检查所有非空的 set 是否与基准 set 相等
-        for label, s in all_sets.items():
-            if s and s != base_set:
-                return False
-        
-        return True
-    
-    def _check_set_consistency_with_filter(self, all_sets: Dict[str, set], event_counts: Dict[str, int]) -> bool:
-        """
-        检查多个 set 是否一致，只比较有事件的标签
-        
-        Args:
-            all_sets: 标签到 set 的映射
-            event_counts: 标签到事件数量的映射
-            
-        Returns:
-            bool: 是否一致
-        """
-        if not all_sets:
-            return True
-        
-        # 只考虑有事件的标签
-        non_empty_sets = {label: s for label, s in all_sets.items() if event_counts.get(label, 0) > 0}
-        
-        if not non_empty_sets:
-            # 所有标签都没有事件，认为是一致的
-            return True
-        
-        # 获取第一个非空的 set 作为基准
-        base_set = None
-        for s in non_empty_sets.values():
-            if s:
-                base_set = s
-                break
-        
-        if base_set is None:
-            # 所有有事件的标签的 set 都是空的，认为是一致的
-            return True
-        
-        # 检查所有非空的 set 是否与基准 set 相等
-        for label, s in non_empty_sets.items():
-            if s and s != base_set:
-                return False
-        
-        return True
-    
-    def _check_event_count_consistency(self, all_event_counts: Dict[str, int]) -> bool:
-        """
-        检查所有标签的 event_count 是否一致
-        
-        Args:
-            all_event_counts: 标签到事件数量的映射
-            
-        Returns:
-            bool: 是否一致
-        """
-        if not all_event_counts:
-            return True
-        
-        # 获取第一个非零的事件数量作为基准
-        base_count = None
-        for count in all_event_counts.values():
-            if count > 0:
-                base_count = count
-                break
-        
-        if base_count is None:
-            # 所有标签的事件数量都是 0，认为是一致的
-            return True
-        
-        # 检查所有非零的事件数量是否与基准相等
-        for label, count in all_event_counts.items():
-            if count > 0 and count != base_count:
-                return False
-        
-        return True
-    
-    def _merge_call_stacks_within_analysis(self, analysis: Dict) -> Dict:
-        """
-        在单个 analysis 内部合并具有 startswith 关系的 call stack
-        
-        Args:
-            analysis: 单个 call stack 分析结果
-            
-        Returns:
-            Dict: 合并后的分析结果
-        """
-        if not analysis:
-            return analysis
-        
-        # 按 call stack 长度排序，从长到短
-        sorted_call_stacks = sorted(analysis.items(), key=lambda x: len(x[0]), reverse=True)
-        
-        merged = {}
-        processed_keys = set()
-        
-        for call_stack_key, data in sorted_call_stacks:
-            if call_stack_key in processed_keys:
-                continue
-            
-            call_stack_str = ' -> '.join(list(call_stack_key))
-            merged_entry = data.copy()
-            
-            # 查找所有与当前 call stack 有 startswith 关系的其他 call stack
-            for other_call_stack_key, other_data in sorted_call_stacks:
-                if other_call_stack_key in processed_keys or other_call_stack_key == call_stack_key:
-                    continue
-                
-                other_call_stack_str = ' -> '.join(list(other_call_stack_key))
-                
-                # 检查 startswith 关系
-                if (other_call_stack_str.startswith(call_stack_str) or 
-                    call_stack_str.startswith(other_call_stack_str)):
-                    
-                    # 合并 ops 数据
-                    for op_name, op_events_list in other_data.get('ops', {}).items():
-                        if 'ops' not in merged_entry:
-                            merged_entry['ops'] = {}
-                        
-                        if op_name in merged_entry['ops']:
-                            # 如果已存在，将事件列表合并
-                            merged_entry['ops'][op_name].extend(op_events_list)
-                        else:
-                            # 如果不存在，直接添加
-                            merged_entry['ops'][op_name] = op_events_list.copy()
-                    
-                    # 更新最早出现时间
-                    if other_data.get('first_occurrence_time') is not None:
-                        if merged_entry.get('first_occurrence_time') is None:
-                            merged_entry['first_occurrence_time'] = other_data['first_occurrence_time']
-                        else:
-                            merged_entry['first_occurrence_time'] = min(
-                                merged_entry['first_occurrence_time'],
-                                other_data['first_occurrence_time']
-                            )
-                    
-                    processed_keys.add(other_call_stack_key)
-            
-            merged[call_stack_key] = merged_entry
-            processed_keys.add(call_stack_key)
-        
-        return merged
-    
-    def _validate_call_stack_merge_strategy(self, all_call_stack_analyses: Dict) -> None:
-        """
-        验证合并策略不会导致多对一的情况
-        
-        Args:
-            all_call_stack_analyses: Dict[label, call_stack_analysis]
-        """
-        for label, analysis in all_call_stack_analyses.items():
-            call_stacks = list(analysis.keys())
-            
-            # 检查是否存在多对一的情况
-            for i, call_stack_key1 in enumerate(call_stacks):
-                call_stack_str1 = ' -> '.join(list(call_stack_key1))
-                
-                for j, call_stack_key2 in enumerate(call_stacks):
-                    if i >= j:  # 避免重复检查
-                        continue
-                    
-                    call_stack_str2 = ' -> '.join(list(call_stack_key2))
-                    
-                    # 检查是否是 startswith 关系
-                    if (call_stack_str2.startswith(call_stack_str1) or 
-                        call_stack_str1.startswith(call_stack_str2)):
-                        
-                        # 检查是否有相同的 cpu_op
-                        ops1 = set(analysis[call_stack_key1]['ops'].keys())
-                        ops2 = set(analysis[call_stack_key2]['ops'].keys())
-                        
-                        if ops1 & ops2:  # 如果有交集
-                            raise ValueError(
-                                f"检测到多对一的情况：在标签 '{label}' 中，"
-                                f"call stack '{call_stack_str1}' 和 '{call_stack_str2}' "
-                                f"存在子字符串关系且包含相同的 cpu_op: {ops1 & ops2}"
-                            )
-
-    def generate_call_stack_comparison_excel(self, merged_analysis: Dict, output_dir: str, labels: List[str] = None, include_kernel: bool = True) -> None:
-        """
-        生成基于 call stack 的对比 Excel 文件，使用多级结构：call stack -> op -> event_info
-        
-        Args:
-            merged_analysis: 合并的 call stack 分析
-            output_dir: 输出目录
-            labels: 标签列表，用于生成文件名
-            include_kernel: 是否包含 kernel 信息
-        """
-        # 生成 JSON 格式的多级结构数据
-        json_data = []
-        excel_rows = []
-        
-        for call_stack_key, call_stack_data in merged_analysis.items():
-            call_stack = call_stack_data['call_stack']
-            labels_data = call_stack_data['labels']
-            labels_list = list(labels_data.keys())
-            
-            # 收集所有 op 名称
-            all_ops = set()
-            for label_data in labels_data.values():
-                all_ops.update(label_data['ops'].keys())
-            
-            # 为每个 op 创建条目
-            for op_name in sorted(all_ops):
-                # JSON 数据结构
-                json_entry = {
-                    'call_stack': ' -> '.join(call_stack),
-                    'call_stack_depth': len(call_stack),
-                    'op_name': op_name,
-                    'labels': {}
-                }
-                
-                # Excel 行数据
-                excel_row = {
-                    'call_stack': ' -> '.join(call_stack),
-                    'call_stack_depth': len(call_stack),
-                    'op_name': op_name
-                }
-                
-                # 为每个标签收集该 op 的数据
-                for label in labels_list:
-                    label_data = labels_data[label]
-                    ops = label_data['ops']
-                    
-                    if op_name in ops:
-                        op_events = ops[op_name]
-                        # 收集该 op 的所有事件信息
-                        input_dims_set = set()
-                        input_strides_set = set()
-                        input_types_set = set()
-                        kernel_names_list = []
-                        kernel_durations_list = []
-                        external_ids_list = []
-                        
-                        for event_info in op_events:
-                            input_dims_set.add(str(event_info['input_dims']))
-                            input_strides_set.add(str(event_info['input_strides']))
-                            input_types_set.add(str(event_info['input_type']))
-                            
-                            if include_kernel:
-                                kernel_names_list.extend(event_info['kernel_names'])
-                                kernel_durations_list.extend(event_info['kernel_durations'])
-                                if event_info['external_id'] is not None:
-                                    external_ids_list.append(str(event_info['external_id']))
-                        
-                        # 转换为列表并排序，确保输出的一致性
-                        input_dims_list = sorted(list(input_dims_set))
-                        input_strides_list = sorted(list(input_strides_set))
-                        input_types_list = sorted(list(input_types_set))
-                        
-                        # JSON 数据
-                        json_entry['labels'][label] = {
-                            'input_dims': input_dims_list,
-                            'input_strides': input_strides_list,
-                            'input_types': input_types_list,
-                            'event_count': len(op_events)
-                        }
-                        
-                        # 根据 include_kernel 参数决定是否包含 kernel 相关信息
-                        if include_kernel:
-                            json_entry['labels'][label].update({
-                                'kernel_names': list(set(kernel_names_list)),
-                                'kernel_durations': kernel_durations_list,
-                                'external_ids': list(set(external_ids_list))
-                            })
-                        
-                        # Excel 数据
-                        excel_row[f'{label}_input_dims'] = '||'.join(input_dims_list) if input_dims_list else ''
-                        excel_row[f'{label}_input_strides'] = '||'.join(input_strides_list) if input_strides_list else ''
-                        excel_row[f'{label}_input_types'] = '||'.join(input_types_list) if input_types_list else ''
-                        excel_row[f'{label}_event_count'] = len(op_events)
-                        
-                        # 根据 include_kernel 参数决定是否包含 kernel 相关列
-                        if include_kernel:
-                            excel_row[f'{label}_kernel_names'] = '||'.join(set(kernel_names_list)) if kernel_names_list else ''
-                            excel_row[f'{label}_kernel_durations'] = '||'.join([str(d) for d in kernel_durations_list]) if kernel_durations_list else ''
-                            excel_row[f'{label}_external_ids'] = '||'.join(set(external_ids_list)) if external_ids_list else ''
-                    else:
-                        # 该标签没有这个 op
-                        json_entry['labels'][label] = {
-                            'input_dims': [],
-                            'input_strides': [],
-                            'input_types': [],
-                            'event_count': 0
-                        }
-                        
-                        # 根据 include_kernel 参数决定是否包含 kernel 相关信息
-                        if include_kernel:
-                            json_entry['labels'][label].update({
-                                'kernel_names': [],
-                                'kernel_durations': [],
-                                'external_ids': []
-                            })
-                        
-                        excel_row[f'{label}_input_dims'] = ''
-                        excel_row[f'{label}_input_strides'] = ''
-                        excel_row[f'{label}_input_types'] = ''
-                        excel_row[f'{label}_event_count'] = 0
-                        
-                        # 根据 include_kernel 参数决定是否包含 kernel 相关列
-                        if include_kernel:
-                            excel_row[f'{label}_kernel_names'] = ''
-                            excel_row[f'{label}_kernel_durations'] = ''
-                            excel_row[f'{label}_external_ids'] = ''
-                
-                # 添加比较列：检查不同标签之间的 input_types 和 input_dims & input_strides 是否一致
-                self._add_comparison_columns(excel_row, json_entry, labels_list)
-                
-                json_data.append(json_entry)
-                excel_rows.append(excel_row)
-        
-        # 生成文件名，包含标签信息
-        if labels:
-            labels_str = '_'.join(labels)
-            base_name = f"call_stack_comparison_{labels_str}"
-        else:
-            base_name = "call_stack_comparison"
-        
-        # 生成 JSON 文件
-        json_file = f"{output_dir}/{base_name}.json"
-        with open(json_file, 'w', encoding='utf-8') as f:
-            json.dump(json_data, f, indent=2, ensure_ascii=False)
-        print(f"Call stack 对比 JSON 文件已生成: {json_file}")
-        print(f"包含 {len(json_data)} 个 call stack-op 组合")
-        
-        # 生成 Excel 文件
-        if excel_rows:
-            df = pd.DataFrame(excel_rows)
-            xlsx_file = f"{output_dir}/{base_name}.xlsx"
-            try:
-                df.to_excel(xlsx_file, index=False)
-                print(f"Call stack 对比 Excel 文件已生成: {xlsx_file}")
-                print(f"包含 {len(excel_rows)} 行数据")
-            except ImportError:
-                csv_file = f"{output_dir}/{base_name}.csv"
-                self._safe_csv_output(df, csv_file)
-                print(f"Call stack 对比 CSV 文件已生成: {csv_file}")
-        else:
-            print("没有数据可以生成 call stack 对比文件")
-
-    def _print_cpu_op_summary_markdown_table(self, summary_data: List[Dict]) -> None:
-        """
-        以markdown表格形式打印cpu_op性能统计摘要
-        
-        Args:
-            summary_data: 统计摘要数据列表
-        """
-        if not summary_data:
-            print("没有数据可显示")
-            return
-        
-        print(f"\n## CPU Op性能统计摘要表格")
-        print()
-        
-        # 打印表头
-        print("| CPU Op名称 | 调用次数 | 总耗时(μs) | 平均耗时(μs) | 最小耗时(μs) | 最大耗时(μs) | Kernel数量 | 占比(%) |")
-        print("|------------|----------|------------|--------------|--------------|--------------|------------|---------|")
-        
-        # 打印数据行
-        for item in summary_data:
-            cpu_op_name = item['cpu_op_name']
-            call_count = item['call_count']
-            total_duration = item['total_kernel_duration']
-            avg_duration = item['avg_kernel_duration']
-            min_duration = item['min_kernel_duration']
-            max_duration = item['max_kernel_duration']
-            kernel_count = item['kernel_count']
-            percentage = item['percentage_of_total']
-            
-            # 格式化数值
-            if cpu_op_name == 'TOTAL':
-                # 总计行使用粗体
-                print(f"| **{cpu_op_name}** | **{call_count}** | **{total_duration:.2f}** | **{avg_duration:.2f}** | **{min_duration:.2f}** | **{max_duration:.2f}** | **{kernel_count}** | **{percentage:.2f}** |")
-            else:
-                print(f"| {cpu_op_name} | {call_count} | {total_duration:.2f} | {avg_duration:.2f} | {min_duration:.2f} | {max_duration:.2f} | {kernel_count} | {percentage:.2f} |")
-        
-        print()
+        print("=== 多文件分析完成 ===")
