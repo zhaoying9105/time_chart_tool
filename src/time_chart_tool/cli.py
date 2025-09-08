@@ -27,25 +27,25 @@ def parse_arguments():
   time-chart-tool analysis file.json --label "baseline" --aggregation on_op_name --output-format json,xlsx
   
   # 分析单个文件 (基于CPU操作，输出包含kernel信息)
-  time-chart-tool analysis file.json --label "baseline" --aggregation on_op_name --show-kernel --output-format json,xlsx
+  time-chart-tool analysis file.json --label "baseline" --aggregation on_op_name --show-kernel-names --show-kernel-duration --output-format json,xlsx
   
   # 分析单个文件 (基于调用栈，输出包含shape和strides信息)
   time-chart-tool analysis file.json --label "baseline" --aggregation on_call_stack --show-shape --output-format json,xlsx
   
   # 分析单个文件 (基于调用栈，输出包含所有信息)
-  time-chart-tool analysis file.json --label "baseline" --aggregation on_call_stack --show-dtype --show-shape --show-kernel --output-format json,xlsx
+  time-chart-tool analysis file.json --label "baseline" --aggregation on_call_stack --show-dtype --show-shape --show-kernel-names --show-kernel-duration --output-format json,xlsx
   
   # 基于CPU操作对比多个文件 (默认方法，输出不包含kernel信息)
   time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_op_name --output-format json,xlsx
   
   # 基于CPU操作对比多个文件 (输出包含kernel信息)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_op_name --show-kernel --output-format json,xlsx
+  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_op_name --show-kernel-names --show-kernel-duration --output-format json,xlsx
   
   # 基于调用栈对比多个文件 (输出包含shape和strides信息)
   time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_call_stack --show-shape --output-format json,xlsx
   
   # 基于调用栈对比多个文件 (输出包含所有信息)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_call_stack --show-dtype --show-shape --show-kernel --output-format json,xlsx
+  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_call_stack --show-dtype --show-shape --show-kernel-names --show-kernel-duration --output-format json,xlsx
   
   # 对比多个文件并包含特殊的matmul分析
   time-chart-tool compare file1.json:fp32 file2.json:bf16 --aggregation on_op_name --special-matmul --output-format json,xlsx
@@ -73,8 +73,10 @@ def parse_arguments():
                                 help='在输出结果时是否展示 dtype 信息 (默认: False)')
     analysis_parser.add_argument('--show-shape', action='store_true', 
                                 help='在输出结果时是否展示 shape 和 strides 信息 (默认: False)')
-    analysis_parser.add_argument('--show-kernel', action='store_true', 
-                                help='在输出结果时是否展示 kernel 信息 (默认: False)')
+    analysis_parser.add_argument('--show-kernel-names', action='store_true', 
+                                help='在输出结果时是否展示 kernel 名称信息 (默认: False)')
+    analysis_parser.add_argument('--show-kernel-duration', action='store_true', 
+                                help='在输出结果时是否展示 kernel 持续时间信息 (默认: False)')
     analysis_parser.add_argument('--output-format', default='json,xlsx', 
                                 choices=['json', 'xlsx', 'json,xlsx'],
                                 help='输出格式 (默认: json,xlsx)')
@@ -91,8 +93,10 @@ def parse_arguments():
                                help='在输出结果时是否展示 dtype 信息 (默认: False)')
     compare_parser.add_argument('--show-shape', action='store_true', 
                                help='在输出结果时是否展示 shape 和 strides 信息 (默认: False)')
-    compare_parser.add_argument('--show-kernel', action='store_true', 
-                               help='在输出结果时是否展示 kernel 信息 (默认: False)')
+    compare_parser.add_argument('--show-kernel-names', action='store_true', 
+                               help='在输出结果时是否展示 kernel 名称信息 (默认: False)')
+    compare_parser.add_argument('--show-kernel-duration', action='store_true', 
+                               help='在输出结果时是否展示 kernel 持续时间信息 (默认: False)')
     compare_parser.add_argument('--special-matmul', action='store_true',
                                help='是否进行特殊的 matmul 分析 (默认: False)')
     compare_parser.add_argument('--compare-dtype', action='store_true',
@@ -137,7 +141,8 @@ def run_analysis(args):
     print(f"聚合方法: {args.aggregation}")
     print(f"展示dtype: {args.show_dtype}")
     print(f"展示shape: {args.show_shape}")
-    print(f"展示kernel: {args.show_kernel}")
+    print(f"展示kernel名称: {args.show_kernel_names}")
+    print(f"展示kernel持续时间: {args.show_kernel_duration}")
     print(f"输出格式: {args.output_format}")
     print(f"输出目录: {args.output_dir}")
     print()
@@ -161,8 +166,10 @@ def run_analysis(args):
             aggregation_type=args.aggregation,
             show_dtype=args.show_dtype,
             show_shape=args.show_shape,
-            show_kernel=args.show_kernel,
-            output_dir=str(output_dir)
+            show_kernel_names=args.show_kernel_names,
+            show_kernel_duration=args.show_kernel_duration,
+            output_dir=str(output_dir),
+            label=args.label
         )
         
         total_time = time.time() - start_time
@@ -188,7 +195,8 @@ def run_compare_analysis(args):
     print(f"聚合方法: {args.aggregation}")
     print(f"展示dtype: {args.show_dtype}")
     print(f"展示shape: {args.show_shape}")
-    print(f"展示kernel: {args.show_kernel}")
+    print(f"展示kernel名称: {args.show_kernel_names}")
+    print(f"展示kernel持续时间: {args.show_kernel_duration}")
     print(f"特殊matmul: {args.special_matmul}")
     print(f"输出格式: {args.output_format}")
     print(f"输出目录: {args.output_dir}")
@@ -225,7 +233,8 @@ def run_compare_analysis(args):
             aggregation_type=args.aggregation,
             show_dtype=args.show_dtype,
             show_shape=args.show_shape,
-            show_kernel=args.show_kernel,
+            show_kernel_names=args.show_kernel_names,
+            show_kernel_duration=args.show_kernel_duration,
             special_matmul=args.special_matmul,
             output_dir=str(output_dir),
             compare_dtype=args.compare_dtype,

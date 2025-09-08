@@ -537,12 +537,14 @@ class Analyzer:
                            output_dir: str = ".", 
                            show_dtype: bool = True,
                            show_shape: bool = True,
-                           show_kernel: bool = True,
+                           show_kernel_names: bool = True,
+                           show_kernel_duration: bool = True,
                            special_matmul: bool = False,
                            aggregation_type: str = 'on_op_name',
                            compare_dtype: bool = False,
                            compare_shape: bool = False,
-                           file_labels: List[str] = None) -> List[Path]:
+                           file_labels: List[str] = None,
+                           label: str = None) -> List[Path]:
         """
         Stage 4: 展示
         根据配置决定是否展示 dtype 信息，是否展示 shape 信息，是否展示kernel 信息
@@ -560,11 +562,11 @@ class Analyzer:
         print("=== Stage 4: 展示 ===")
         
         if comparison_result['type'] == 'single_file':
-            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel, aggregation_type)
+            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, aggregation_type, label)
         elif comparison_result['type'] == 'multiple_files':
-            return self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel, special_matmul, aggregation_type, compare_dtype, compare_shape, file_labels)
+            return self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, special_matmul, aggregation_type, compare_dtype, compare_shape, file_labels)
     
-    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel: bool, aggregation_type: str = 'on_op_name') -> List[Path]:
+    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, aggregation_type: str = 'on_op_name', label: str = None) -> List[Path]:
         """展示单文件数据"""
         print("生成单文件展示结果...")
         
@@ -611,7 +613,7 @@ class Analyzer:
                     # 将每个event的输入类型信息作为一个整体来记录
                     if input_types:
                         dtypes.add(str(input_types))
-                row['dtypes'] = '||'.join(sorted(dtypes)) if dtypes else ''
+                row['dtypes'] = '\n'.join(sorted(dtypes)) if dtypes else ''
             
             if show_shape:
                 # 收集 shape 和 strides 种类信息
@@ -626,27 +628,36 @@ class Analyzer:
                         shapes.add(str(input_dims))
                     if input_strides:
                         strides.add(str(input_strides))
-                row['shapes'] = '||'.join(sorted(shapes)) if shapes else ''
-                row['strides'] = '||'.join(sorted(strides)) if strides else ''
+                row['shapes'] = '\n'.join(sorted(shapes)) if shapes else ''
+                row['strides'] = '\n'.join(sorted(strides)) if strides else ''
             
-            if show_kernel:
+            if show_kernel_names or show_kernel_duration:
                 # 收集 kernel 信息
                 kernel_stats = self._calculate_kernel_statistics(aggregated_data.kernel_events)
                 if kernel_stats:
                     row['kernel_count'] = sum(stats.count for stats in kernel_stats)
-                    row['kernel_names'] = '||'.join(stats.kernel_name for stats in kernel_stats)
-                    row['kernel_mean_duration'] = sum(stats.mean_duration * stats.count for stats in kernel_stats) / sum(stats.count for stats in kernel_stats)
+                    if show_kernel_names:
+                        row['kernel_names'] = '\n'.join(stats.kernel_name for stats in kernel_stats)
+                    if show_kernel_duration:
+                        row['kernel_mean_duration'] = sum(stats.mean_duration * stats.count for stats in kernel_stats) / sum(stats.count for stats in kernel_stats)
+                        row['kernel_min_duration'] = min(stats.min_duration for stats in kernel_stats)
+                        row['kernel_max_duration'] = max(stats.max_duration for stats in kernel_stats)
                 else:
                     row['kernel_count'] = 0
-                    row['kernel_names'] = ''
-                    row['kernel_mean_duration'] = 0.0
+                    if show_kernel_names:
+                        row['kernel_names'] = ''
+                    if show_kernel_duration:
+                        row['kernel_mean_duration'] = 0.0
+                        row['kernel_min_duration'] = 0.0
+                        row['kernel_max_duration'] = 0.0
             
             rows.append(row)
         
-        # 生成文件
-        return self._generate_output_files(rows, output_dir, "single_file_analysis")
+        # 生成文件，使用label信息命名
+        base_name = f"{label}_analysis" if label else "single_file_analysis"
+        return self._generate_output_files(rows, output_dir, base_name)
     
-    def _present_multiple_files(self, data: Dict[str, Any], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel: bool, special_matmul: bool, aggregation_type: str = 'on_op_name', compare_dtype: bool = False, compare_shape: bool = False, file_labels: List[str] = None) -> List[Path]:
+    def _present_multiple_files(self, data: Dict[str, Any], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, special_matmul: bool, aggregation_type: str = 'on_op_name', compare_dtype: bool = False, compare_shape: bool = False, file_labels: List[str] = None) -> List[Path]:
         """展示多文件数据"""
         print("生成多文件展示结果...")
         
@@ -691,7 +702,7 @@ class Analyzer:
                         # 将每个event的输入类型信息作为一个整体来记录
                         if input_types:
                             dtypes.add(str(input_types))
-                    row[f'{label}_dtypes'] = '||'.join(sorted(dtypes)) if dtypes else ''
+                    row[f'{label}_dtypes'] = '\n'.join(sorted(dtypes)) if dtypes else ''
                 
                 if show_shape:
                     shapes = set()
@@ -705,19 +716,27 @@ class Analyzer:
                             shapes.add(str(input_dims))
                         if input_strides:
                             strides.add(str(input_strides))
-                    row[f'{label}_shapes'] = '||'.join(sorted(shapes)) if shapes else ''
-                    row[f'{label}_strides'] = '||'.join(sorted(strides)) if strides else ''
+                    row[f'{label}_shapes'] = '\n'.join(sorted(shapes)) if shapes else ''
+                    row[f'{label}_strides'] = '\n'.join(sorted(strides)) if strides else ''
                 
-                if show_kernel:
+                if show_kernel_names or show_kernel_duration:
                     kernel_stats = self._calculate_kernel_statistics(kernel_events)
                     if kernel_stats:
                         row[f'{label}_kernel_count'] = sum(stats.count for stats in kernel_stats)
-                        row[f'{label}_kernel_names'] = '||'.join(stats.kernel_name for stats in kernel_stats)
-                        row[f'{label}_kernel_mean_duration'] = sum(stats.mean_duration * stats.count for stats in kernel_stats) / sum(stats.count for stats in kernel_stats)
+                        if show_kernel_names:
+                            row[f'{label}_kernel_names'] = '\n'.join(stats.kernel_name for stats in kernel_stats)
+                        if show_kernel_duration:
+                            row[f'{label}_kernel_mean_duration'] = sum(stats.mean_duration * stats.count for stats in kernel_stats) / sum(stats.count for stats in kernel_stats)
+                            row[f'{label}_kernel_min_duration'] = min(stats.min_duration for stats in kernel_stats)
+                            row[f'{label}_kernel_max_duration'] = max(stats.max_duration for stats in kernel_stats)
                     else:
                         row[f'{label}_kernel_count'] = 0
-                        row[f'{label}_kernel_names'] = ''
-                        row[f'{label}_kernel_mean_duration'] = 0.0
+                        if show_kernel_names:
+                            row[f'{label}_kernel_names'] = ''
+                        if show_kernel_duration:
+                            row[f'{label}_kernel_mean_duration'] = 0.0
+                            row[f'{label}_kernel_min_duration'] = 0.0
+                            row[f'{label}_kernel_max_duration'] = 0.0
             
             # 添加比较列
             if compare_dtype or compare_shape:
@@ -971,8 +990,8 @@ class Analyzer:
     # ==================== 完整的分析流程 ====================
     
     def analyze_single_file(self, file_path: str, aggregation_type: str = 'on_op_name', 
-                           show_dtype: bool = True, show_shape: bool = True, show_kernel: bool = True, 
-                           output_dir: str = ".") -> List[Path]:
+                           show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, 
+                           output_dir: str = ".", label: str = None) -> List[Path]:
         """
         分析单个文件的完整流程
         
@@ -999,13 +1018,13 @@ class Analyzer:
         comparison_result = self.stage3_comparison(single_file_data=aggregated_data, aggregation_type=aggregation_type)
         
         # Stage 4: 展示
-        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel, aggregation_type=aggregation_type)
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, aggregation_type=aggregation_type, label=label)
         
         print("=== 单文件分析完成 ===")
         return generated_files
     
     def analyze_multiple_files(self, file_labels: List[Tuple[str, str]], aggregation_type: str = 'on_op_name',
-                              show_dtype: bool = True, show_shape: bool = True, show_kernel: bool = True, special_matmul: bool = False,
+                              show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, special_matmul: bool = False,
                               output_dir: str = ".", compare_dtype: bool = False, compare_shape: bool = False) -> List[Path]:
         """
         分析多个文件的完整流程
@@ -1043,7 +1062,7 @@ class Analyzer:
         
         # Stage 4: 展示
         file_labels_list = [label for _, label in file_labels]
-        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel, special_matmul, aggregation_type, compare_dtype, compare_shape, file_labels_list)
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, special_matmul, aggregation_type, compare_dtype, compare_shape, file_labels_list)
         
         print("=== 多文件分析完成 ===")
         return generated_files
