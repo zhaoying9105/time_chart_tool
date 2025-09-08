@@ -544,7 +544,8 @@ class Analyzer:
                            compare_dtype: bool = False,
                            compare_shape: bool = False,
                            file_labels: List[str] = None,
-                           label: str = None) -> List[Path]:
+                           label: str = None,
+                           print_markdown: bool = False) -> List[Path]:
         """
         Stage 4: 展示
         根据配置决定是否展示 dtype 信息，是否展示 shape 信息，是否展示kernel 信息
@@ -562,13 +563,21 @@ class Analyzer:
         print("=== Stage 4: 展示 ===")
         
         if comparison_result['type'] == 'single_file':
-            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, aggregation_type, label)
+            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, aggregation_type, label, print_markdown)
         elif comparison_result['type'] == 'multiple_files':
-            return self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, special_matmul, aggregation_type, compare_dtype, compare_shape, file_labels)
+            return self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, special_matmul, aggregation_type, compare_dtype, compare_shape, file_labels, print_markdown)
     
-    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, aggregation_type: str = 'on_op_name', label: str = None) -> List[Path]:
+    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, aggregation_type: str = 'on_op_name', label: str = None, print_markdown: bool = False) -> List[Path]:
         """展示单文件数据"""
         print("生成单文件展示结果...")
+        
+        # 如果显示kernel duration，先计算总耗时
+        total_duration = 0.0
+        if show_kernel_duration:
+            for aggregated_data in data.values():
+                kernel_stats = self._calculate_kernel_statistics(aggregated_data.kernel_events)
+                if kernel_stats:
+                    total_duration += sum(stats.mean_duration * stats.count for stats in kernel_stats)
         
         rows = []
         for key, aggregated_data in data.items():
@@ -639,9 +648,12 @@ class Analyzer:
                     if show_kernel_names:
                         row['kernel_names'] = '\n'.join(stats.kernel_name for stats in kernel_stats)
                     if show_kernel_duration:
-                        row['kernel_mean_duration'] = sum(stats.mean_duration * stats.count for stats in kernel_stats) / sum(stats.count for stats in kernel_stats)
+                        op_total_duration = sum(stats.mean_duration * stats.count for stats in kernel_stats)
+                        row['kernel_mean_duration'] = op_total_duration / sum(stats.count for stats in kernel_stats)
                         row['kernel_min_duration'] = min(stats.min_duration for stats in kernel_stats)
                         row['kernel_max_duration'] = max(stats.max_duration for stats in kernel_stats)
+                        row['kernel_total_duration'] = op_total_duration
+                        row['kernel_duration_ratio'] = (op_total_duration / total_duration * 100) if total_duration > 0 else 0.0
                 else:
                     row['kernel_count'] = 0
                     if show_kernel_names:
@@ -650,16 +662,36 @@ class Analyzer:
                         row['kernel_mean_duration'] = 0.0
                         row['kernel_min_duration'] = 0.0
                         row['kernel_max_duration'] = 0.0
+                        row['kernel_total_duration'] = 0.0
+                        row['kernel_duration_ratio'] = 0.0
             
             rows.append(row)
+        
+        # 如果启用markdown打印，在stdout中打印表格
+        if print_markdown:
+            # 按照kernel_duration_ratio排序（从大到小）
+            sorted_rows = sorted(rows, key=lambda x: x.get('kernel_duration_ratio', 0), reverse=True)
+            self._print_markdown_table(sorted_rows, f"{label} 分析结果" if label else "单文件分析结果")
         
         # 生成文件，使用label信息命名
         base_name = f"{label}_analysis" if label else "single_file_analysis"
         return self._generate_output_files(rows, output_dir, base_name)
     
-    def _present_multiple_files(self, data: Dict[str, Any], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, special_matmul: bool, aggregation_type: str = 'on_op_name', compare_dtype: bool = False, compare_shape: bool = False, file_labels: List[str] = None) -> List[Path]:
+    def _present_multiple_files(self, data: Dict[str, Any], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, special_matmul: bool, aggregation_type: str = 'on_op_name', compare_dtype: bool = False, compare_shape: bool = False, file_labels: List[str] = None, print_markdown: bool = False) -> List[Path]:
         """展示多文件数据"""
         print("生成多文件展示结果...")
+        
+        # 如果显示kernel duration，先计算每个文件的总耗时
+        file_total_durations = {}
+        if show_kernel_duration:
+            for key, entry in data.items():
+                for label, file_data in entry['files'].items():
+                    if label not in file_total_durations:
+                        file_total_durations[label] = 0.0
+                    kernel_events = file_data['kernel_events']
+                    kernel_stats = self._calculate_kernel_statistics(kernel_events)
+                    if kernel_stats:
+                        file_total_durations[label] += sum(stats.mean_duration * stats.count for stats in kernel_stats)
         
         rows = []
         for key, entry in data.items():
@@ -726,9 +758,12 @@ class Analyzer:
                         if show_kernel_names:
                             row[f'{label}_kernel_names'] = '\n'.join(stats.kernel_name for stats in kernel_stats)
                         if show_kernel_duration:
-                            row[f'{label}_kernel_mean_duration'] = sum(stats.mean_duration * stats.count for stats in kernel_stats) / sum(stats.count for stats in kernel_stats)
+                            op_total_duration = sum(stats.mean_duration * stats.count for stats in kernel_stats)
+                            row[f'{label}_kernel_mean_duration'] = op_total_duration / sum(stats.count for stats in kernel_stats)
                             row[f'{label}_kernel_min_duration'] = min(stats.min_duration for stats in kernel_stats)
                             row[f'{label}_kernel_max_duration'] = max(stats.max_duration for stats in kernel_stats)
+                            row[f'{label}_kernel_total_duration'] = op_total_duration
+                            row[f'{label}_kernel_duration_ratio'] = (op_total_duration / file_total_durations[label] * 100) if file_total_durations[label] > 0 else 0.0
                     else:
                         row[f'{label}_kernel_count'] = 0
                         if show_kernel_names:
@@ -737,6 +772,8 @@ class Analyzer:
                             row[f'{label}_kernel_mean_duration'] = 0.0
                             row[f'{label}_kernel_min_duration'] = 0.0
                             row[f'{label}_kernel_max_duration'] = 0.0
+                            row[f'{label}_kernel_total_duration'] = 0.0
+                            row[f'{label}_kernel_duration_ratio'] = 0.0
             
             # 添加比较列
             if compare_dtype or compare_shape:
@@ -781,6 +818,18 @@ class Analyzer:
                         row['shape_equal'] = shapes1 == shapes2
             
             rows.append(row)
+        
+        # 如果启用markdown打印，在stdout中打印表格
+        if print_markdown:
+            title = f"{file_labels[0]} vs {file_labels[1]} 对比分析" if file_labels and len(file_labels) >= 2 else "多文件对比分析"
+            # 对于多文件分析，按照第一个文件的kernel_duration_ratio排序（从大到小）
+            if file_labels and len(file_labels) >= 1:
+                first_label = file_labels[0]
+                ratio_key = f'{first_label}_kernel_duration_ratio'
+                sorted_rows = sorted(rows, key=lambda x: x.get(ratio_key, 0), reverse=True)
+            else:
+                sorted_rows = rows
+            self._print_markdown_table(sorted_rows, title)
         
         # 生成文件，使用标签信息命名
         if file_labels and len(file_labels) >= 2:
@@ -991,7 +1040,7 @@ class Analyzer:
     
     def analyze_single_file(self, file_path: str, aggregation_type: str = 'on_op_name', 
                            show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, 
-                           output_dir: str = ".", label: str = None) -> List[Path]:
+                           output_dir: str = ".", label: str = None, print_markdown: bool = False) -> List[Path]:
         """
         分析单个文件的完整流程
         
@@ -1018,14 +1067,14 @@ class Analyzer:
         comparison_result = self.stage3_comparison(single_file_data=aggregated_data, aggregation_type=aggregation_type)
         
         # Stage 4: 展示
-        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, aggregation_type=aggregation_type, label=label)
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, aggregation_type=aggregation_type, label=label, print_markdown=print_markdown)
         
         print("=== 单文件分析完成 ===")
         return generated_files
     
     def analyze_multiple_files(self, file_labels: List[Tuple[str, str]], aggregation_type: str = 'on_op_name',
                               show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, special_matmul: bool = False,
-                              output_dir: str = ".", compare_dtype: bool = False, compare_shape: bool = False) -> List[Path]:
+                              output_dir: str = ".", compare_dtype: bool = False, compare_shape: bool = False, print_markdown: bool = False) -> List[Path]:
         """
         分析多个文件的完整流程
         
@@ -1062,7 +1111,51 @@ class Analyzer:
         
         # Stage 4: 展示
         file_labels_list = [label for _, label in file_labels]
-        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, special_matmul, aggregation_type, compare_dtype, compare_shape, file_labels_list)
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, special_matmul, aggregation_type, compare_dtype, compare_shape, file_labels_list, print_markdown=print_markdown)
         
         print("=== 多文件分析完成 ===")
         return generated_files
+    
+    def _print_markdown_table(self, rows: List[Dict], title: str):
+        """在stdout中以markdown格式打印表格"""
+        if not rows:
+            print(f"\n## {title}\n\n无数据可显示\n")
+            return
+        
+        print(f"\n## {title}\n")
+        
+        # 获取所有列名
+        columns = list(rows[0].keys())
+        
+        # 打印表头
+        header = "| " + " | ".join(columns) + " |"
+        separator = "| " + " | ".join(["---"] * len(columns)) + " |"
+        print(header)
+        print(separator)
+        
+        # 打印数据行
+        for row in rows:
+            values = []
+            for col in columns:
+                value = row.get(col, "")
+                # 处理特殊值
+                if isinstance(value, float):
+                    if col.endswith('_ratio'):
+                        values.append(f"{value:.2f}%")
+                    elif col.endswith('_duration'):
+                        values.append(f"{value:.2f}")
+                    else:
+                        values.append(f"{value:.2f}")
+                elif isinstance(value, str) and '\n' in value:
+                    # 对于包含换行符的字符串，只显示前50个字符
+                    display_value = value.replace('\n', ', ')[:50]
+                    if len(value) > 50:
+                        display_value += "..."
+                    values.append(display_value)
+                else:
+                    values.append(str(value))
+            
+            data_row = "| " + " | ".join(values) + " |"
+            print(data_row)
+        
+        print()  # 添加空行
