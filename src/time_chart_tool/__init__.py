@@ -8,5 +8,5 @@ from .parser import PyTorchProfilerParser
 from .models import ActivityEvent, ProfilerData
 from .analyzer import Analyzer, KernelStatistics
 
-__version__ = "1.0.0"
+__version__ = "1.0.2"
 __all__ = ["PyTorchProfilerParser", "ActivityEvent", "ProfilerData", "Analyzer", "KernelStatistics"]
