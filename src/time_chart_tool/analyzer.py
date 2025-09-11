@@ -1072,14 +1072,15 @@ class Analyzer:
         print("=== 单文件分析完成 ===")
         return generated_files
     
-    def analyze_multiple_files(self, file_labels: List[Tuple[str, str]], aggregation_type: str = 'on_op_name',
+    def analyze_multiple_files(self, file_labels: List[Tuple[List[str], str]], aggregation_type: str = 'on_op_name',
                               show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, special_matmul: bool = False,
                               output_dir: str = ".", compare_dtype: bool = False, compare_shape: bool = False, print_markdown: bool = False) -> List[Path]:
         """
-        分析多个文件的完整流程
+        分析多个文件的完整流程，支持同一label下多个文件的聚合
         
         Args:
-            file_labels: [(file_path, label), ...] 文件路径和标签的列表
+            file_labels: [(file_paths, label), ...] 文件路径列表和标签的列表
+                        每个label可以对应多个文件，会自动聚合
             aggregation_type: 聚合类型
             show_dtype: 是否展示 dtype 信息
             show_shape: 是否展示 shape 和 strides 信息
@@ -1087,24 +1088,41 @@ class Analyzer:
             special_matmul: 是否进行特殊的 matmul 展示
             output_dir: 输出目录
         """
-        print(f"=== 开始分析多个文件，共 {len(file_labels)} 个文件 ===")
+        # 计算总文件数
+        total_files = sum(len(file_paths) for file_paths, _ in file_labels)
+        print(f"=== 开始分析多个文件，共 {len(file_labels)} 个标签，{total_files} 个文件 ===")
         
-        # 分析每个文件
+        # 分析每个标签下的文件
         multiple_files_data = {}
         
-        for file_path, label in file_labels:
-            print(f"正在分析文件: {file_path} (标签: {label})")
+        for file_paths, label in file_labels:
+            print(f"正在分析标签: {label} ({len(file_paths)} 个文件)")
             
-            # 加载数据
-            data = self.parser.load_json_file(file_path)
+            # 存储该标签下所有文件的聚合数据
+            label_aggregated_data_list = []
             
-            # Stage 1: 数据后处理
-            cpu_events_by_external_id, kernel_events_by_external_id = self.stage1_data_postprocessing(data)
+            for i, file_path in enumerate(file_paths):
+                print(f"  处理文件 {i+1}/{len(file_paths)}: {file_path}")
+                
+                # 加载数据
+                data = self.parser.load_json_file(file_path)
+                
+                # Stage 1: 数据后处理
+                cpu_events_by_external_id, kernel_events_by_external_id = self.stage1_data_postprocessing(data)
+                
+                # Stage 2: 数据聚合
+                aggregated_data = self.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_type)
+                
+                label_aggregated_data_list.append(aggregated_data)
             
-            # Stage 2: 数据聚合
-            aggregated_data = self.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_type)
-            
-            multiple_files_data[label] = aggregated_data
+            # 聚合同一标签下的多个文件
+            if len(label_aggregated_data_list) == 1:
+                # 只有一个文件，直接使用
+                multiple_files_data[label] = label_aggregated_data_list[0]
+            else:
+                # 多个文件，进行聚合
+                print(f"  聚合 {len(label_aggregated_data_list)} 个文件的数据...")
+                multiple_files_data[label] = self._merge_same_label_files(label_aggregated_data_list, aggregation_type)
         
         # Stage 3: 比较（多文件比较）
         comparison_result = self.stage3_comparison(multiple_files_data=multiple_files_data, aggregation_type=aggregation_type)
@@ -1115,6 +1133,84 @@ class Analyzer:
         
         print("=== 多文件分析完成 ===")
         return generated_files
+    
+    def _merge_same_label_files(self, aggregated_data_list: List[Dict[Union[str, tuple], 'AggregatedData']], aggregation_type: str) -> Dict[Union[str, tuple], 'AggregatedData']:
+        """
+        聚合同一标签下的多个文件的聚合数据
+        
+        Args:
+            aggregated_data_list: 多个文件的聚合数据列表
+            aggregation_type: 聚合类型
+            
+        Returns:
+            合并后的聚合数据
+        """
+        if not aggregated_data_list:
+            return {}
+        
+        if len(aggregated_data_list) == 1:
+            return aggregated_data_list[0]
+        
+        # 收集所有可能的键
+        all_keys = set()
+        for data in aggregated_data_list:
+            all_keys.update(data.keys())
+        
+        merged_data = {}
+        
+        for key in all_keys:
+            # 收集该键在所有文件中的数据
+            key_data_list = []
+            for data in aggregated_data_list:
+                if key in data:
+                    key_data_list.append(data[key])
+            
+            if not key_data_list:
+                continue
+            
+            # 合并该键的数据
+            merged_aggregated_data = self._merge_aggregated_data_for_key(key_data_list)
+            merged_data[key] = merged_aggregated_data
+        
+        return merged_data
+    
+    def _merge_aggregated_data_for_key(self, aggregated_data_list: List['AggregatedData']) -> 'AggregatedData':
+        """
+        合并同一个键在多个文件中的AggregatedData
+        
+        Args:
+            aggregated_data_list: 同一个键在多个文件中的AggregatedData列表
+            
+        Returns:
+            合并后的AggregatedData
+        """
+        if not aggregated_data_list:
+            return None
+        
+        if len(aggregated_data_list) == 1:
+            return aggregated_data_list[0]
+        
+        # 取第一个作为模板
+        template = aggregated_data_list[0]
+        
+        # 合并所有kernel事件
+        all_kernel_events = []
+        for data in aggregated_data_list:
+            all_kernel_events.extend(data.kernel_events)
+        
+        # 合并所有CPU事件
+        all_cpu_events = []
+        for data in aggregated_data_list:
+            all_cpu_events.extend(data.cpu_events)
+        
+        # 创建合并后的AggregatedData
+        merged_data = AggregatedData(
+            cpu_events=all_cpu_events,
+            kernel_events=all_kernel_events,
+            key=template.key  # 使用第一个数据的key
+        )
+        
+        return merged_data
     
     def _print_markdown_table(self, rows: List[Dict], title: str):
         """在stdout中以markdown格式打印表格"""

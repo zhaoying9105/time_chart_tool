@@ -9,6 +9,8 @@ Time Chart Tool 命令行工具 - 重构版本
 import argparse
 import sys
 import time
+import os
+import glob
 from pathlib import Path
 from typing import List, Tuple, Optional
 import json
@@ -53,6 +55,15 @@ def parse_arguments():
   # 对比多个文件并包含特殊的matmul分析
   time-chart-tool compare file1.json:fp32 file2.json:bf16 --aggregation on_op_name --special-matmul --output-format json,xlsx
   
+  # 混合模式：支持单文件、多文件、目录混合使用
+  time-chart-tool compare single_file.json:baseline "dir/*.json":test --aggregation on_op_name --output-format json,xlsx
+  
+  # 多文件模式：同一标签下多个文件自动聚合
+  time-chart-tool compare "file1.json,file2.json,file3.json":baseline "file4.json,file5.json":optimized --aggregation on_op_name --output-format json,xlsx
+  
+  # 目录模式：自动查找目录下所有json文件
+  time-chart-tool compare step1_results/:baseline step2_results/:optimized --aggregation on_op_name --output-format json,xlsx
+  
   # 只输出 JSON 格式
   time-chart-tool analysis file.json --aggregation on_call_stack --output-format json
   time-chart-tool compare file1.json:fp32 file2.json:tf32 --aggregation on_op_name --output-format json
@@ -90,7 +101,11 @@ def parse_arguments():
     # compare 命令 - 分析多个文件并对比
     compare_parser = subparsers.add_parser('compare', help='分析多个 JSON 文件并对比')
     compare_parser.add_argument('files', nargs='+', 
-                               help='文件列表，格式: file.json:label')
+                               help='文件列表，支持多种格式:\n'
+                                    '  单文件: file.json:label\n'
+                                    '  多文件: "file1.json,file2.json,file3.json":label\n'
+                                    '  目录: dir/:label (自动查找所有*.json文件)\n'
+                                    '  通配符: "dir/*.json":label')
     compare_parser.add_argument('--aggregation', choices=['on_op_name', 'on_op_shape', 'on_call_stack'], 
                                default='on_op_name',
                                help='聚合方法: on_op_name (基于操作名) 或 on_op_shape (基于操作形状) 或 on_call_stack (基于调用栈) (默认: on_op_name)')
@@ -131,13 +146,46 @@ def validate_file(file_path: str) -> bool:
     return True
 
 
-def parse_file_label(file_label: str) -> Tuple[str, str]:
-    """解析 file:label 格式的字符串"""
+def parse_file_label(file_label: str) -> Tuple[List[str], str]:
+    """解析 file:label 格式的字符串，支持混合模式
+    
+    支持的模式：
+    1. 单文件: file.json:label
+    2. 多文件: file1.json,file2.json,file3.json:label  
+    3. 目录: dir/:label (自动查找所有*.json文件)
+    4. 通配符: "dir/*.json":label
+    
+    Returns:
+        Tuple[List[str], str]: (文件路径列表, 标签)
+    """
     if ':' in file_label:
-        file_path, label = file_label.rsplit(':', 1)
-        return file_path.strip(), label.strip()
+        file_part, label = file_label.rsplit(':', 1)
+        file_part = file_part.strip()
+        label = label.strip()
+        
+        # 检查是否是目录
+        if os.path.isdir(file_part):
+            # 目录模式：查找所有json文件
+            json_files = glob.glob(os.path.join(file_part, "*.json"))
+            if not json_files:
+                raise ValueError(f"目录 {file_part} 中没有找到任何 .json 文件")
+            return sorted(json_files), label
+        elif ',' in file_part:
+            # 多文件模式：逗号分隔
+            files = [f.strip() for f in file_part.split(',')]
+            return files, label
+        elif '*' in file_part or '?' in file_part:
+            # 通配符模式
+            matched_files = glob.glob(file_part)
+            if not matched_files:
+                raise ValueError(f"通配符 {file_part} 没有匹配到任何文件")
+            return sorted(matched_files), label
+        else:
+            # 单文件模式
+            return [file_part], label
     else:
-        return file_label, Path(file_label).stem
+        # 没有标签，使用文件名作为标签
+        return [file_label], Path(file_label).stem
 
 
 def run_analysis(args):
@@ -215,17 +263,44 @@ def run_compare_analysis(args):
     # 解析文件列表
     file_labels = []
     for file_label in args.files:
-        file_path, label = parse_file_label(file_label)
-        if not validate_file(file_path):
+        try:
+            file_paths, label = parse_file_label(file_label)
+            
+            # 验证所有文件
+            valid_files = []
+            for file_path in file_paths:
+                if validate_file(file_path):
+                    valid_files.append(file_path)
+                else:
+                    print(f"警告: 跳过无效文件 {file_path}")
+            
+            if not valid_files:
+                print(f"错误: 标签 {label} 没有有效的文件")
+                return 1
+                
+            file_labels.append((valid_files, label))
+            
+            # 显示文件信息
+            if len(valid_files) == 1:
+                print(f"  {label}: {valid_files[0]}")
+            else:
+                print(f"  {label}: {len(valid_files)} 个文件")
+                for i, file_path in enumerate(valid_files[:3]):  # 只显示前3个
+                    print(f"    {i+1}. {file_path}")
+                if len(valid_files) > 3:
+                    print(f"    ... 还有 {len(valid_files) - 3} 个文件")
+                    
+        except ValueError as e:
+            print(f"错误: {e}")
             return 1
-        file_labels.append((file_path, label))
-        print(f"  {label}: {file_path}")
     
     if len(file_labels) < 2:
         print("错误: 对比分析需要至少2个文件")
         return 1
     
-    print(f"\n将分析 {len(file_labels)} 个文件")
+    # 计算总文件数
+    total_files = sum(len(files) for files, _ in file_labels)
+    print(f"\n将分析 {len(file_labels)} 个标签，共 {total_files} 个文件")
     
     # 创建输出目录
     output_dir = Path(args.output_dir)
