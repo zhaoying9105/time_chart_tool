@@ -7,11 +7,16 @@ import json
 import pandas as pd
 import matplotlib.pyplot as plt
 import re
+import os
+import glob
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple, Union
 from collections import defaultdict
 import statistics
 from dataclasses import dataclass
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import time
 
 from .models import ActivityEvent, ProfilerData
 from .parser import PyTorchProfilerParser
@@ -37,6 +42,40 @@ class AggregatedData:
     cpu_events: List[ActivityEvent]
     kernel_events: List[ActivityEvent]
     key: str  # 聚合键（op_name, op_shape, call_stack等）
+
+
+def _process_single_file_parallel(file_path: str, aggregation_type: str) -> Tuple[str, Dict[Union[str, tuple], 'AggregatedData']]:
+    """
+    并行处理单个文件的函数
+    
+    Args:
+        file_path: JSON文件路径
+        aggregation_type: 聚合类型
+        
+    Returns:
+        Tuple[str, Dict]: (文件路径, 聚合后的数据)
+    """
+    try:
+        # 创建新的解析器实例（每个进程需要独立的实例）
+        parser = PyTorchProfilerParser()
+        
+        # 加载数据
+        data = parser.load_json_file(file_path)
+        
+        # 创建分析器实例
+        analyzer = Analyzer()
+        
+        # Stage 1: 数据后处理
+        cpu_events_by_external_id, kernel_events_by_external_id = analyzer.stage1_data_postprocessing(data)
+        
+        # Stage 2: 数据聚合
+        aggregated_data = analyzer.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_type)
+        
+        return file_path, aggregated_data
+        
+    except Exception as e:
+        print(f"处理文件 {file_path} 时出错: {e}")
+        return file_path, {}
 
 
 class Analyzer:
@@ -776,7 +815,7 @@ class Analyzer:
                             row[f'{label}_kernel_duration_ratio'] = 0.0
             
             # 添加比较列
-            if compare_dtype or compare_shape:
+            if compare_dtype or compare_shape or show_kernel_duration:
                 # 获取所有文件的标签
                 file_labels = list(entry['files'].keys())
                 if len(file_labels) >= 2:
@@ -816,14 +855,43 @@ class Analyzer:
                                 # 将单个event的input_dims转换为字符串
                                 shapes2.add(str(input_dims))
                         row['shape_equal'] = shapes1 == shapes2
+                    
+                    # 添加 mean duration ratio 比较
+                    if show_kernel_duration:
+                        mean_duration1 = row.get(f'{label1}_kernel_mean_duration', 0.0)
+                        mean_duration2 = row.get(f'{label2}_kernel_mean_duration', 0.0)
+                        
+                        if mean_duration1 > 0 and mean_duration2 > 0:
+                            # 计算 ratio: label2 / label1 (即第二个标签相对于第一个标签的性能比例)
+                            ratio = mean_duration2 / mean_duration1
+                            row[f'{label2}_vs_{label1}_mean_duration_ratio'] = ratio
+                            
+                            # 计算性能提升百分比
+                            if ratio < 1:
+                                improvement = (1 - ratio) * 100
+                                row[f'{label2}_vs_{label1}_performance_improvement'] = f"{improvement:.1f}%"
+                            else:
+                                degradation = (ratio - 1) * 100
+                                row[f'{label2}_vs_{label1}_performance_improvement'] = f"-{degradation:.1f}%"
+                        else:
+                            row[f'{label2}_vs_{label1}_mean_duration_ratio'] = 0.0
+                            row[f'{label2}_vs_{label1}_performance_improvement'] = "N/A"
             
             rows.append(row)
         
         # 如果启用markdown打印，在stdout中打印表格
         if print_markdown:
             title = f"{file_labels[0]} vs {file_labels[1]} 对比分析" if file_labels and len(file_labels) >= 2 else "多文件对比分析"
-            # 对于多文件分析，按照第一个文件的kernel_duration_ratio排序（从大到小）
-            if file_labels and len(file_labels) >= 1:
+            # 对于多文件分析，优先按照mean_duration_ratio排序，如果没有则按照第一个文件的kernel_duration_ratio排序
+            if file_labels and len(file_labels) >= 2:
+                ratio_key = f'{file_labels[1]}_vs_{file_labels[0]}_mean_duration_ratio'
+                if any(ratio_key in row for row in rows):
+                    sorted_rows = sorted(rows, key=lambda x: x.get(ratio_key, 0), reverse=True)
+                else:
+                    first_label = file_labels[0]
+                    ratio_key = f'{first_label}_kernel_duration_ratio'
+                    sorted_rows = sorted(rows, key=lambda x: x.get(ratio_key, 0), reverse=True)
+            elif file_labels and len(file_labels) >= 1:
                 first_label = file_labels[0]
                 ratio_key = f'{first_label}_kernel_duration_ratio'
                 sorted_rows = sorted(rows, key=lambda x: x.get(ratio_key, 0), reverse=True)
@@ -1074,9 +1142,10 @@ class Analyzer:
     
     def analyze_multiple_files(self, file_labels: List[Tuple[List[str], str]], aggregation_type: str = 'on_op_name',
                               show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, special_matmul: bool = False,
-                              output_dir: str = ".", compare_dtype: bool = False, compare_shape: bool = False, print_markdown: bool = False) -> List[Path]:
+                              output_dir: str = ".", compare_dtype: bool = False, compare_shape: bool = False, print_markdown: bool = False, 
+                              max_workers: Optional[int] = None) -> List[Path]:
         """
-        分析多个文件的完整流程，支持同一label下多个文件的聚合
+        分析多个文件的完整流程，支持同一label下多个文件的聚合，使用多进程并行读取JSON文件
         
         Args:
             file_labels: [(file_paths, label), ...] 文件路径列表和标签的列表
@@ -1087,10 +1156,17 @@ class Analyzer:
             show_kernel: 是否展示 kernel 信息
             special_matmul: 是否进行特殊的 matmul 展示
             output_dir: 输出目录
+            max_workers: 最大工作进程数，默认为CPU核心数
         """
         # 计算总文件数
         total_files = sum(len(file_paths) for file_paths, _ in file_labels)
         print(f"=== 开始分析多个文件，共 {len(file_labels)} 个标签，{total_files} 个文件 ===")
+        
+        # 设置进程数
+        if max_workers is None:
+            max_workers = min(mp.cpu_count(), total_files)
+        
+        print(f"使用 {max_workers} 个进程并行处理文件")
         
         # 分析每个标签下的文件
         multiple_files_data = {}
@@ -1098,22 +1174,8 @@ class Analyzer:
         for file_paths, label in file_labels:
             print(f"正在分析标签: {label} ({len(file_paths)} 个文件)")
             
-            # 存储该标签下所有文件的聚合数据
-            label_aggregated_data_list = []
-            
-            for i, file_path in enumerate(file_paths):
-                print(f"  处理文件 {i+1}/{len(file_paths)}: {file_path}")
-                
-                # 加载数据
-                data = self.parser.load_json_file(file_path)
-                
-                # Stage 1: 数据后处理
-                cpu_events_by_external_id, kernel_events_by_external_id = self.stage1_data_postprocessing(data)
-                
-                # Stage 2: 数据聚合
-                aggregated_data = self.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_type)
-                
-                label_aggregated_data_list.append(aggregated_data)
+            # 使用多进程并行处理文件
+            label_aggregated_data_list = self._process_files_parallel(file_paths, aggregation_type, max_workers)
             
             # 聚合同一标签下的多个文件
             if len(label_aggregated_data_list) == 1:
@@ -1133,6 +1195,52 @@ class Analyzer:
         
         print("=== 多文件分析完成 ===")
         return generated_files
+    
+    def _process_files_parallel(self, file_paths: List[str], aggregation_type: str, max_workers: int) -> List[Dict[Union[str, tuple], 'AggregatedData']]:
+        """
+        使用多进程并行处理文件列表
+        
+        Args:
+            file_paths: 文件路径列表
+            aggregation_type: 聚合类型
+            max_workers: 最大工作进程数
+            
+        Returns:
+            List[Dict]: 聚合后的数据列表
+        """
+        if len(file_paths) == 1:
+            # 只有一个文件，直接处理
+            file_path = file_paths[0]
+            print(f"  处理文件: {file_path}")
+            _, aggregated_data = _process_single_file_parallel(file_path, aggregation_type)
+            return [aggregated_data]
+        
+        # 多个文件，使用进程池并行处理
+        aggregated_data_list = []
+        completed_count = 0
+        
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # 提交所有任务
+            future_to_file = {
+                executor.submit(_process_single_file_parallel, file_path, aggregation_type): file_path 
+                for file_path in file_paths
+            }
+            
+            # 收集结果
+            for future in as_completed(future_to_file):
+                file_path = future_to_file[future]
+                completed_count += 1
+                
+                try:
+                    _, aggregated_data = future.result()
+                    aggregated_data_list.append(aggregated_data)
+                    print(f"  完成文件 {completed_count}/{len(file_paths)}: {file_path}")
+                except Exception as e:
+                    print(f"  处理文件失败 {completed_count}/{len(file_paths)}: {file_path}, 错误: {e}")
+                    # 添加空数据以保持索引一致
+                    aggregated_data_list.append({})
+        
+        return aggregated_data_list
     
     def _merge_same_label_files(self, aggregated_data_list: List[Dict[Union[str, tuple], 'AggregatedData']], aggregation_type: str) -> Dict[Union[str, tuple], 'AggregatedData']:
         """
@@ -1237,7 +1345,11 @@ class Analyzer:
                 # 处理特殊值
                 if isinstance(value, float):
                     if col.endswith('_ratio'):
-                        values.append(f"{value:.2f}%")
+                        if 'mean_duration_ratio' in col:
+                            # mean_duration_ratio 显示为比例形式
+                            values.append(f"{value:.3f}")
+                        else:
+                            values.append(f"{value:.2f}%")
                     elif col.endswith('_duration'):
                         values.append(f"{value:.2f}")
                     else:
@@ -1255,3 +1367,308 @@ class Analyzer:
             print(data_row)
         
         print()  # 添加空行
+    
+    # ==================== All-to-All 通信性能分析 ====================
+    
+    def analyze_all2all_performance(self, pod_dir: str, attempt_idx: int = 0, output_dir: str = ".") -> List[Path]:
+        """
+        分析All-to-All通信性能
+        
+        Args:
+            pod_dir: Pod文件夹路径
+            attempt_idx: 要分析的attempt索引
+            output_dir: 输出目录
+            
+        Returns:
+            List[Path]: 生成的文件路径列表
+        """
+        print(f"=== 开始All-to-All通信性能分析 ===")
+        print(f"Pod目录: {pod_dir}")
+        print(f"Attempt索引: {attempt_idx}")
+        
+        # 1. 扫描pod目录，找到所有相同attempt_idx的文件夹
+        executor_folders = self._scan_executor_folders(pod_dir, attempt_idx)
+        if not executor_folders:
+            print(f"错误: 在 {pod_dir} 中没有找到attempt_idx={attempt_idx}的executor文件夹")
+            return []
+        
+        print(f"找到 {len(executor_folders)} 个executor文件夹")
+        
+        # 2. 解析所有JSON文件，提取all2all数据
+        all2all_data = self._extract_all2all_data(executor_folders)
+        if not all2all_data:
+            print("错误: 没有找到任何all2all数据")
+            return []
+        
+        print(f"成功提取all2all数据，共 {len(all2all_data)} 个step")
+        
+        # 3. 生成原始数据Excel文件
+        raw_data_file = self._generate_raw_data_excel(all2all_data, output_dir)
+        
+        # 4. 生成统计分析Excel文件
+        stats_file = self._generate_statistics_excel(all2all_data, output_dir)
+        
+        generated_files = [raw_data_file, stats_file]
+        print("=== All-to-All通信性能分析完成 ===")
+        
+        return generated_files
+    
+    def _scan_executor_folders(self, pod_dir: str, attempt_idx: int) -> List[str]:
+        """
+        扫描pod目录，找到所有相同attempt_idx的executor文件夹
+        
+        Args:
+            pod_dir: Pod目录路径
+            attempt_idx: attempt索引
+            
+        Returns:
+            List[str]: executor文件夹路径列表
+        """
+        executor_folders = []
+        pod_path = Path(pod_dir)
+        
+        # 查找所有executor_trainer-runner_*_*_*格式的文件夹
+        pattern = f"executor_trainer-runner_*_{attempt_idx}_*"
+        for folder in pod_path.glob(pattern):
+            if folder.is_dir():
+                executor_folders.append(str(folder))
+        
+        return sorted(executor_folders)
+    
+    def _extract_all2all_data(self, executor_folders: List[str]) -> Dict[int, Dict[int, List[float]]]:
+        """
+        从executor文件夹中提取all2all数据
+        
+        Args:
+            executor_folders: executor文件夹路径列表
+            
+        Returns:
+            Dict[int, Dict[int, List[float]]]: {step: {card_idx: [duration1, duration2, ...]}}
+        """
+        all2all_data = defaultdict(lambda: defaultdict(list))
+        
+        for executor_folder in executor_folders:
+            print(f"  处理文件夹: {executor_folder}")
+            
+            # 查找所有JSON文件
+            json_files = list(Path(executor_folder).glob("*.json"))
+            if not json_files:
+                print(f"    警告: 文件夹中没有JSON文件")
+                continue
+            
+            for json_file in json_files:
+                # 解析文件名获取step和card_idx
+                step, card_idx = self._parse_json_filename(json_file.name)
+                if step is None or card_idx is None:
+                    print(f"    警告: 无法解析文件名 {json_file.name}")
+                    continue
+                
+                # 提取all2all durations
+                durations = self._extract_all2all_durations(str(json_file))
+                if durations:
+                    all2all_data[step][card_idx].extend(durations)
+                    print(f"    文件 {json_file.name}: step={step}, card={card_idx}, 提取到 {len(durations)} 个duration")
+        
+        return dict(all2all_data)
+    
+    def _parse_json_filename(self, filename: str) -> Tuple[Optional[int], Optional[int]]:
+        """
+        解析JSON文件名，提取step和card_idx
+        
+        Args:
+            filename: JSON文件名，格式如 trace_ctr_torch_v310_hot_start01_r10495354_0_7_321.json
+            
+        Returns:
+            Tuple[Optional[int], Optional[int]]: (step, card_idx)
+        """
+        try:
+            # 使用正则表达式提取step和card_idx
+            # 文件名格式: trace_ctr_torch_v310_hot_start01_r10495354_0_7_321.json
+            # 其中7是card_idx，321是step
+            pattern = r'.*_(\d+)_(\d+)\.json$'
+            match = re.match(pattern, filename)
+            
+            if match:
+                card_idx = int(match.group(1))
+                step = int(match.group(2))
+                return step, card_idx
+            else:
+                return None, None
+        except Exception as e:
+            print(f"    解析文件名失败 {filename}: {e}")
+            return None, None
+    
+    def _extract_all2all_durations(self, json_file_path: str) -> List[float]:
+        """
+        从JSON文件中提取TCDP_ALLTOALL操作的duration
+        
+        Args:
+            json_file_path: JSON文件路径
+            
+        Returns:
+            List[float]: duration列表，最多6个
+        """
+        try:
+            with open(json_file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 使用正则表达式匹配TCDP_ALLTOALL操作
+            pattern = r'"ph":\s*"X",\s*"cat":\s*"kernel",\s*"name":\s*"TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL_BF16_ADD",\s*"pid":\s*\d+,\s*"tid":\s*\d+,\s*"ts":\s*[\d.]+,\s*"dur":\s*([\d.]+)'
+            
+            matches = re.findall(pattern, content, re.DOTALL)
+            
+            # 转换为浮点数，最多取6个
+            durations = [float(match) for match in matches[:6]]
+            
+            return durations
+            
+        except Exception as e:
+            print(f"    读取JSON文件失败 {json_file_path}: {e}")
+            return []
+    
+    def _generate_raw_data_excel(self, all2all_data: Dict[int, Dict[int, List[float]]], output_dir: str) -> Path:
+        """
+        生成原始数据Excel文件
+        
+        Args:
+            all2all_data: {step: {card_idx: [duration1, duration2, ...]}}
+            output_dir: 输出目录
+            
+        Returns:
+            Path: 生成的文件路径
+        """
+        print("生成原始数据Excel文件...")
+        
+        rows = []
+        for step in sorted(all2all_data.keys()):
+            for card_idx in sorted(all2all_data[step].keys()):
+                durations = all2all_data[step][card_idx]
+                for all2all_idx, duration in enumerate(durations):
+                    rows.append({
+                        'step': step,
+                        'card_idx': card_idx,
+                        'all2all_idx': all2all_idx,
+                        'duration': duration
+                    })
+        
+        # 创建DataFrame并保存
+        df = pd.DataFrame(rows)
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        excel_file = output_path / "all2all_raw_data.xlsx"
+        df.to_excel(excel_file, index=False)
+        print(f"原始数据Excel文件已生成: {excel_file}")
+        
+        return excel_file
+    
+    def _generate_statistics_excel(self, all2all_data: Dict[int, Dict[int, List[float]]], output_dir: str) -> Path:
+        """
+        生成统计分析Excel文件
+        
+        Args:
+            all2all_data: {step: {card_idx: [duration1, duration2, ...]}}
+            output_dir: 输出目录
+            
+        Returns:
+            Path: 生成的文件路径
+        """
+        print("生成统计分析Excel文件...")
+        
+        rows = []
+        for step in sorted(all2all_data.keys()):
+            step_data = all2all_data[step]
+            
+            # 为每个all2all_idx生成统计信息
+            max_all2all_idx = max(max(len(durations) for durations in card_data.values()) for card_data in [step_data])
+            
+            for all2all_idx in range(max_all2all_idx):
+                # 收集该all2all_idx下所有card的duration
+                card_durations = {}
+                for card_idx, durations in step_data.items():
+                    if all2all_idx < len(durations):
+                        card_durations[card_idx] = durations[all2all_idx]
+                
+                if not card_durations:
+                    continue
+                
+                # 计算统计信息
+                durations_list = list(card_durations.values())
+                durations_list.sort()
+                
+                # 最快和最慢的5个card
+                fastest_5_cards = durations_list[:5]
+                slowest_5_cards = durations_list[-5:][::-1]  # 反转，从最慢到最快
+                
+                # 统计信息
+                mean_duration = statistics.mean(durations_list)
+                min_duration = min(durations_list)
+                max_duration = max(durations_list)
+                variance = statistics.variance(durations_list) if len(durations_list) > 1 else 0.0
+                std_dev = variance ** 0.5
+                
+                # 最大最小值的差值和比例
+                duration_diff = max_duration - min_duration
+                duration_ratio = max_duration / min_duration if min_duration > 0 else 0.0
+                
+                # 找到对应的card_idx
+                fastest_5_cards_with_idx = []
+                slowest_5_cards_with_idx = []
+                
+                for duration in fastest_5_cards:
+                    for card_idx, dur in card_durations.items():
+                        if dur == duration and (card_idx, dur) not in fastest_5_cards_with_idx:
+                            fastest_5_cards_with_idx.append((card_idx, dur))
+                            break
+                
+                for duration in slowest_5_cards:
+                    for card_idx, dur in card_durations.items():
+                        if dur == duration and (card_idx, dur) not in slowest_5_cards_with_idx:
+                            slowest_5_cards_with_idx.append((card_idx, dur))
+                            break
+                
+                # 构建行数据
+                row = {
+                    'step': step,
+                    'all2all_idx': all2all_idx,
+                    'card_count': len(card_durations),
+                    'mean_duration': mean_duration,
+                    'min_duration': min_duration,
+                    'max_duration': max_duration,
+                    'std_deviation': std_dev,
+                    'variance': variance,
+                    'duration_diff': duration_diff,
+                    'duration_ratio': duration_ratio
+                }
+                
+                # 添加最快和最慢的5个card
+                for i in range(5):
+                    if i < len(fastest_5_cards_with_idx):
+                        card_idx, duration = fastest_5_cards_with_idx[i]
+                        row[f'fastest_card_{i+1}_idx'] = card_idx
+                        row[f'fastest_card_{i+1}_duration'] = duration
+                    else:
+                        row[f'fastest_card_{i+1}_idx'] = None
+                        row[f'fastest_card_{i+1}_duration'] = None
+                
+                for i in range(5):
+                    if i < len(slowest_5_cards_with_idx):
+                        card_idx, duration = slowest_5_cards_with_idx[i]
+                        row[f'slowest_card_{i+1}_idx'] = card_idx
+                        row[f'slowest_card_{i+1}_duration'] = duration
+                    else:
+                        row[f'slowest_card_{i+1}_idx'] = None
+                        row[f'slowest_card_{i+1}_duration'] = None
+                
+                rows.append(row)
+        
+        # 创建DataFrame并保存
+        df = pd.DataFrame(rows)
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        excel_file = output_path / "all2all_statistics.xlsx"
+        df.to_excel(excel_file, index=False)
+        print(f"统计分析Excel文件已生成: {excel_file}")
+        
+        return excel_file

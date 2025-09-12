@@ -104,6 +104,12 @@ def parse_arguments():
                                 help='输出格式 (默认: json,xlsx)')
     analysis_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
     
+    # all2all 命令 - 分析All-to-All通信性能
+    all2all_parser = subparsers.add_parser('all2all', help='分析All-to-All通信性能')
+    all2all_parser.add_argument('pod_dir', help='Pod文件夹路径，包含executor_trainer-runner_*_*_*格式的文件夹')
+    all2all_parser.add_argument('--attempt-idx', type=int, default=0, help='要分析的attempt索引 (默认: 0)')
+    all2all_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
+    
     # compare 命令 - 分析多个文件并对比
     compare_parser = subparsers.add_parser('compare', help='分析多个 JSON 文件并对比')
     compare_parser.add_argument('files', nargs='+', 
@@ -139,6 +145,8 @@ def parse_arguments():
                                choices=['json', 'xlsx', 'json,xlsx'],
                                help='输出格式 (默认: json,xlsx)')
     compare_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
+    compare_parser.add_argument('--max-workers', type=int, default=None,
+                               help='并行处理的最大工作进程数，默认为CPU核心数')
     
     return parser.parse_args()
 
@@ -256,6 +264,58 @@ def run_analysis(args):
         return 1
 
 
+def run_all2all_analysis(args):
+    """运行All-to-All通信性能分析"""
+    print(f"=== All-to-All通信性能分析 ===")
+    print(f"Pod目录: {args.pod_dir}")
+    print(f"Attempt索引: {args.attempt_idx}")
+    print(f"输出目录: {args.output_dir}")
+    print()
+    
+    # 验证pod目录
+    pod_path = Path(args.pod_dir)
+    if not pod_path.exists():
+        print(f"错误: Pod目录不存在: {args.pod_dir}")
+        return 1
+    
+    if not pod_path.is_dir():
+        print(f"错误: 路径不是目录: {args.pod_dir}")
+        return 1
+    
+    # 创建输出目录
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 创建分析器
+    analyzer = Analyzer()
+    
+    try:
+        start_time = time.time()
+        
+        # 运行all2all分析
+        generated_files = analyzer.analyze_all2all_performance(
+            pod_dir=str(pod_path),
+            attempt_idx=args.attempt_idx,
+            output_dir=str(output_dir)
+        )
+        
+        total_time = time.time() - start_time
+        print(f"\n分析完成，总耗时: {total_time:.2f} 秒")
+        
+        # 显示生成的文件
+        print("\n生成的文件:")
+        for file_path in generated_files:
+            print(f"  {file_path}")
+        
+        return 0
+        
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
 def run_compare_analysis(args):
     """运行多文件对比分析"""
     print(f"=== 多文件对比分析 ===")
@@ -345,7 +405,8 @@ def run_compare_analysis(args):
             output_dir=str(output_dir),
             compare_dtype=args.compare_dtype,
             compare_shape=args.compare_shape,
-            print_markdown=args.print_markdown
+            print_markdown=args.print_markdown,
+            max_workers=args.max_workers
         )
         
         total_time = time.time() - start_time
@@ -370,7 +431,7 @@ def main():
     args = parse_arguments()
     
     if not args.command:
-        print("错误: 请指定命令 (analysis, compare)")
+        print("错误: 请指定命令 (analysis, compare, all2all)")
         print("使用 --help 查看帮助信息")
         return 1
     
@@ -378,6 +439,8 @@ def main():
         return run_analysis(args)
     elif args.command == 'compare':
         return run_compare_analysis(args)
+    elif args.command == 'all2all':
+        return run_all2all_analysis(args)
     else:
         print(f"错误: 未知命令: {args.command}")
         return 1
