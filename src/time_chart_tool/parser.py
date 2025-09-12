@@ -111,8 +111,17 @@ class PyTorchProfilerParser:
         Returns:
             ProfilerData: 解析后的数据对象
         """
-        # 提取元数据
-        metadata = data.get('metadata', {})
+        # 提取元数据（从根级别提取相关属性）
+        metadata = {
+            'schemaVersion': data.get('schemaVersion'),
+            'with_modules': data.get('with_modules'),
+            'distributedInfo': data.get('distributedInfo'),
+            'record_shapes': data.get('record_shapes'),
+            'with_stack': data.get('with_stack'),
+            'traceName': data.get('traceName'),
+            'displayTimeUnit': data.get('displayTimeUnit'),
+            'baseTimeNanoseconds': data.get('baseTimeNanoseconds')
+        }
         
         # 提取 traceEvents
         trace_events = data.get('traceEvents', [])

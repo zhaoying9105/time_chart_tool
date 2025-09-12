@@ -89,8 +89,9 @@ class Analyzer:
     def stage1_data_postprocessing(self, data: ProfilerData) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
         """
         Stage 1: 数据后处理
-        根据 cpu_op event & kernel event 的external id 分类，形成两个map
-        然后对一个 external id 下的 cpu_event 进行call stack 合并，保留call stack 最长的哪个 event
+        1. 标准化时间戳：找到最小ts值，将所有事件的ts减去这个值
+        2. 根据 cpu_op event & kernel event 的external id 分类，形成两个map
+        3. 然后对一个 external id 下的 cpu_event 进行call stack 合并，保留call stack 最长的哪个 event
         
         Args:
             data: ProfilerData 对象
@@ -101,7 +102,21 @@ class Analyzer:
         """
         print("=== Stage 1: 数据后处理 ===")
         
-        # 1. 根据 external id 分类
+        # 1. 标准化时间戳：找到最小ts值，将所有事件的ts减去这个值
+        if data.events:
+            min_ts = min(event.ts for event in data.events if event.ts is not None)
+            print(f"找到最小时间戳: {min_ts} ms，开始标准化...")
+            
+            # 直接修改所有事件的ts值
+            for event in data.events:
+                if event.ts is not None:
+                    event.ts = event.ts - min_ts
+            
+            print(f"时间戳标准化完成，基准时间: {min_ts} ms")
+        else:
+            print("警告: 没有事件，跳过时间戳标准化")
+        
+        # 2. 根据 external id 分类
         cpu_events_by_external_id = defaultdict(list)
         kernel_events_by_external_id = defaultdict(list)
         
@@ -1370,13 +1385,15 @@ class Analyzer:
     
     # ==================== All-to-All 通信性能分析 ====================
     
-    def analyze_all2all_performance(self, pod_dir: str, attempt_idx: int = 0, output_dir: str = ".") -> List[Path]:
+    def analyze_all2all_performance(self, pod_dir: str, attempt_idx: int = 0, step: Optional[int] = None, all2all_idx: Optional[int] = None, output_dir: str = ".") -> List[Path]:
         """
         分析All-to-All通信性能
         
         Args:
             pod_dir: Pod文件夹路径
             attempt_idx: 要分析的attempt索引
+            step: 指定要分析的step，如果为None则分析所有step
+            all2all_idx: 指定要分析的all2all索引，如果为None则分析所有all2all操作
             output_dir: 输出目录
             
         Returns:
@@ -1385,6 +1402,8 @@ class Analyzer:
         print(f"=== 开始All-to-All通信性能分析 ===")
         print(f"Pod目录: {pod_dir}")
         print(f"Attempt索引: {attempt_idx}")
+        print(f"Step: {step if step is not None else '所有step'}")
+        print(f"All2All索引: {all2all_idx if all2all_idx is not None else '所有all2all操作'}")
         
         # 1. 扫描pod目录，找到所有相同attempt_idx的文件夹
         executor_folders = self._scan_executor_folders(pod_dir, attempt_idx)
@@ -1402,13 +1421,23 @@ class Analyzer:
         
         print(f"成功提取all2all数据，共 {len(all2all_data)} 个step")
         
-        # 3. 生成原始数据Excel文件
-        raw_data_file = self._generate_raw_data_excel(all2all_data, output_dir)
+        generated_files = []
         
-        # 4. 生成统计分析Excel文件
-        stats_file = self._generate_statistics_excel(all2all_data, output_dir)
+        # 3. 如果指定了step和all2all_idx，进行深度分析
+        if step is not None and all2all_idx is not None:
+            print(f"进行深度分析: step={step}, all2all_idx={all2all_idx}")
+            deep_analysis_file = self._perform_deep_analysis(all2all_data, executor_folders, step, all2all_idx, output_dir)
+            if deep_analysis_file:
+                generated_files.append(deep_analysis_file)
+        else:
+            # 4. 生成原始数据Excel文件
+            raw_data_file = self._generate_raw_data_excel(all2all_data, output_dir)
+            generated_files.append(raw_data_file)
+            
+            # 5. 生成统计分析Excel文件
+            stats_file = self._generate_statistics_excel(all2all_data, output_dir)
+            generated_files.append(stats_file)
         
-        generated_files = [raw_data_file, stats_file]
         print("=== All-to-All通信性能分析完成 ===")
         
         return generated_files
@@ -1670,5 +1699,607 @@ class Analyzer:
         excel_file = output_path / "all2all_statistics.xlsx"
         df.to_excel(excel_file, index=False)
         print(f"统计分析Excel文件已生成: {excel_file}")
+        
+        return excel_file
+    
+    def _perform_deep_analysis(self, all2all_data: Dict[int, Dict[int, List[float]]], executor_folders: List[str], 
+                              step: int, all2all_idx: int, output_dir: str) -> Optional[Path]:
+        """
+        执行深度分析，比较快卡和慢卡的详细差异
+        
+        Args:
+            all2all_data: {step: {card_idx: [duration1, duration2, ...]}}
+            executor_folders: executor文件夹路径列表
+            step: 要分析的step
+            all2all_idx: 要分析的all2all索引
+            output_dir: 输出目录
+            
+        Returns:
+            Optional[Path]: 生成的深度分析文件路径
+        """
+        print(f"=== 开始深度分析 ===")
+        print(f"分析step={step}, all2all_idx={all2all_idx}")
+        
+        # 1. 找到指定step和all2all_idx的duration数据
+        if step not in all2all_data:
+            print(f"错误: 没有找到step={step}的数据")
+            return None
+        
+        step_data = all2all_data[step]
+        card_durations = {}
+        
+        for card_idx, durations in step_data.items():
+            if all2all_idx < len(durations):
+                card_durations[card_idx] = durations[all2all_idx]
+        
+        if len(card_durations) < 2:
+            print(f"错误: step={step}, all2all_idx={all2all_idx}只有{len(card_durations)}个card的数据，无法比较")
+            return None
+        
+        # 2. 找到差别最大的两个card
+        sorted_cards = sorted(card_durations.items(), key=lambda x: x[1])
+        fastest_card = sorted_cards[0]  # (card_idx, duration)
+        slowest_card = sorted_cards[-1]  # (card_idx, duration)
+        
+        print(f"最快card: {fastest_card[0]}, duration: {fastest_card[1]:.2f}")
+        print(f"最慢card: {slowest_card[0]}, duration: {slowest_card[1]:.2f}")
+        print(f"性能差异: {slowest_card[1] / fastest_card[1]:.2f}倍")
+        
+        # 3. 找到对应的JSON文件
+        fastest_json_file = self._find_json_file(executor_folders, step, fastest_card[0])
+        slowest_json_file = self._find_json_file(executor_folders, step, slowest_card[0])
+        
+        if not fastest_json_file or not slowest_json_file:
+            print("错误: 无法找到对应的JSON文件")
+            return None
+        
+        print(f"最快card JSON文件: {fastest_json_file}")
+        print(f"最慢card JSON文件: {slowest_json_file}")
+        
+        # 4. 加载并解析JSON文件
+        fastest_data = self.parser.load_json_file(fastest_json_file)
+        slowest_data = self.parser.load_json_file(slowest_json_file)
+        
+        # 5. 进行深度对比分析
+        comparison_result = self._compare_card_performance(
+            fastest_data, slowest_data, fastest_card[0], slowest_card[0], 
+            step, all2all_idx, fastest_card[1], slowest_card[1]
+        )
+        
+        if not comparison_result:
+            print("错误: 深度对比分析失败")
+            return None
+        
+        # 6. 生成深度分析Excel文件
+        excel_file = self._generate_deep_analysis_excel(comparison_result, step, all2all_idx, output_dir)
+        
+        print("=== 深度分析完成 ===")
+        return excel_file
+    
+    def _find_json_file(self, executor_folders: List[str], step: int, card_idx: int) -> Optional[str]:
+        """
+        根据step和card_idx找到对应的JSON文件
+        
+        Args:
+            executor_folders: executor文件夹路径列表
+            step: step值
+            card_idx: card索引
+            
+        Returns:
+            Optional[str]: JSON文件路径
+        """
+        for executor_folder in executor_folders:
+            json_files = list(Path(executor_folder).glob("*.json"))
+            for json_file in json_files:
+                parsed_step, parsed_card_idx = self._parse_json_filename(json_file.name)
+                if parsed_step == step and parsed_card_idx == card_idx:
+                    return str(json_file)
+        return None
+    
+    def _compare_card_performance(self, fastest_data: 'ProfilerData', slowest_data: 'ProfilerData',
+                                 fastest_card_idx: int, slowest_card_idx: int,
+                                 step: int, all2all_idx: int, fastest_duration: float, slowest_duration: float) -> Optional[Dict]:
+        """
+        比较快卡和慢卡的性能差异
+        
+        Args:
+            fastest_data: 最快card的ProfilerData
+            slowest_data: 最慢card的ProfilerData
+            fastest_card_idx: 最快card的索引
+            slowest_card_idx: 最慢card的索引
+            step: step值
+            all2all_idx: all2all索引
+            fastest_duration: 最快card的all2all duration
+            slowest_duration: 最慢card的all2all duration
+            
+        Returns:
+            Optional[Dict]: 对比分析结果
+        """
+        print("开始比较快卡和慢卡的性能差异...")
+        
+        # 1. 对两个数据进行Stage1处理
+        fastest_cpu_events_by_external_id, fastest_kernel_events_by_external_id = self.stage1_data_postprocessing(fastest_data)
+        slowest_cpu_events_by_external_id, slowest_kernel_events_by_external_id = self.stage1_data_postprocessing(slowest_data)
+        
+        # 2. 找到目标all2all操作的时间范围
+        fastest_all2all_events = self._find_all2all_events(fastest_data, all2all_idx)
+        slowest_all2all_events = self._find_all2all_events(slowest_data, all2all_idx)
+        
+        if not fastest_all2all_events or not slowest_all2all_events:
+            print("错误: 无法找到目标all2all操作")
+            return None
+        
+        # 3. 找到上一次all2all操作的时间范围（如果all2all_idx > 0）
+        fastest_prev_all2all_events = None
+        slowest_prev_all2all_events = None
+        
+        if all2all_idx > 0:
+            fastest_prev_all2all_events = self._find_all2all_events(fastest_data, all2all_idx - 1)
+            slowest_prev_all2all_events = self._find_all2all_events(slowest_data, all2all_idx - 1)
+        
+        # 4. 确定分析的时间范围
+        fastest_start_time = self._get_analysis_start_time(fastest_data, fastest_prev_all2all_events, fastest_all2all_events)
+        slowest_start_time = self._get_analysis_start_time(slowest_data, slowest_prev_all2all_events, slowest_all2all_events)
+        
+        fastest_end_time = self._get_analysis_end_time(fastest_data, fastest_all2all_events)
+        slowest_end_time = self._get_analysis_end_time(slowest_data, slowest_all2all_events)
+        
+        print(f"最快card分析时间范围: {fastest_start_time:.2f} - {fastest_end_time:.2f}")
+        print(f"最慢card分析时间范围: {slowest_start_time:.2f} - {slowest_end_time:.2f}")
+        
+        # 5. 时间戳已经在stage1_data_postprocessing中标准化，无需额外处理
+        
+        # 6. 提取时间范围内的events并与filtered events取交集
+        fastest_cpu_events_by_external_id, fastest_kernel_events_by_external_id = self._extract_events_in_range_with_intersection(
+            fastest_data, fastest_start_time, fastest_end_time, 
+            fastest_cpu_events_by_external_id, fastest_kernel_events_by_external_id
+        )
+        slowest_cpu_events_by_external_id, slowest_kernel_events_by_external_id = self._extract_events_in_range_with_intersection(
+            slowest_data, slowest_start_time, slowest_end_time,
+            slowest_cpu_events_by_external_id, slowest_kernel_events_by_external_id
+        )
+        
+        # 7. 合并CPU和kernel events
+        fastest_events_by_external_id = self._merge_cpu_and_kernel_events(fastest_cpu_events_by_external_id, fastest_kernel_events_by_external_id)
+        slowest_events_by_external_id = self._merge_cpu_and_kernel_events(slowest_cpu_events_by_external_id, slowest_kernel_events_by_external_id)
+        
+        # 8. 按时间顺序比较CPU操作
+        comparison_rows = self._compare_events_by_time_sequence(
+            fastest_events_by_external_id, slowest_events_by_external_id,
+            fastest_card_idx, slowest_card_idx, fastest_duration, slowest_duration
+        )
+        
+        return {
+            'step': step,
+            'all2all_idx': all2all_idx,
+            'fastest_card_idx': fastest_card_idx,
+            'slowest_card_idx': slowest_card_idx,
+            'fastest_duration': fastest_duration,
+            'slowest_duration': slowest_duration,
+            'duration_ratio': slowest_duration / fastest_duration,
+            'comparison_rows': comparison_rows
+        }
+    
+    def _find_all2all_events(self, data: 'ProfilerData', all2all_idx: int) -> List['ActivityEvent']:
+        """
+        找到指定all2all_idx的all2all操作events
+        
+        Args:
+            data: ProfilerData对象
+            all2all_idx: all2all索引
+            
+        Returns:
+            List[ActivityEvent]: all2all events列表
+        """
+        all2all_events = []
+        all2all_count = 0
+        
+        for event in data.events:
+            if (event.cat == 'kernel' and 
+                'TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL_BF16_ADD' in event.name):
+                if all2all_count == all2all_idx:
+                    all2all_events.append(event)
+                all2all_count += 1
+        
+        return all2all_events
+    
+    
+    def _get_analysis_start_time(self, data: 'ProfilerData', prev_all2all_events: Optional[List['ActivityEvent']], 
+                                current_all2all_events: List['ActivityEvent']) -> float:
+        """
+        获取分析开始时间
+        
+        Args:
+            data: ProfilerData对象
+            prev_all2all_events: 上一次all2all events
+            current_all2all_events: 当前all2all events
+            
+        Returns:
+            float: 分析开始时间
+        """
+        if prev_all2all_events:
+            # 使用上一次all2all kernel的结束时间
+            return max(event.ts + event.dur for event in prev_all2all_events if event.dur is not None)
+        else:
+            return 0.0
+    
+    def _get_analysis_end_time(self, data: 'ProfilerData', all2all_events: List['ActivityEvent']) -> float:
+        """
+        获取分析结束时间
+        
+        Args:
+            data: ProfilerData对象
+            all2all_events: all2all events
+            
+        Returns:
+            float: 分析结束时间
+        """
+        if all2all_events:
+            return max(event.ts + event.dur for event in all2all_events if event.dur is not None)
+        else:
+            return float('inf')
+    
+    def _extract_events_in_range_with_intersection(self, data: 'ProfilerData', start_time: float, end_time: float,
+                                                 filtered_cpu_events_by_external_id: Dict[Union[int, str], List['ActivityEvent']],
+                                                 filtered_kernel_events_by_external_id: Dict[Union[int, str], List['ActivityEvent']]) -> Tuple[Dict[Union[int, str], List['ActivityEvent']], Dict[Union[int, str], List['ActivityEvent']]]:
+        """
+        提取时间范围内的events并与filtered events取交集
+        
+        Args:
+            data: ProfilerData对象
+            start_time: 开始时间
+            end_time: 结束时间
+            filtered_cpu_events_by_external_id: 过滤后的CPU events分组
+            filtered_kernel_events_by_external_id: 过滤后的kernel events分组
+            
+        Returns:
+            Tuple[Dict[external_id, List[ActivityEvent]], Dict[external_id, List[ActivityEvent]]]: 
+                (CPU events分组, kernel events分组)
+        """
+        # 提取时间范围内的所有events
+        time_range_events = []
+        for event in data.events:
+            if event.ts >= start_time and event.ts <= end_time:
+                time_range_events.append(event)
+        
+        # 按external_id分组时间范围内的events
+        time_range_events_by_external_id = self._group_events_by_external_id(time_range_events)
+        
+        # 取交集：只保留在filtered events中存在的external_id
+        intersected_cpu_events = {}
+        intersected_kernel_events = {}
+        
+        for external_id, events in time_range_events_by_external_id.items():
+            # 检查该external_id是否在filtered events中存在
+            has_cpu_events = external_id in filtered_cpu_events_by_external_id
+            has_kernel_events = external_id in filtered_kernel_events_by_external_id
+            
+            if has_cpu_events or has_kernel_events:
+                # 分离CPU和kernel events
+                cpu_events = [e for e in events if e.cat == 'cpu_op']
+                kernel_events = [e for e in events if e.cat == 'kernel']
+                
+                if cpu_events and has_cpu_events:
+                    intersected_cpu_events[external_id] = cpu_events
+                
+                if kernel_events and has_kernel_events:
+                    intersected_kernel_events[external_id] = kernel_events
+        
+        print(f"时间范围内找到 {len(time_range_events_by_external_id)} 个external_id")
+        print(f"与filtered events取交集后保留 {len(intersected_cpu_events)} 个CPU external_id, {len(intersected_kernel_events)} 个kernel external_id")
+        
+        return intersected_cpu_events, intersected_kernel_events
+    
+    def _merge_cpu_and_kernel_events(self, cpu_events_by_external_id: Dict[Union[int, str], List['ActivityEvent']], 
+                                   kernel_events_by_external_id: Dict[Union[int, str], List['ActivityEvent']]) -> Dict[Union[int, str], List['ActivityEvent']]:
+        """
+        合并CPU和kernel events
+        
+        Args:
+            cpu_events_by_external_id: CPU events分组
+            kernel_events_by_external_id: kernel events分组
+            
+        Returns:
+            Dict[external_id, List[ActivityEvent]]: 合并后的events分组
+        """
+        merged_events = {}
+        
+        # 添加所有CPU events
+        for external_id, events in cpu_events_by_external_id.items():
+            merged_events[external_id] = events.copy()
+        
+        # 添加所有kernel events
+        for external_id, events in kernel_events_by_external_id.items():
+            if external_id in merged_events:
+                merged_events[external_id].extend(events)
+            else:
+                merged_events[external_id] = events.copy()
+        
+        return merged_events
+    
+    def _group_events_by_external_id(self, events: List['ActivityEvent']) -> Dict[Union[int, str], List['ActivityEvent']]:
+        """
+        按external_id分组events
+        
+        Args:
+            events: events列表
+            
+        Returns:
+            Dict[external_id, List[ActivityEvent]]: 按external_id分组的events
+        """
+        events_by_external_id = defaultdict(list)
+        for event in events:
+            if event.external_id is not None:
+                events_by_external_id[event.external_id].append(event)
+        return dict(events_by_external_id)
+    
+    def _compare_events_by_time_sequence(self, fastest_events_by_external_id: Dict[Union[int, str], List['ActivityEvent']],
+                                        slowest_events_by_external_id: Dict[Union[int, str], List['ActivityEvent']],
+                                        fastest_card_idx: int, slowest_card_idx: int,
+                                        fastest_duration: float, slowest_duration: float) -> List[Dict]:
+        """
+        按照时间顺序比较快卡和慢卡的events（不依赖external_id）
+        
+        Args:
+            fastest_events_by_external_id: 最快card的events分组
+            slowest_events_by_external_id: 最慢card的events分组
+            fastest_card_idx: 最快card索引
+            slowest_card_idx: 最慢card索引
+            fastest_duration: 最快card all2all duration
+            slowest_duration: 最慢card all2all duration
+            
+        Returns:
+            List[Dict]: 对比分析结果行
+        """
+        comparison_rows = []
+        
+        # 1. 提取所有CPU events并按时间排序
+        fastest_cpu_events = []
+        slowest_cpu_events = []
+        
+        for events in fastest_events_by_external_id.values():
+            fastest_cpu_events.extend([e for e in events if e.cat == 'cpu_op'])
+        for events in slowest_events_by_external_id.values():
+            slowest_cpu_events.extend([e for e in events if e.cat == 'cpu_op'])
+        
+        # 按开始时间排序（ts已经标准化，直接使用）
+        fastest_cpu_events.sort(key=lambda x: x.ts)
+        slowest_cpu_events.sort(key=lambda x: x.ts)
+        
+        print(f"最快card找到 {len(fastest_cpu_events)} 个CPU events")
+        print(f"最慢card找到 {len(slowest_cpu_events)} 个CPU events")
+        
+        # 2. 检查CPU操作是否一致（除了external_id）
+        cpu_ops_consistent = self._check_cpu_ops_consistency(fastest_cpu_events, slowest_cpu_events)
+        if not cpu_ops_consistent:
+            print("警告: 快卡和慢卡的CPU操作不完全一致，比较结果可能不准确")
+        else:
+            print("CPU操作一致性检查通过")
+        
+        # 3. 检查kernel操作是否一致
+        kernel_ops_consistent = self._check_kernel_ops_consistency(fastest_events_by_external_id, slowest_events_by_external_id)
+        if not kernel_ops_consistent:
+            print("警告: 快卡和慢卡的kernel操作不完全一致，比较结果可能不准确")
+        else:
+            print("Kernel操作一致性检查通过")
+        
+        # 4. 按照时间顺序进行配对比较
+        # 假设两个card的CPU操作顺序相同，按时间顺序配对
+        min_events_count = min(len(fastest_cpu_events), len(slowest_cpu_events))
+        
+        for i in range(min_events_count):
+            fastest_cpu_event = fastest_cpu_events[i]
+            slowest_cpu_event = slowest_cpu_events[i]
+            
+            # 4. 找到对应的kernel events
+            fastest_kernel_events = self._find_kernel_events_for_cpu_event(
+                fastest_cpu_event, fastest_events_by_external_id
+            )
+            slowest_kernel_events = self._find_kernel_events_for_cpu_event(
+                slowest_cpu_event, slowest_events_by_external_id
+            )
+            
+            # 5. 计算时间差异（ts已经标准化，直接使用）
+            cpu_start_time_diff = slowest_cpu_event.ts - fastest_cpu_event.ts
+            cpu_duration_diff = (slowest_cpu_event.dur or 0) - (fastest_cpu_event.dur or 0)
+            
+            # 6. 计算kernel时间差异
+            fastest_kernel_duration = sum(e.dur for e in fastest_kernel_events if e.dur is not None)
+            slowest_kernel_duration = sum(e.dur for e in slowest_kernel_events if e.dur is not None)
+            kernel_duration_diff = slowest_kernel_duration - fastest_kernel_duration
+            
+            # 7. 计算时间差异占all2all duration差异的比例
+            all2all_duration_diff = slowest_duration - fastest_duration
+            cpu_start_time_diff_ratio = cpu_start_time_diff / all2all_duration_diff if all2all_duration_diff > 0 else 0
+            kernel_duration_diff_ratio = kernel_duration_diff / all2all_duration_diff if all2all_duration_diff > 0 else 0
+            
+            # 8. 构建行数据
+            row = {
+                'event_sequence': i + 1,  # 事件序号
+                'cpu_op_name': fastest_cpu_event.name,
+                'cpu_op_shape': str(fastest_cpu_event.args.get('Input Dims', '') if fastest_cpu_event.args else ''),
+                'cpu_op_dtype': str(fastest_cpu_event.args.get('Input type', '') if fastest_cpu_event.args else ''),
+                'fastest_cpu_start_time': fastest_cpu_event.ts,  # 使用标准化的时间戳（毫秒）
+                'slowest_cpu_start_time': slowest_cpu_event.ts,  # 使用标准化的时间戳（毫秒）
+                'cpu_start_time_diff': cpu_start_time_diff,
+                'cpu_start_time_diff_ratio': cpu_start_time_diff_ratio,
+                'fastest_cpu_duration': fastest_cpu_event.dur or 0,
+                'slowest_cpu_duration': slowest_cpu_event.dur or 0,
+                'cpu_duration_diff': cpu_duration_diff,
+                'fastest_kernel_duration': fastest_kernel_duration,
+                'slowest_kernel_duration': slowest_kernel_duration,
+                'kernel_duration_diff': kernel_duration_diff,
+                'kernel_duration_diff_ratio': kernel_duration_diff_ratio,
+                'fastest_card_idx': fastest_card_idx,
+                'slowest_card_idx': slowest_card_idx
+            }
+            
+            comparison_rows.append(row)
+        
+        print(f"成功比较了 {len(comparison_rows)} 个CPU events")
+        
+        return comparison_rows
+    
+    def _find_kernel_events_for_cpu_event(self, cpu_event: 'ActivityEvent', 
+                                        events_by_external_id: Dict[Union[int, str], List['ActivityEvent']]) -> List['ActivityEvent']:
+        """
+        为CPU event找到对应的kernel events
+        
+        Args:
+            cpu_event: CPU event
+            events_by_external_id: 按external_id分组的events
+            
+        Returns:
+            List[ActivityEvent]: 对应的kernel events
+        """
+        if cpu_event.external_id is None:
+            return []
+        
+        if cpu_event.external_id not in events_by_external_id:
+            return []
+        
+        events = events_by_external_id[cpu_event.external_id]
+        kernel_events = [e for e in events if e.cat == 'kernel']
+        
+        return kernel_events
+    
+    def _check_cpu_ops_consistency(self, fastest_cpu_events: List['ActivityEvent'], 
+                                 slowest_cpu_events: List['ActivityEvent']) -> bool:
+        """
+        检查快卡和慢卡的CPU操作是否一致（除了external_id）
+        
+        Args:
+            fastest_cpu_events: 最快card的CPU events列表
+            slowest_cpu_events: 最慢card的CPU events列表
+            
+        Returns:
+            bool: 是否一致
+        """
+        if len(fastest_cpu_events) != len(slowest_cpu_events):
+            print(f"CPU events数量不一致: 最快card {len(fastest_cpu_events)} 个, 最慢card {len(slowest_cpu_events)} 个")
+            return False
+        
+        # 检查每个位置的CPU操作是否一致
+        for i, (fastest_event, slowest_event) in enumerate(zip(fastest_cpu_events, slowest_cpu_events)):
+            # 比较操作名称
+            if fastest_event.name != slowest_event.name:
+                print(f"位置 {i}: CPU操作名称不一致 - 最快: {fastest_event.name}, 最慢: {slowest_event.name}")
+                return False
+            
+            # 比较操作参数（除了external_id）
+            fastest_args = fastest_event.args or {}
+            slowest_args = slowest_event.args or {}
+            
+            # 比较Input Dims
+            fastest_dims = fastest_args.get('Input Dims', [])
+            slowest_dims = slowest_args.get('Input Dims', [])
+            if fastest_dims != slowest_dims:
+                print(f"位置 {i}: Input Dims不一致 - 最快: {fastest_dims}, 最慢: {slowest_dims}")
+                return False
+            
+            # 比较Input type
+            fastest_type = fastest_args.get('Input type', [])
+            slowest_type = slowest_args.get('Input type', [])
+            if fastest_type != slowest_type:
+                print(f"位置 {i}: Input type不一致 - 最快: {fastest_type}, 最慢: {slowest_type}")
+                return False
+            
+            # 比较Input Strides
+            fastest_strides = fastest_args.get('Input Strides', [])
+            slowest_strides = slowest_args.get('Input Strides', [])
+            if fastest_strides != slowest_strides:
+                print(f"位置 {i}: Input Strides不一致 - 最快: {fastest_strides}, 最慢: {slowest_strides}")
+                return False
+        
+        print(f"CPU操作一致性检查通过: 共 {len(fastest_cpu_events)} 个操作")
+        return True
+    
+    def _check_kernel_ops_consistency(self, fastest_events_by_external_id: Dict[Union[int, str], List['ActivityEvent']],
+                                    slowest_events_by_external_id: Dict[Union[int, str], List['ActivityEvent']]) -> bool:
+        """
+        检查快卡和慢卡的kernel操作是否一致（除了external_id）
+        
+        Args:
+            fastest_events_by_external_id: 最快card的events分组
+            slowest_events_by_external_id: 最慢card的events分组
+            
+        Returns:
+            bool: 是否一致
+        """
+        # 提取所有kernel events
+        fastest_kernel_events = []
+        slowest_kernel_events = []
+        
+        for events in fastest_events_by_external_id.values():
+            fastest_kernel_events.extend([e for e in events if e.cat == 'kernel'])
+        for events in slowest_events_by_external_id.values():
+            slowest_kernel_events.extend([e for e in events if e.cat == 'kernel'])
+        
+        # 按开始时间排序（ts已经标准化，直接使用）
+        fastest_kernel_events.sort(key=lambda x: x.ts)
+        slowest_kernel_events.sort(key=lambda x: x.ts)
+        
+        if len(fastest_kernel_events) != len(slowest_kernel_events):
+            print(f"Kernel events数量不一致: 最快card {len(fastest_kernel_events)} 个, 最慢card {len(slowest_kernel_events)} 个")
+            return False
+        
+        # 检查每个位置的kernel操作是否一致
+        for i, (fastest_event, slowest_event) in enumerate(zip(fastest_kernel_events, slowest_kernel_events)):
+            # 比较kernel名称
+            if fastest_event.name != slowest_event.name:
+                print(f"位置 {i}: Kernel名称不一致 - 最快: {fastest_event.name}, 最慢: {slowest_event.name}")
+                return False
+        
+        print(f"Kernel操作一致性检查通过: 共 {len(fastest_kernel_events)} 个操作")
+        return True
+    
+    def _generate_deep_analysis_excel(self, comparison_result: Dict, step: int, all2all_idx: int, output_dir: str) -> Path:
+        """
+        生成深度分析Excel文件
+        
+        Args:
+            comparison_result: 对比分析结果
+            step: step值
+            all2all_idx: all2all索引
+            output_dir: 输出目录
+            
+        Returns:
+            Path: 生成的Excel文件路径
+        """
+        print("生成深度分析Excel文件...")
+        
+        # 创建DataFrame
+        df = pd.DataFrame(comparison_result['comparison_rows'])
+        
+        # 添加汇总信息
+        summary_data = {
+            'step': step,
+            'all2all_idx': all2all_idx,
+            'fastest_card_idx': comparison_result['fastest_card_idx'],
+            'slowest_card_idx': comparison_result['slowest_card_idx'],
+            'fastest_duration': comparison_result['fastest_duration'],
+            'slowest_duration': comparison_result['slowest_duration'],
+            'duration_ratio': comparison_result['duration_ratio'],
+            'total_cpu_start_time_diff': df['cpu_start_time_diff'].sum(),
+            'total_kernel_duration_diff': df['kernel_duration_diff'].sum(),
+            'total_cpu_start_time_diff_ratio': df['cpu_start_time_diff_ratio'].sum(),
+            'total_kernel_duration_diff_ratio': df['kernel_duration_diff_ratio'].sum()
+        }
+        
+        # 保存到Excel文件
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        excel_file = output_path / f"all2all_deep_analysis_step_{step}_idx_{all2all_idx}.xlsx"
+        
+        with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
+            # 写入详细对比数据
+            df.to_excel(writer, sheet_name='详细对比', index=False)
+            
+            # 写入汇总信息
+            summary_df = pd.DataFrame([summary_data])
+            summary_df.to_excel(writer, sheet_name='汇总信息', index=False)
+        
+        print(f"深度分析Excel文件已生成: {excel_file}")
         
         return excel_file

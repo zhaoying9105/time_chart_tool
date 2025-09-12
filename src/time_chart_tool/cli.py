@@ -108,6 +108,8 @@ def parse_arguments():
     all2all_parser = subparsers.add_parser('all2all', help='分析All-to-All通信性能')
     all2all_parser.add_argument('pod_dir', help='Pod文件夹路径，包含executor_trainer-runner_*_*_*格式的文件夹')
     all2all_parser.add_argument('--attempt-idx', type=int, default=0, help='要分析的attempt索引 (默认: 0)')
+    all2all_parser.add_argument('--step', type=int, help='指定要分析的step，如果不指定则分析所有step')
+    all2all_parser.add_argument('--all2all-idx', type=int, help='指定要分析的all2all索引，如果不指定则分析所有all2all操作')
     all2all_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
     
     # compare 命令 - 分析多个文件并对比
@@ -269,6 +271,8 @@ def run_all2all_analysis(args):
     print(f"=== All-to-All通信性能分析 ===")
     print(f"Pod目录: {args.pod_dir}")
     print(f"Attempt索引: {args.attempt_idx}")
+    print(f"Step: {args.step if args.step is not None else '所有step'}")
+    print(f"All2All索引: {args.all2all_idx if args.all2all_idx is not None else '所有all2all操作'}")
     print(f"输出目录: {args.output_dir}")
     print()
     
@@ -296,6 +300,8 @@ def run_all2all_analysis(args):
         generated_files = analyzer.analyze_all2all_performance(
             pod_dir=str(pod_path),
             attempt_idx=args.attempt_idx,
+            step=args.step,
+            all2all_idx=args.all2all_idx,
             output_dir=str(output_dir)
         )
         
