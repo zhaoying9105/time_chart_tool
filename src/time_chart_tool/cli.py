@@ -64,6 +64,12 @@ def parse_arguments():
   # 目录模式：自动查找目录下所有json文件
   time-chart-tool compare step1_results/:baseline step2_results/:optimized --aggregation on_op_name --output-format json,xlsx
   
+  # 控制每个标签的文件数量，确保比较公平性
+  time-chart-tool compare "dir1/*.json":baseline "dir2/*.json":optimized --max-files-per-label 10 --random-seed 42 --aggregation on_op_name
+  
+  # 混合模式：单文件 vs 多文件（限制数量）
+  time-chart-tool compare single_file.json:reference "multi_files/*.json":test --max-files-per-label 5 --aggregation on_op_name
+  
   # 只输出 JSON 格式
   time-chart-tool analysis file.json --aggregation on_call_stack --output-format json
   time-chart-tool compare file1.json:fp32 file2.json:tf32 --aggregation on_op_name --output-format json
@@ -125,7 +131,11 @@ def parse_arguments():
                                help='是否添加 dtype 比较列 (默认: False)')
     compare_parser.add_argument('--compare-shape', action='store_true',
                                help='是否添加 shape 比较列 (默认: False)')
-    compare_parser.add_argument('--output-format', default='json,xlsx',
+    compare_parser.add_argument('--max-files-per-label', type=int, default=None,
+                               help='每个标签最多使用的文件数量，用于随机采样确保比较公平性 (默认: 不限制)')
+    compare_parser.add_argument('--random-seed', type=int, default=42,
+                               help='随机采样的种子，确保结果可重现 (默认: 42)')
+    compare_parser.add_argument('--output-format', default='json,xlsx', 
                                choices=['json', 'xlsx', 'json,xlsx'],
                                help='输出格式 (默认: json,xlsx)')
     compare_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
@@ -256,6 +266,8 @@ def run_compare_analysis(args):
     print(f"展示kernel持续时间: {args.show_kernel_duration}")
     print(f"打印markdown表格: {args.print_markdown}")
     print(f"特殊matmul: {args.special_matmul}")
+    print(f"每个标签最大文件数: {args.max_files_per_label if args.max_files_per_label else '不限制'}")
+    print(f"随机种子: {args.random_seed}")
     print(f"输出格式: {args.output_format}")
     print(f"输出目录: {args.output_dir}")
     print()
@@ -278,17 +290,26 @@ def run_compare_analysis(args):
                 print(f"错误: 标签 {label} 没有有效的文件")
                 return 1
                 
-            file_labels.append((valid_files, label))
+            # 随机采样文件（如果需要）
+            if args.max_files_per_label and len(valid_files) > args.max_files_per_label:
+                import random
+                random.seed(args.random_seed)
+                sampled_files = random.sample(valid_files, args.max_files_per_label)
+                print(f"  {label}: 从 {len(valid_files)} 个文件中随机采样 {len(sampled_files)} 个文件")
+                file_labels.append((sampled_files, label))
+            else:
+                file_labels.append((valid_files, label))
             
             # 显示文件信息
-            if len(valid_files) == 1:
-                print(f"  {label}: {valid_files[0]}")
+            final_files = file_labels[-1][0]  # 获取最终使用的文件列表
+            if len(final_files) == 1:
+                print(f"  {label}: {final_files[0]}")
             else:
-                print(f"  {label}: {len(valid_files)} 个文件")
-                for i, file_path in enumerate(valid_files[:3]):  # 只显示前3个
+                print(f"  {label}: {len(final_files)} 个文件")
+                for i, file_path in enumerate(final_files[:3]):  # 只显示前3个
                     print(f"    {i+1}. {file_path}")
-                if len(valid_files) > 3:
-                    print(f"    ... 还有 {len(valid_files) - 3} 个文件")
+                if len(final_files) > 3:
+                    print(f"    ... 还有 {len(final_files) - 3} 个文件")
                     
         except ValueError as e:
             print(f"错误: {e}")
