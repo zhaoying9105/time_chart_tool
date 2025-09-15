@@ -40,6 +40,12 @@ def parse_arguments():
   # 分析单个文件 (基于调用栈，输出包含所有信息)
   time-chart-tool analysis file.json --label "baseline" --aggregation on_call_stack --show-dtype --show-shape --show-kernel-names --show-kernel-duration --output-format json,xlsx
   
+  # 分析单个文件 (按CPU操作启动时间排序)
+  time-chart-tool analysis file.json --label "baseline" --aggregation on_op_timestamp --show-kernel-duration --output-format json,xlsx
+  
+  # 分析单个文件 (显示CPU操作启动时间戳)
+  time-chart-tool analysis file.json --label "baseline" --aggregation on_op_name --show-timestamp --output-format json,xlsx
+  
   # 基于CPU操作对比多个文件 (默认方法，输出不包含kernel信息)
   time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_op_name --output-format json,xlsx
   
@@ -51,6 +57,12 @@ def parse_arguments():
   
   # 基于调用栈对比多个文件 (输出包含所有信息)
   time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_call_stack --show-dtype --show-shape --show-kernel-names --show-kernel-duration --output-format json,xlsx
+  
+  # 按CPU操作启动时间排序对比多个文件
+  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_op_timestamp --show-kernel-duration --output-format json,xlsx
+  
+  # 对比多个文件 (显示CPU操作启动时间戳)
+  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_op_name --show-timestamp --output-format json,xlsx
   
   # 对比多个文件并包含特殊的matmul分析
   time-chart-tool compare file1.json:fp32 file2.json:bf16 --aggregation on_op_name --special-matmul --output-format json,xlsx
@@ -77,6 +89,14 @@ def parse_arguments():
   # 只输出 XLSX 格式
   time-chart-tool analysis file.json --aggregation on_op_name --output-format xlsx
   time-chart-tool compare file1.json:baseline file2.json:optimized --aggregation on_call_stack --output-format xlsx
+  
+  # 按时间排序分析
+  time-chart-tool analysis file.json --aggregation on_op_timestamp --output-format json,xlsx
+  time-chart-tool compare file1.json:baseline file2.json:optimized --aggregation on_op_timestamp --output-format xlsx
+  
+  # 显示时间戳分析
+  time-chart-tool analysis file.json --aggregation on_op_name --show-timestamp --output-format json,xlsx
+  time-chart-tool compare file1.json:baseline file2.json:optimized --aggregation on_op_name --show-timestamp --output-format xlsx
         """
     )
     
@@ -86,9 +106,9 @@ def parse_arguments():
     analysis_parser = subparsers.add_parser('analysis', help='分析单个 JSON 文件')
     analysis_parser.add_argument('file', help='要分析的 JSON 文件路径')
     analysis_parser.add_argument('--label', default='single_file', help='文件标签 (默认: single_file)')
-    analysis_parser.add_argument('--aggregation', choices=['on_op_name', 'on_op_shape', 'on_call_stack'], 
+    analysis_parser.add_argument('--aggregation', choices=['on_op_name', 'on_op_shape', 'on_call_stack', 'on_op_timestamp'], 
                                 default='on_op_name',
-                                help='聚合方法: on_op_name (基于操作名) 或 on_op_shape (基于操作形状) 或 on_call_stack (基于调用栈) (默认: on_op_name)')
+                                help='聚合方法: on_op_name (基于操作名) 或 on_op_shape (基于操作形状) 或 on_call_stack (基于调用栈) 或 on_op_timestamp (按CPU操作启动时间排序) (默认: on_op_name)')
     analysis_parser.add_argument('--show-dtype', action='store_true', 
                                 help='在输出结果时是否展示 dtype 信息 (默认: False)')
     analysis_parser.add_argument('--show-shape', action='store_true', 
@@ -97,6 +117,8 @@ def parse_arguments():
                                 help='在输出结果时是否展示 kernel 名称信息 (默认: False)')
     analysis_parser.add_argument('--show-kernel-duration', action='store_true', 
                                 help='在输出结果时是否展示 kernel 持续时间信息 (默认: False)')
+    analysis_parser.add_argument('--show-timestamp', action='store_true', 
+                                help='在输出结果时是否展示 CPU 操作启动时间戳 (默认: False)')
     analysis_parser.add_argument('--print-markdown', action='store_true', 
                                 help='是否在stdout中以markdown格式打印表格 (默认: False)')
     analysis_parser.add_argument('--output-format', default='json,xlsx', 
@@ -107,7 +129,6 @@ def parse_arguments():
     # all2all 命令 - 分析All-to-All通信性能
     all2all_parser = subparsers.add_parser('all2all', help='分析All-to-All通信性能')
     all2all_parser.add_argument('pod_dir', help='Pod文件夹路径，包含executor_trainer-runner_*_*_*格式的文件夹')
-    all2all_parser.add_argument('--attempt-idx', type=int, default=0, help='要分析的attempt索引 (默认: 0)')
     all2all_parser.add_argument('--step', type=int, help='指定要分析的step，如果不指定则分析所有step')
     all2all_parser.add_argument('--all2all-idx', type=int, help='指定要分析的all2all索引，如果不指定则分析所有all2all操作')
     all2all_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
@@ -120,9 +141,9 @@ def parse_arguments():
                                     '  多文件: "file1.json,file2.json,file3.json":label\n'
                                     '  目录: dir/:label (自动查找所有*.json文件)\n'
                                     '  通配符: "dir/*.json":label')
-    compare_parser.add_argument('--aggregation', choices=['on_op_name', 'on_op_shape', 'on_call_stack'], 
+    compare_parser.add_argument('--aggregation', choices=['on_op_name', 'on_op_shape', 'on_call_stack', 'on_op_timestamp'], 
                                default='on_op_name',
-                               help='聚合方法: on_op_name (基于操作名) 或 on_op_shape (基于操作形状) 或 on_call_stack (基于调用栈) (默认: on_op_name)')
+                               help='聚合方法: on_op_name (基于操作名) 或 on_op_shape (基于操作形状) 或 on_call_stack (基于调用栈) 或 on_op_timestamp (按CPU操作启动时间排序) (默认: on_op_name)')
     compare_parser.add_argument('--show-dtype', action='store_true', 
                                help='在输出结果时是否展示 dtype 信息 (默认: False)')
     compare_parser.add_argument('--show-shape', action='store_true', 
@@ -131,6 +152,8 @@ def parse_arguments():
                                help='在输出结果时是否展示 kernel 名称信息 (默认: False)')
     compare_parser.add_argument('--show-kernel-duration', action='store_true', 
                                help='在输出结果时是否展示 kernel 持续时间信息 (默认: False)')
+    compare_parser.add_argument('--show-timestamp', action='store_true', 
+                               help='在输出结果时是否展示 CPU 操作启动时间戳 (默认: False)')
     compare_parser.add_argument('--print-markdown', action='store_true', 
                                help='是否在stdout中以markdown格式打印表格 (默认: False)')
     compare_parser.add_argument('--special-matmul', action='store_true',
@@ -218,6 +241,7 @@ def run_analysis(args):
     print(f"展示shape: {args.show_shape}")
     print(f"展示kernel名称: {args.show_kernel_names}")
     print(f"展示kernel持续时间: {args.show_kernel_duration}")
+    print(f"展示时间戳: {args.show_timestamp}")
     print(f"打印markdown表格: {args.print_markdown}")
     print(f"输出格式: {args.output_format}")
     print(f"输出目录: {args.output_dir}")
@@ -244,6 +268,7 @@ def run_analysis(args):
             show_shape=args.show_shape,
             show_kernel_names=args.show_kernel_names,
             show_kernel_duration=args.show_kernel_duration,
+            show_timestamp=args.show_timestamp,
             output_dir=str(output_dir),
             label=args.label,
             print_markdown=args.print_markdown
@@ -270,7 +295,6 @@ def run_all2all_analysis(args):
     """运行All-to-All通信性能分析"""
     print(f"=== All-to-All通信性能分析 ===")
     print(f"Pod目录: {args.pod_dir}")
-    print(f"Attempt索引: {args.attempt_idx}")
     print(f"Step: {args.step if args.step is not None else '所有step'}")
     print(f"All2All索引: {args.all2all_idx if args.all2all_idx is not None else '所有all2all操作'}")
     print(f"输出目录: {args.output_dir}")
@@ -299,7 +323,6 @@ def run_all2all_analysis(args):
         # 运行all2all分析
         generated_files = analyzer.analyze_all2all_performance(
             pod_dir=str(pod_path),
-            attempt_idx=args.attempt_idx,
             step=args.step,
             all2all_idx=args.all2all_idx,
             output_dir=str(output_dir)
@@ -407,6 +430,7 @@ def run_compare_analysis(args):
             show_shape=args.show_shape,
             show_kernel_names=args.show_kernel_names,
             show_kernel_duration=args.show_kernel_duration,
+            show_timestamp=args.show_timestamp,
             special_matmul=args.special_matmul,
             output_dir=str(output_dir),
             compare_dtype=args.compare_dtype,
