@@ -7,18 +7,44 @@ import gzip
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple, Union
 import logging
+from datetime import datetime
 
 from .models import ActivityEvent, ProfilerData
 
 logger = logging.getLogger(__name__)
 
 
-def _parse_event(event_data: Dict[str, Any]) -> Optional[ActivityEvent]:
+def _nanoseconds_to_readable_timestamp(nanoseconds: int) -> str:
+    """
+    将纳秒时间戳转换为可读的时间格式
+    
+    Args:
+        nanoseconds: 纳秒时间戳
+        
+    Returns:
+        str: 格式化的时间字符串 (YYYY-MM-DD HH:MM:SS.ffffff)
+    """
+    try:
+        # 将纳秒转换为秒（浮点数）
+        seconds = nanoseconds / 1_000_000_000.0
+        
+        # 创建datetime对象
+        dt = datetime.fromtimestamp(seconds)
+        
+        # 格式化为字符串，包含微秒
+        return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+    except Exception as e:
+        logger.warning(f"时间戳转换失败: {e}")
+        return f"Invalid timestamp: {nanoseconds}"
+
+
+def _parse_event(event_data: Dict[str, Any], base_time_nanoseconds: Optional[int] = None) -> Optional[ActivityEvent]:
     """
     解析单个事件
     
     Args:
         event_data: 事件数据字典
+        base_time_nanoseconds: 基准时间（纳秒），用于计算可读时间戳
         
     Returns:
         ActivityEvent: 解析后的事件对象，如果解析失败返回 None
@@ -38,6 +64,14 @@ def _parse_event(event_data: Dict[str, Any]) -> Optional[ActivityEvent]:
         event_id = event_data.get('id')
         stream_id = event_data.get('stream')
         
+        # 计算可读时间戳
+        readable_timestamp = None
+        if base_time_nanoseconds is not None and ts is not None:
+            # ts是微秒，base_time_nanoseconds是纳秒
+            # 将ts转换为纳秒，然后加上基准时间
+            total_nanoseconds = base_time_nanoseconds + int(ts * 1000)  # ts * 1000 将微秒转换为纳秒
+            readable_timestamp = _nanoseconds_to_readable_timestamp(total_nanoseconds)
+        
         # 创建事件对象
         event = ActivityEvent(
             name=name,
@@ -49,7 +83,8 @@ def _parse_event(event_data: Dict[str, Any]) -> Optional[ActivityEvent]:
             dur=dur,
             args=args,
             id=event_id,
-            stream_id=stream_id
+            stream_id=stream_id,
+            readable_timestamp=readable_timestamp
         )
         
         return event
@@ -127,7 +162,11 @@ class PyTorchProfilerParser:
         trace_events = data.get('traceEvents', [])
         
         # 串行解析事件
-        events = self._parse_events(trace_events)
+        base_time_nanoseconds = metadata.get('baseTimeNanoseconds')
+        events = self._parse_events(trace_events, base_time_nanoseconds)
+        
+        # 标准化时间戳
+        events = self._normalize_timestamps(events)
         
         return ProfilerData(
             metadata=metadata,
@@ -135,12 +174,13 @@ class PyTorchProfilerParser:
             trace_events=trace_events
         )
     
-    def _parse_events(self, trace_events: List[Dict[str, Any]]) -> List[ActivityEvent]:
+    def _parse_events(self, trace_events: List[Dict[str, Any]], base_time_nanoseconds: Optional[int] = None) -> List[ActivityEvent]:
         """
         串行解析事件列表
         
         Args:
             trace_events: 原始事件数据列表
+            base_time_nanoseconds: 基准时间（纳秒），用于计算可读时间戳
             
         Returns:
             List[ActivityEvent]: 解析后的事件列表
@@ -148,12 +188,42 @@ class PyTorchProfilerParser:
         events = []
         for event_data in trace_events:
             try:
-                event = _parse_event(event_data)
+                event = _parse_event(event_data, base_time_nanoseconds)
                 if event:
                     events.append(event)
             except Exception as e:
                 logger.warning(f"解析事件失败: {e}, 事件数据: {event_data}")
                 continue
+        return events
+    
+    def _normalize_timestamps(self, events: List[ActivityEvent]) -> List[ActivityEvent]:
+        """
+        标准化时间戳：找到最小ts值，将所有事件的ts减去这个值
+        
+        Args:
+            events: 事件列表
+            
+        Returns:
+            List[ActivityEvent]: 标准化时间戳后的事件列表
+        """
+        if not events:
+            return events
+        
+        # 找到最小时间戳
+        valid_ts = [event.ts for event in events if event.ts is not None]
+        if not valid_ts:
+            logger.warning("没有找到有效的时间戳，跳过标准化")
+            return events
+        
+        min_ts = min(valid_ts)
+        logger.info(f"找到最小时间戳: {min_ts:.2f} 微秒，开始标准化...")
+        
+        # 标准化所有事件的时间戳
+        for event in events:
+            if event.ts is not None:
+                event.ts = event.ts - min_ts
+        
+        logger.info("时间戳标准化完成")
         return events
     
     def print_metadata(self) -> None:

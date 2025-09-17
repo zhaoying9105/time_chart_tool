@@ -81,6 +81,14 @@ def _process_single_file_parallel(file_path: str, aggregation_type: str) -> Tupl
 class Analyzer:
     """重构后的分析器，按照4个stage组织"""
     
+    # 通信kernel黑名单：过滤机内通信，只关注全局通信
+    COMMUNICATION_BLACKLIST_PATTERNS = [
+        'TCDP_RING_ALLGATHER_',
+        'TCDP_RING_REDUCESCATTER_',
+        'ALLREDUCELL',
+        'TCDP_RING_ALLREDUCE_SIMPLE_BF16_ADD'
+    ]
+    
     def __init__(self):
         self.parser = PyTorchProfilerParser()
     
@@ -89,7 +97,7 @@ class Analyzer:
     def stage1_data_postprocessing(self, data: ProfilerData) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
         """
         Stage 1: 数据后处理
-        1. 标准化时间戳：找到最小ts值，将所有事件的ts减去这个值
+        1. 时间戳标准化已在parser中完成
         2. 根据 cpu_op event & kernel event 的external id 分类，形成两个map
         3. 然后对一个 external id 下的 cpu_event 进行call stack 合并，保留call stack 最长的哪个 event
         
@@ -101,20 +109,7 @@ class Analyzer:
                 两个映射字典，确保 external id 和 cpu_event 是一对一的关系
         """
         print("=== Stage 1: 数据后处理 ===")
-        
-        # 1. 标准化时间戳：找到最小ts值，将所有事件的ts减去这个值
-        if data.events:
-            min_ts = min(event.ts for event in data.events if event.ts is not None)
-            print(f"找到最小时间戳: {min_ts} ms，开始标准化...")
-            
-            # 直接修改所有事件的ts值
-            for event in data.events:
-                if event.ts is not None:
-                    event.ts = event.ts - min_ts
-            
-            print(f"时间戳标准化完成，基准时间: {min_ts} ms")
-        else:
-            print("警告: 没有事件，跳过时间戳标准化")
+        print("时间戳标准化已在parser中完成")
         
         # 2. 根据 external id 分类
         cpu_events_by_external_id = defaultdict(list)
@@ -253,14 +248,16 @@ class Analyzer:
     
     def _normalize_call_stack(self, call_stack: List[str]) -> List[str]:
         """
-        标准化 call stack，只保留包含 nn.Module 的有价值部分
+        标准化 call stack，优先保留包含 nn.Module 的有价值部分
         特殊处理：去掉 Runstep 模块及其之后的模块（面向 lg-torch 的特殊逻辑）
+        如果没有 nn.Module，则保留原始 call stack
         
         Args:
             call_stack: 原始 call stack
             
         Returns:
-            List[str]: 标准化后的 call stack，只包含模型相关的层级，去掉 'nn.Module: ' 前缀
+            List[str]: 标准化后的 call stack，优先包含模型相关的层级，去掉 'nn.Module: ' 前缀
+                      如果没有 nn.Module，则返回原始 call stack
         """
         if not call_stack:
             return call_stack
@@ -274,7 +271,8 @@ class Analyzer:
                 nn_modules.append(module_name)
         
         if not nn_modules:
-            return []
+            # 如果没有 nn.Module，保留原始 call stack
+            return call_stack
         
         # 找到包含 Runstep 的模块
         runstep_idx = -1
@@ -599,6 +597,7 @@ class Analyzer:
                            show_kernel_names: bool = True,
                            show_kernel_duration: bool = True,
                            show_timestamp: bool = False,
+                           show_readable_timestamp: bool = False,
                            special_matmul: bool = False,
                            aggregation_type: str = 'on_op_name',
                            compare_dtype: bool = False,
@@ -625,11 +624,11 @@ class Analyzer:
         print("=== Stage 4: 展示 ===")
         
         if comparison_result['type'] == 'single_file':
-            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, aggregation_type, label, print_markdown)
+            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, aggregation_type, label, print_markdown)
         elif comparison_result['type'] == 'multiple_files':
-            return self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, special_matmul, show_timestamp, aggregation_type, compare_dtype, compare_shape, file_labels, print_markdown)
+            return self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, special_matmul, show_timestamp, show_readable_timestamp, aggregation_type, compare_dtype, compare_shape, file_labels, print_markdown)
     
-    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, show_timestamp: bool = False, aggregation_type: str = 'on_op_name', label: str = None, print_markdown: bool = False) -> List[Path]:
+    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, show_timestamp: bool = False, show_readable_timestamp: bool = False, aggregation_type: str = 'on_op_name', label: str = None, print_markdown: bool = False) -> List[Path]:
         """展示单文件数据"""
         print("生成单文件展示结果...")
         
@@ -651,7 +650,10 @@ class Analyzer:
                 # 获取第一个CPU事件的启动时间戳
                 if aggregated_data.cpu_events:
                     first_cpu_event = aggregated_data.cpu_events[0]
-                    row['cpu_start_timestamp'] = first_cpu_event.ts if first_cpu_event.ts is not None else 0.0
+                    if show_readable_timestamp and first_cpu_event.readable_timestamp:
+                        row['cpu_start_timestamp'] = first_cpu_event.readable_timestamp
+                    else:
+                        row['cpu_start_timestamp'] = first_cpu_event.ts if first_cpu_event.ts is not None else 0.0
                 else:
                     row['cpu_start_timestamp'] = 0.0
             
@@ -751,7 +753,7 @@ class Analyzer:
         base_name = f"{label}_analysis" if label else "single_file_analysis"
         return self._generate_output_files(rows, output_dir, base_name)
     
-    def _present_multiple_files(self, data: Dict[str, Any], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, special_matmul: bool, show_timestamp: bool = False, aggregation_type: str = 'on_op_name', compare_dtype: bool = False, compare_shape: bool = False, file_labels: List[str] = None, print_markdown: bool = False) -> List[Path]:
+    def _present_multiple_files(self, data: Dict[str, Any], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, special_matmul: bool, show_timestamp: bool = False, show_readable_timestamp: bool = False, aggregation_type: str = 'on_op_name', compare_dtype: bool = False, compare_shape: bool = False, file_labels: List[str] = None, print_markdown: bool = False) -> List[Path]:
         """展示多文件数据"""
         print("生成多文件展示结果...")
         
@@ -780,7 +782,10 @@ class Analyzer:
                     cpu_events = file_data['cpu_events']
                     if cpu_events:
                         first_cpu_event = cpu_events[0]
-                        if first_cpu_event.ts is not None:
+                        if show_readable_timestamp and first_cpu_event.readable_timestamp:
+                            first_timestamp = first_cpu_event.readable_timestamp
+                            break
+                        elif first_cpu_event.ts is not None:
                             first_timestamp = first_cpu_event.ts
                             break
                 row['cpu_start_timestamp'] = first_timestamp if first_timestamp is not None else 0.0
@@ -1159,7 +1164,7 @@ class Analyzer:
     
     def analyze_single_file(self, file_path: str, aggregation_type: str = 'on_op_name', 
                            show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, 
-                           show_timestamp: bool = False, output_dir: str = ".", label: str = None, print_markdown: bool = False) -> List[Path]:
+                           show_timestamp: bool = False, show_readable_timestamp: bool = False, output_dir: str = ".", label: str = None, print_markdown: bool = False) -> List[Path]:
         """
         分析单个文件的完整流程
         
@@ -1171,6 +1176,7 @@ class Analyzer:
             show_kernel_names: 是否展示 kernel 名称信息
             show_kernel_duration: 是否展示 kernel 持续时间信息
             show_timestamp: 是否展示 CPU 操作启动时间戳
+            show_readable_timestamp: 是否展示可读时间戳
             output_dir: 输出目录
             label: 文件标签
             print_markdown: 是否打印markdown表格
@@ -1190,14 +1196,14 @@ class Analyzer:
         comparison_result = self.stage3_comparison(single_file_data=aggregated_data, aggregation_type=aggregation_type)
         
         # Stage 4: 展示
-        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, aggregation_type=aggregation_type, label=label, print_markdown=print_markdown)
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, aggregation_type=aggregation_type, label=label, print_markdown=print_markdown)
         
         print("=== 单文件分析完成 ===")
         return generated_files
     
     def analyze_multiple_files(self, file_labels: List[Tuple[List[str], str]], aggregation_type: str = 'on_op_name',
                               show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, 
-                              show_timestamp: bool = False, special_matmul: bool = False, output_dir: str = ".", compare_dtype: bool = False, compare_shape: bool = False, print_markdown: bool = False, 
+                              show_timestamp: bool = False, show_readable_timestamp: bool = False, special_matmul: bool = False, output_dir: str = ".", compare_dtype: bool = False, compare_shape: bool = False, print_markdown: bool = False, 
                               max_workers: Optional[int] = None) -> List[Path]:
         """
         分析多个文件的完整流程，支持同一label下多个文件的聚合，使用多进程并行读取JSON文件
@@ -1211,6 +1217,7 @@ class Analyzer:
             show_kernel_names: 是否展示 kernel 名称信息
             show_kernel_duration: 是否展示 kernel 持续时间信息
             show_timestamp: 是否展示 CPU 操作启动时间戳
+            show_readable_timestamp: 是否展示可读时间戳
             special_matmul: 是否进行特殊的 matmul 展示
             output_dir: 输出目录
             compare_dtype: 是否添加 dtype 比较列
@@ -1251,7 +1258,7 @@ class Analyzer:
         
         # Stage 4: 展示
         file_labels_list = [label for _, label in file_labels]
-        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, special_matmul, aggregation_type, compare_dtype, compare_shape, file_labels_list, print_markdown=print_markdown)
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, special_matmul, aggregation_type, compare_dtype, compare_shape, file_labels_list, print_markdown=print_markdown)
         
         print("=== 多文件分析完成 ===")
         return generated_files
@@ -1430,23 +1437,31 @@ class Analyzer:
     
     # ==================== All-to-All 通信性能分析 ====================
     
-    def analyze_all2all_performance(self, pod_dir: str, step: Optional[int] = None, all2all_idx: Optional[int] = None, output_dir: str = ".") -> List[Path]:
+    def analyze_communication_performance(self, pod_dir: str, step: Optional[int] = None, comm_idx: Optional[int] = None, 
+                                         fastest_card_idx: Optional[int] = None, slowest_card_idx: Optional[int] = None,
+                                         kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL", prev_kernel_pattern: str = "TCDP_.*", output_dir: str = ".") -> List[Path]:
         """
-        分析All-to-All通信性能
+        分析分布式训练中的通信性能
         
         Args:
             pod_dir: Pod文件夹路径
             step: 指定要分析的step，如果为None则分析所有step
-            all2all_idx: 指定要分析的all2all索引，如果为None则分析所有all2all操作
+            comm_idx: 指定要分析的通信操作索引，如果为None则分析所有通信操作
+            fastest_card_idx: 指定最快卡的索引，如果为None则自动查找
+            slowest_card_idx: 指定最慢卡的索引，如果为None则自动查找
+            kernel_prefix: 要检测的通信kernel前缀
+            prev_kernel_pattern: 上一个通信kernel的匹配模式，用于确定对比区间
             output_dir: 输出目录
             
         Returns:
             List[Path]: 生成的文件路径列表
         """
-        print(f"=== 开始All-to-All通信性能分析 ===")
+        print(f"=== 开始通信性能分析 ===")
         print(f"Pod目录: {pod_dir}")
         print(f"Step: {step if step is not None else '所有step'}")
-        print(f"All2All索引: {all2all_idx if all2all_idx is not None else '所有all2all操作'}")
+        print(f"通信操作索引: {comm_idx if comm_idx is not None else '所有通信操作'}")
+        print(f"通信Kernel前缀: {kernel_prefix}")
+        print(f"上一个通信Kernel模式: {prev_kernel_pattern}")
         
         # 1. 扫描pod目录，找到所有executor文件夹
         executor_folders = self._scan_executor_folders(pod_dir)
@@ -1456,32 +1471,34 @@ class Analyzer:
         
         print(f"找到 {len(executor_folders)} 个executor文件夹")
         
-        # 2. 解析所有JSON文件，提取all2all数据
-        all2all_data = self._extract_all2all_data(executor_folders, step)
-        if not all2all_data:
-            print("错误: 没有找到任何all2all数据")
-            return []
+        # 2. 解析所有JSON文件，提取通信数据
+        comm_data = None
+        if step is None or comm_idx is None or fastest_card_idx is None or slowest_card_idx is None:
+            comm_data = self._extract_communication_data(executor_folders, step, kernel_prefix)
+            if not comm_data:
+                print("错误: 没有找到任何通信数据")
+                return []
         
-        print(f"成功提取all2all数据，共 {len(all2all_data)} 个step")
+            print(f"成功提取通信数据，共 {len(comm_data)} 个step")
         
         generated_files = []
         
-        # 3. 如果指定了step和all2all_idx，进行深度分析
-        if step is not None and all2all_idx is not None:
-            print(f"进行深度分析: step={step}, all2all_idx={all2all_idx}")
-            deep_analysis_file = self._perform_deep_analysis(all2all_data, executor_folders, step, all2all_idx, output_dir)
+        # 3. 如果指定了step和comm_idx，进行深度分析
+        if step is not None and comm_idx is not None:
+            print(f"进行深度分析: step={step}, comm_idx={comm_idx}")
+            deep_analysis_file = self._perform_deep_analysis(comm_data, executor_folders, step, comm_idx, output_dir, kernel_prefix, prev_kernel_pattern, fastest_card_idx, slowest_card_idx)
             if deep_analysis_file:
                 generated_files.append(deep_analysis_file)
         else:
             # 4. 生成原始数据Excel文件
-            raw_data_file = self._generate_raw_data_excel(all2all_data, output_dir)
+            raw_data_file = self._generate_raw_data_excel(comm_data, output_dir)
             generated_files.append(raw_data_file)
             
             # 5. 生成统计分析Excel文件
-            stats_file = self._generate_statistics_excel(all2all_data, output_dir)
+            stats_file = self._generate_statistics_excel(comm_data, output_dir)
             generated_files.append(stats_file)
         
-        print("=== All-to-All通信性能分析完成 ===")
+        print("=== 通信性能分析完成 ===")
         
         return generated_files
     
@@ -1506,18 +1523,19 @@ class Analyzer:
         
         return sorted(executor_folders)
     
-    def _extract_all2all_data(self, executor_folders: List[str], step: Optional[int] = None) -> Dict[int, Dict[int, List[float]]]:
+    def _extract_communication_data(self, executor_folders: List[str], step: Optional[int] = None, kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL") -> Dict[int, Dict[int, List[float]]]:
         """
-        从executor文件夹中提取all2all数据
+        从executor文件夹中提取通信数据
         
         Args:
             executor_folders: executor文件夹路径列表
             step: 指定要处理的step，如果为None则处理所有step
+            kernel_prefix: 要检测的通信kernel前缀
             
         Returns:
             Dict[int, Dict[int, List[float]]]: {step: {card_idx: [duration1, duration2, ...]}}
         """
-        all2all_data = defaultdict(lambda: defaultdict(list))
+        comm_data = defaultdict(lambda: defaultdict(list))
         
         for executor_folder in executor_folders:
             print(f"  处理文件夹: {executor_folder}")
@@ -1539,13 +1557,13 @@ class Analyzer:
                 if step is not None and file_step != step:
                     continue
                 
-                # 提取all2all durations
-                durations = self._extract_all2all_durations(str(json_file))
+                # 提取通信kernel durations
+                durations = self._extract_communication_durations(str(json_file), kernel_prefix)
                 if durations:
-                    all2all_data[file_step][card_idx].extend(durations)
+                    comm_data[file_step][card_idx].extend(durations)
                     print(f"    文件 {json_file.name}: step={file_step}, card={card_idx}, 提取到 {len(durations)} 个duration")
         
-        return dict(all2all_data)
+        return dict(comm_data)
     
     def _parse_json_filename(self, filename: str) -> Tuple[Optional[int], Optional[int]]:
         """
@@ -1574,12 +1592,52 @@ class Analyzer:
             print(f"    解析文件名失败 {filename}: {e}")
             return None, None
     
-    def _extract_all2all_durations(self, json_file_path: str) -> List[float]:
+    def _find_communication_kernels(self, json_file_path: str, kernel_pattern: str = "TCDP_.*") -> List[Dict]:
         """
-        从JSON文件中提取TCDP_ALLTOALL操作的duration
+        从JSON文件中找到所有匹配模式的通信kernel，返回其时间戳和持续时间
         
         Args:
             json_file_path: JSON文件路径
+            kernel_pattern: kernel名称的匹配模式（正则表达式）
+            
+        Returns:
+            List[Dict]: 包含kernel信息的列表，每个元素包含 {'name': str, 'ts': float, 'dur': float, 'idx': int}
+        """
+        try:
+            with open(json_file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 使用正则表达式匹配所有通信kernel
+            pattern = rf'"ph":\s*"X",\s*"cat":\s*"kernel",\s*"name":\s*"({kernel_pattern}[^"]*)",\s*"pid":\s*\d+,\s*"tid":\s*\d+,\s*"ts":\s*([\d.]+),\s*"dur":\s*([\d.]+)'
+            
+            matches = re.findall(pattern, content, re.DOTALL)
+            
+            # 转换为字典列表
+            kernels = []
+            for idx, (name, ts, dur) in enumerate(matches):
+                kernels.append({
+                    'name': name,
+                    'ts': float(ts),
+                    'dur': float(dur),
+                    'idx': idx
+                })
+            
+            # 按时间戳排序
+            kernels.sort(key=lambda x: x['ts'])
+            
+            return kernels
+            
+        except Exception as e:
+            print(f"    读取JSON文件失败 {json_file_path}: {e}")
+            return []
+
+    def _extract_communication_durations(self, json_file_path: str, kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL") -> List[float]:
+        """
+        从JSON文件中提取指定通信kernel前缀的duration
+        
+        Args:
+            json_file_path: JSON文件路径
+            kernel_prefix: 要检测的通信kernel前缀
             
         Returns:
             List[float]: duration列表，最多6个
@@ -1588,8 +1646,10 @@ class Analyzer:
             with open(json_file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # 使用正则表达式匹配TCDP_ALLTOALL操作
-            pattern = r'"ph":\s*"X",\s*"cat":\s*"kernel",\s*"name":\s*"TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL_BF16_ADD",\s*"pid":\s*\d+,\s*"tid":\s*\d+,\s*"ts":\s*[\d.]+,\s*"dur":\s*([\d.]+)'
+            # 使用正则表达式匹配指定的通信kernel前缀
+            # 支持多种kernel前缀，包括TCDP_开头的各种通信操作
+            escaped_kernel_prefix = re.escape(kernel_prefix)
+            pattern = rf'"ph":\s*"X",\s*"cat":\s*"kernel",\s*"name":\s*"{escaped_kernel_prefix}[^"]*",\s*"pid":\s*\d+,\s*"tid":\s*\d+,\s*"ts":\s*[\d.]+,\s*"dur":\s*([\d.]+)'
             
             matches = re.findall(pattern, content, re.DOTALL)
             
@@ -1632,7 +1692,7 @@ class Analyzer:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        excel_file = output_path / "all2all_raw_data.xlsx"
+        excel_file = output_path / "comm_raw_data.xlsx"
         df.to_excel(excel_file, index=False)
         print(f"原始数据Excel文件已生成: {excel_file}")
         
@@ -1743,54 +1803,67 @@ class Analyzer:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        excel_file = output_path / "all2all_statistics.xlsx"
+        excel_file = output_path / "comm_statistics.xlsx"
         df.to_excel(excel_file, index=False)
         print(f"统计分析Excel文件已生成: {excel_file}")
         
         return excel_file
     
-    def _perform_deep_analysis(self, all2all_data: Dict[int, Dict[int, List[float]]], executor_folders: List[str], 
-                              step: int, all2all_idx: int, output_dir: str) -> Optional[Path]:
+    def _perform_deep_analysis(self, comm_data: Dict[int, Dict[int, List[float]]], executor_folders: List[str], 
+                              step: int, comm_idx: int, output_dir: str, kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL", 
+                              prev_kernel_pattern: str = "TCDP_.*", fastest_card_idx: Optional[int] = None, slowest_card_idx: Optional[int] = None) -> Optional[Path]:
         """
         执行深度分析，比较快卡和慢卡的详细差异
         
         Args:
-            all2all_data: {step: {card_idx: [duration1, duration2, ...]}}
+            comm_data: {step: {card_idx: [duration1, duration2, ...]}}
             executor_folders: executor文件夹路径列表
             step: 要分析的step
-            all2all_idx: 要分析的all2all索引
+            comm_idx: 要分析的通信操作索引
             output_dir: 输出目录
+            kernel_prefix: 要检测的通信kernel前缀
+            prev_kernel_pattern: 上一个通信kernel的匹配模式，用于确定对比区间
+            fastest_card_idx: 指定最快卡的索引，如果为None则自动查找
+            slowest_card_idx: 指定最慢卡的索引，如果为None则自动查找
             
         Returns:
             Optional[Path]: 生成的深度分析文件路径
         """
         print(f"=== 开始深度分析 ===")
-        print(f"分析step={step}, all2all_idx={all2all_idx}")
+        print(f"分析step={step}, comm_idx={comm_idx}")
         
-        # 1. 找到指定step和all2all_idx的duration数据
-        if step not in all2all_data:
-            print(f"错误: 没有找到step={step}的数据")
-            return None
         
-        step_data = all2all_data[step]
-        card_durations = {}
         
-        for card_idx, durations in step_data.items():
-            if all2all_idx < len(durations):
-                card_durations[card_idx] = durations[all2all_idx]
+        # 2. 确定快慢卡
+        if fastest_card_idx is not None and slowest_card_idx is not None:
+            
+            fastest_card = (fastest_card_idx, None)
+            slowest_card = (slowest_card_idx, None)
+            print(f"使用指定的快慢卡:")
+        else:
+            # 1. 找到指定step和comm_idx的duration数据
+            if step not in comm_data:
+                print(f"错误: 没有找到step={step}的数据")
+                return None
+            step_data = comm_data[step]
+            card_durations = {}
+            
+            for card_idx, durations in step_data.items():
+                if comm_idx < len(durations):
+                    card_durations[card_idx] = durations[comm_idx]
+            
+            if len(card_durations) < 2:
+                print(f"错误: step={step}, comm_idx={comm_idx}只有{len(card_durations)}个card的数据，无法比较")
+                return None
+            # 自动查找差别最大的两个card
+            sorted_cards = sorted(card_durations.items(), key=lambda x: x[1])
+            fastest_card = sorted_cards[0]  # (card_idx, duration)
+            slowest_card = sorted_cards[-1]  # (card_idx, duration)
+            print(f"自动查找的快慢卡:")
+            print(f"最快card: {fastest_card[0]}, duration: {fastest_card[1]:.2f}")
+            print(f"最慢card: {slowest_card[0]}, duration: {slowest_card[1]:.2f}")
         
-        if len(card_durations) < 2:
-            print(f"错误: step={step}, all2all_idx={all2all_idx}只有{len(card_durations)}个card的数据，无法比较")
-            return None
-        
-        # 2. 找到差别最大的两个card
-        sorted_cards = sorted(card_durations.items(), key=lambda x: x[1])
-        fastest_card = sorted_cards[0]  # (card_idx, duration)
-        slowest_card = sorted_cards[-1]  # (card_idx, duration)
-        
-        print(f"最快card: {fastest_card[0]}, duration: {fastest_card[1]:.2f}")
-        print(f"最慢card: {slowest_card[0]}, duration: {slowest_card[1]:.2f}")
-        print(f"性能差异: {slowest_card[1] / fastest_card[1]:.2f}倍")
+            print(f"性能差异: {slowest_card[1] / fastest_card[1]:.2f}倍")
         
         # 3. 找到对应的JSON文件
         fastest_json_file = self._find_json_file(executor_folders, step, fastest_card[0])
@@ -1810,7 +1883,7 @@ class Analyzer:
         # 5. 进行深度对比分析
         comparison_result = self._compare_card_performance(
             fastest_data, slowest_data, fastest_card[0], slowest_card[0], 
-            step, all2all_idx, fastest_card[1], slowest_card[1]
+            step, comm_idx, fastest_card[1], slowest_card[1], kernel_prefix, prev_kernel_pattern
         )
         
         if not comparison_result:
@@ -1818,7 +1891,7 @@ class Analyzer:
             return None
         
         # 6. 生成深度分析Excel文件
-        excel_file = self._generate_deep_analysis_excel(comparison_result, step, all2all_idx, output_dir)
+        excel_file = self._generate_deep_analysis_excel(comparison_result, step, comm_idx, output_dir)
         
         print("=== 深度分析完成 ===")
         return excel_file
@@ -1845,7 +1918,9 @@ class Analyzer:
     
     def _compare_card_performance(self, fastest_data: 'ProfilerData', slowest_data: 'ProfilerData',
                                  fastest_card_idx: int, slowest_card_idx: int,
-                                 step: int, all2all_idx: int, fastest_duration: float, slowest_duration: float) -> Optional[Dict]:
+                                 step: int, comm_idx: int, fastest_duration: float, slowest_duration: float,
+                                 kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL", 
+                                 prev_kernel_pattern: str = "TCDP_.*") -> Optional[Dict]:
         """
         比较快卡和慢卡的性能差异
         
@@ -1855,48 +1930,78 @@ class Analyzer:
             fastest_card_idx: 最快card的索引
             slowest_card_idx: 最慢card的索引
             step: step值
-            all2all_idx: all2all索引
-            fastest_duration: 最快card的all2all duration
-            slowest_duration: 最慢card的all2all duration
+            comm_idx: 通信操作索引
+            fastest_duration: 最快card的通信kernel duration
+            slowest_duration: 最慢card的通信kernel duration
+            kernel_prefix: 要检测的通信kernel前缀
+            prev_kernel_pattern: 上一个通信kernel的匹配模式，用于确定对比区间
             
         Returns:
             Optional[Dict]: 对比分析结果
         """
         print("开始比较快卡和慢卡的性能差异...")
         
-        # 1. 对两个数据进行Stage1处理
+        # 1. 检查通信kernel一致性
+        if not self._check_communication_kernel_consistency(fastest_data, slowest_data, kernel_prefix, comm_idx):
+            print("错误: 通信kernel一致性检查失败")
+            return None
+        
+        # 2. 对两个数据进行Stage1处理
         fastest_cpu_events_by_external_id, fastest_kernel_events_by_external_id = self.stage1_data_postprocessing(fastest_data)
         slowest_cpu_events_by_external_id, slowest_kernel_events_by_external_id = self.stage1_data_postprocessing(slowest_data)
         
-        # 2. 找到目标all2all操作的时间范围
-        fastest_all2all_events = self._find_all2all_events(fastest_data, all2all_idx)
-        slowest_all2all_events = self._find_all2all_events(slowest_data, all2all_idx)
+        # 3. 找到目标通信kernel操作的时间范围
+        fastest_comm_event = self._find_communication_event(fastest_data, comm_idx, kernel_prefix)
+        slowest_comm_event = self._find_communication_event(slowest_data, comm_idx, kernel_prefix)
         
-        if not fastest_all2all_events or not slowest_all2all_events:
-            print("错误: 无法找到目标all2all操作")
+        if not fastest_comm_event or not slowest_comm_event:
+            print("错误: 无法找到目标通信kernel操作")
             return None
         
-        # 3. 找到上一次all2all操作的时间范围（如果all2all_idx > 0）
-        fastest_prev_all2all_events = None
-        slowest_prev_all2all_events = None
+        # 4. 找到上一个通信kernel操作的时间范围
+        print("=== 查找上一个通信kernel ===")
+        fastest_prev_comm_events = self._find_prev_communication_kernel_events(fastest_data, [fastest_comm_event], prev_kernel_pattern)
+        slowest_prev_comm_events = self._find_prev_communication_kernel_events(slowest_data, [slowest_comm_event], prev_kernel_pattern)
         
-        if all2all_idx > 0:
-            fastest_prev_all2all_events = self._find_all2all_events(fastest_data, all2all_idx - 1)
-            slowest_prev_all2all_events = self._find_all2all_events(slowest_data, all2all_idx - 1)
+        # 5. 验证上一个通信kernel名称是否一致
+        if fastest_prev_comm_events and slowest_prev_comm_events:
+            fastest_prev_kernel_name = fastest_prev_comm_events[0].name
+            slowest_prev_kernel_name = slowest_prev_comm_events[0].name
+            print(f"    最快卡上一个通信kernel: {fastest_prev_kernel_name}")
+            print(f"    最慢卡上一个通信kernel: {slowest_prev_kernel_name}")
+            
+            if fastest_prev_kernel_name != slowest_prev_kernel_name:
+                print(f"    错误: 快慢卡的上一个通信kernel名称不一致!")
+                print(f"    最快卡: {fastest_prev_kernel_name}")
+                print(f"    最慢卡: {slowest_prev_kernel_name}")
+                print(f"    要求: 两个卡的上一个通信kernel名称必须完全一致")
+                return None
+            else:
+                print(f"    ✓ 上一个通信kernel名称一致: {fastest_prev_kernel_name}")
+        elif not fastest_prev_comm_events and not slowest_prev_comm_events:
+            print("    警告: 快慢卡都没有找到上一个通信kernel")
+        else:
+            print("    错误: 快慢卡的上一个通信kernel查找结果不一致!")
+            print(f"    最快卡找到: {len(fastest_prev_comm_events)} 个events")
+            print(f"    最慢卡找到: {len(slowest_prev_comm_events)} 个events")
+            return None
         
-        # 4. 确定分析的时间范围
-        fastest_start_time = self._get_analysis_start_time(fastest_data, fastest_prev_all2all_events, fastest_all2all_events)
-        slowest_start_time = self._get_analysis_start_time(slowest_data, slowest_prev_all2all_events, slowest_all2all_events)
+        # 6. 确定分析的时间范围
+        fastest_prev_event = fastest_prev_comm_events[0] if fastest_prev_comm_events else None
+        slowest_prev_event = slowest_prev_comm_events[0] if slowest_prev_comm_events else None
         
-        fastest_end_time = self._get_analysis_end_time(fastest_data, fastest_all2all_events)
-        slowest_end_time = self._get_analysis_end_time(slowest_data, slowest_all2all_events)
+        fastest_start_time = self._get_analysis_start_time(fastest_data, fastest_prev_event, fastest_comm_event)
+        slowest_start_time = self._get_analysis_start_time(slowest_data, slowest_prev_event, slowest_comm_event)
+        
+        fastest_end_time = self._get_analysis_end_time(fastest_data, fastest_comm_event)
+        slowest_end_time = self._get_analysis_end_time(slowest_data, slowest_comm_event)
         
         print(f"最快card分析时间范围: {fastest_start_time:.2f} - {fastest_end_time:.2f}")
         print(f"最慢card分析时间范围: {slowest_start_time:.2f} - {slowest_end_time:.2f}")
         
-        # 5. 时间戳已经在stage1_data_postprocessing中标准化，无需额外处理
+        # 7. 时间戳已经在stage1_data_postprocessing中标准化，无需额外处理
         
-        # 6. 提取时间范围内的events并与filtered events取交集
+        # 8. 提取时间范围内的events并与filtered events取交集
         fastest_cpu_events_by_external_id, fastest_kernel_events_by_external_id = self._extract_events_in_range_with_intersection(
             fastest_data, fastest_start_time, fastest_end_time, 
             fastest_cpu_events_by_external_id, fastest_kernel_events_by_external_id
@@ -1906,83 +2011,410 @@ class Analyzer:
             slowest_cpu_events_by_external_id, slowest_kernel_events_by_external_id
         )
         
-        # 7. 合并CPU和kernel events
+        # 9. 合并CPU和kernel events
         fastest_events_by_external_id = self._merge_cpu_and_kernel_events(fastest_cpu_events_by_external_id, fastest_kernel_events_by_external_id)
         slowest_events_by_external_id = self._merge_cpu_and_kernel_events(slowest_cpu_events_by_external_id, slowest_kernel_events_by_external_id)
         
-        # 8. 按时间顺序比较CPU操作
+        # 10. 计算通信kernel的实际duration
+        fastest_comm_duration = fastest_comm_event.dur if fastest_comm_event and fastest_comm_event.dur is not None else 0.0
+        slowest_comm_duration = slowest_comm_event.dur if slowest_comm_event and slowest_comm_event.dur is not None else 0.0
+        
+        # 11. 按时间顺序比较CPU操作
         comparison_rows = self._compare_events_by_time_sequence(
             fastest_events_by_external_id, slowest_events_by_external_id,
-            fastest_card_idx, slowest_card_idx, fastest_duration, slowest_duration
+            fastest_card_idx, slowest_card_idx, fastest_comm_duration, slowest_comm_duration
         )
         
         return {
             'step': step,
-            'all2all_idx': all2all_idx,
+            'comm_idx': comm_idx,
             'fastest_card_idx': fastest_card_idx,
             'slowest_card_idx': slowest_card_idx,
-            'fastest_duration': fastest_duration,
-            'slowest_duration': slowest_duration,
-            'duration_ratio': slowest_duration / fastest_duration,
+            'fastest_duration': fastest_comm_duration,
+            'slowest_duration': slowest_comm_duration,
+            'duration_ratio': slowest_comm_duration / fastest_comm_duration if fastest_comm_duration > 0 else 0,
             'comparison_rows': comparison_rows
         }
     
-    def _find_all2all_events(self, data: 'ProfilerData', all2all_idx: int) -> List['ActivityEvent']:
+    def _find_communication_event(self, data: 'ProfilerData', comm_idx: int, kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL") -> Optional['ActivityEvent']:
         """
-        找到指定all2all_idx的all2all操作events
+        找到指定comm_idx的通信kernel操作event
         
         Args:
             data: ProfilerData对象
-            all2all_idx: all2all索引
+            comm_idx: 通信操作索引
+            kernel_prefix: 要检测的通信kernel前缀
             
         Returns:
-            List[ActivityEvent]: all2all events列表
+            Optional[ActivityEvent]: 通信kernel event，如果找到则返回单个event，否则返回None
         """
-        all2all_events = []
-        all2all_count = 0
+        comm_events = []
+        comm_count = 0
         
         for event in data.events:
             if (event.cat == 'kernel' and 
-                'TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL_BF16_ADD' in event.name):
-                if all2all_count == all2all_idx:
-                    all2all_events.append(event)
-                all2all_count += 1
+                event.name.startswith(kernel_prefix)):
+                # 检查是否在黑名单中
+                is_blacklisted = any(pattern in event.name for pattern in self.COMMUNICATION_BLACKLIST_PATTERNS)
+                if not is_blacklisted:
+                    if comm_count == comm_idx:
+                        comm_events.append(event)
+                    comm_count += 1
         
-        return all2all_events
+        # 按结束时间排序（从早到晚）
+        comm_events.sort(key=lambda x: (x.ts + x.dur) if (x.ts is not None and x.dur is not None) else 0)
+        
+        # 打印找到的通信事件的可读时间戳
+        if comm_events:
+            print(f"    找到 1 个目标通信kernel event:")
+            event = comm_events[0]  # 取第一个（按结束时间排序后的第一个）
+            start_time = event.readable_timestamp if event.readable_timestamp else f"{event.ts:.2f}μs"
+            end_time = "N/A"
+            if event.ts is not None and event.dur is not None:
+                if event.readable_timestamp:
+                    import datetime
+                    start_dt = datetime.datetime.strptime(event.readable_timestamp, "%Y-%m-%d %H:%M:%S.%f")
+                    end_dt = start_dt + datetime.timedelta(microseconds=event.dur)
+                    end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+                else:
+                    end_time = f"{event.ts + event.dur:.2f}μs"
+            print(f"      {event.name}")
+            print(f"         开始时间: {start_time}")
+            print(f"         结束时间: {end_time}")
+            return event
+        
+        return None
     
+    def _find_all_communication_events(self, data: 'ProfilerData') -> List['ActivityEvent']:
+        """
+        找到所有TCDP_开头的通信kernel events，按结束时间排序
+        
+        Args:
+            data: ProfilerData对象
+            
+        Returns:
+            List[ActivityEvent]: 所有通信kernel events，按结束时间排序
+        """
+        comm_events = []
+        
+        for event in data.events:
+            if (event.cat == 'kernel' and 
+                event.name.startswith('TCDP_')):
+                # 检查是否在黑名单中
+                is_blacklisted = any(pattern in event.name for pattern in self.COMMUNICATION_BLACKLIST_PATTERNS)
+                if not is_blacklisted:
+                    comm_events.append(event)
+        
+        # 按结束时间排序（从早到晚）
+        comm_events.sort(key=lambda x: (x.ts + x.dur) if (x.ts is not None and x.dur is not None) else 0)
+        
+        return comm_events
     
-    def _get_analysis_start_time(self, data: 'ProfilerData', prev_all2all_events: Optional[List['ActivityEvent']], 
-                                current_all2all_events: List['ActivityEvent']) -> float:
+    def _find_prev_communication_kernel_events(self, data: 'ProfilerData', target_kernel_events: List['ActivityEvent'], 
+                                             prev_kernel_pattern: str = "TCDP_.*") -> List['ActivityEvent']:
+        """
+        找到目标通信kernel之前的通信kernel events
+        
+        Args:
+            data: ProfilerData对象
+            target_kernel_events: 目标通信kernel events
+            prev_kernel_pattern: 上一个通信kernel的匹配模式
+            
+        Returns:
+            List[ActivityEvent]: 上一个通信kernel events列表
+        """
+        if not target_kernel_events:
+            print("    警告: 目标通信kernel events为空")
+            return []
+        
+        # 找到目标kernel的最早开始时间
+        target_start_time = min(event.ts for event in target_kernel_events if event.ts is not None)
+        target_kernel_name = target_kernel_events[0].name
+        print(f"    目标通信kernel: {target_kernel_name}, 开始时间: {target_start_time:.2f}")
+        
+        # 找到所有匹配模式的通信kernel events，按结束时间排序
+        communication_kernels = []
+        for event in data.events:
+            if (event.cat == 'kernel' and
+                event.ts is not None and
+                event.ts < target_start_time and
+                re.match(prev_kernel_pattern, event.name)):
+                # 检查是否在黑名单中
+                is_blacklisted = any(pattern in event.name for pattern in self.COMMUNICATION_BLACKLIST_PATTERNS)
+                if not is_blacklisted:
+                    communication_kernels.append(event)
+        
+        print(f"    找到 {len(communication_kernels)} 个匹配模式 '{prev_kernel_pattern}' 的通信kernel events（已过滤机内通信）")
+        
+        # 按结束时间排序，取最后一个（最接近目标kernel的）
+        communication_kernels.sort(key=lambda x: (x.ts + x.dur) if (x.ts is not None and x.dur is not None) else 0)
+        
+        if communication_kernels:
+            # 返回最后一个通信kernel（最接近目标kernel的）
+            last_kernel_event = communication_kernels[-1]
+            print(f"    上一个通信kernel: {last_kernel_event.name}")
+            
+            # 打印找到的上一个通信事件的可读时间戳
+            start_time = last_kernel_event.readable_timestamp if last_kernel_event.readable_timestamp else f"{last_kernel_event.ts:.2f}μs"
+            end_time = "N/A"
+            if last_kernel_event.ts is not None and last_kernel_event.dur is not None:
+                if last_kernel_event.readable_timestamp:
+                    import datetime
+                    start_dt = datetime.datetime.strptime(last_kernel_event.readable_timestamp, "%Y-%m-%d %H:%M:%S.%f")
+                    end_dt = start_dt + datetime.timedelta(microseconds=last_kernel_event.dur)
+                    end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+                else:
+                    end_time = f"{last_kernel_event.ts + last_kernel_event.dur:.2f}μs"
+            print(f"    开始时间: {start_time}")
+            print(f"    结束时间: {end_time}")
+            
+            return [last_kernel_event]
+        else:
+            print(f"    警告: 没有找到匹配模式 '{prev_kernel_pattern}' 的上一个通信kernel")
+        
+        return []
+    
+    def _check_communication_kernel_consistency(self, fastest_data: 'ProfilerData', slowest_data: 'ProfilerData',
+                                              kernel_prefix: str, comm_idx: int) -> bool:
+        """
+        检查快慢卡的所有通信kernel顺序和时间一致性
+        
+        Args:
+            fastest_data: 最快card的ProfilerData
+            slowest_data: 最慢card的ProfilerData
+            kernel_prefix: 通信kernel前缀（用于查找目标通信操作）
+            comm_idx: 通信操作索引
+            
+        Returns:
+            bool: 是否一致
+        """
+        print("=== 检查通信kernel一致性 ===")
+        
+        # 1. 找到所有TCDP_开头的通信kernel events（用于检查顺序和同步性）
+        fastest_all_comm_events = self._find_all_communication_events(fastest_data)
+        slowest_all_comm_events = self._find_all_communication_events(slowest_data)
+        
+        # 2. 找到目标通信kernel events（用于确定分析范围）
+        fastest_target_comm_event = self._find_communication_event(fastest_data, comm_idx, kernel_prefix)
+        slowest_target_comm_event = self._find_communication_event(slowest_data, comm_idx, kernel_prefix)
+        
+        if not fastest_target_comm_event or not slowest_target_comm_event:
+            print("    错误: 无法找到目标通信kernel events")
+            return False
+        
+        if not fastest_all_comm_events or not slowest_all_comm_events:
+            print("    错误: 无法找到任何通信kernel events")
+            return False
+        
+        # 2. 时间戳标准化已在parser中完成
+        print("    时间戳标准化已在parser中完成")
+        
+        # 3. 打印通信事件的markdown表格
+        print("    通信事件对比表格:")
+        print("    | 序号 | 最快卡Kernel名称 | 最快卡开始时间 | 最快卡结束时间 | 最慢卡Kernel名称 | 最慢卡开始时间 | 最慢卡结束时间 | 名称一致 | 开始时间差(ms) | 结束时间差(ms) |")
+        print("    |------|----------------|-------------|-------------|----------------|-------------|-------------|----------|---------------|---------------|")
+        
+        # 按顺序对比通信事件
+        max_events = max(len(fastest_all_comm_events), len(slowest_all_comm_events))
+        
+        for i in range(max_events):
+            # 获取当前索引的事件
+            fastest_event = fastest_all_comm_events[i] if i < len(fastest_all_comm_events) else None
+            slowest_event = slowest_all_comm_events[i] if i < len(slowest_all_comm_events) else None
+            
+            # 获取kernel名称
+            fastest_name = fastest_event.name if fastest_event else "N/A"
+            slowest_name = slowest_event.name if slowest_event else "N/A"
+            
+            # 获取开始时间戳
+            if fastest_event and fastest_event.readable_timestamp:
+                fastest_start_ts = fastest_event.readable_timestamp
+            elif fastest_event:
+                fastest_start_ts = f"{fastest_event.ts:.2f}μs"
+            else:
+                fastest_start_ts = "N/A"
+            
+            if slowest_event and slowest_event.readable_timestamp:
+                slowest_start_ts = slowest_event.readable_timestamp
+            elif slowest_event:
+                slowest_start_ts = f"{slowest_event.ts:.2f}μs"
+            else:
+                slowest_start_ts = "N/A"
+            
+            # 计算结束时间戳
+            if fastest_event and fastest_event.ts is not None and fastest_event.dur is not None:
+                fastest_end_ts = fastest_event.ts + fastest_event.dur
+                if fastest_event.readable_timestamp:
+                    # 如果有可读时间戳，计算结束时间戳
+                    import datetime
+                    start_dt = datetime.datetime.strptime(fastest_event.readable_timestamp, "%Y-%m-%d %H:%M:%S.%f")
+                    end_dt = start_dt + datetime.timedelta(microseconds=fastest_event.dur)
+                    fastest_end_ts_str = end_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+                else:
+                    fastest_end_ts_str = f"{fastest_end_ts:.2f}μs"
+            else:
+                fastest_end_ts_str = "N/A"
+                fastest_end_ts = None
+            
+            if slowest_event and slowest_event.ts is not None and slowest_event.dur is not None:
+                slowest_end_ts = slowest_event.ts + slowest_event.dur
+                if slowest_event.readable_timestamp:
+                    # 如果有可读时间戳，计算结束时间戳
+                    import datetime
+                    start_dt = datetime.datetime.strptime(slowest_event.readable_timestamp, "%Y-%m-%d %H:%M:%S.%f")
+                    end_dt = start_dt + datetime.timedelta(microseconds=slowest_event.dur)
+                    slowest_end_ts_str = end_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+                else:
+                    slowest_end_ts_str = f"{slowest_end_ts:.2f}μs"
+            else:
+                slowest_end_ts_str = "N/A"
+                slowest_end_ts = None
+            
+            # 检查名称是否一致
+            name_consistent = "✓" if fastest_name == slowest_name else "✗"
+            
+            # 计算开始时间差（如果有两个事件）
+            start_time_diff = "N/A"
+            if fastest_event and slowest_event and fastest_event.ts is not None and slowest_event.ts is not None:
+                diff_ms = abs(fastest_event.ts - slowest_event.ts) / 1000.0  # 转换为毫秒
+                start_time_diff = f"{diff_ms:.3f}"
+            
+            # 计算结束时间差（如果有两个事件）
+            end_time_diff = "N/A"
+            if fastest_end_ts is not None and slowest_end_ts is not None:
+                diff_ms = abs(fastest_end_ts - slowest_end_ts) / 1000.0  # 转换为毫秒
+                end_time_diff = f"{diff_ms:.3f}"
+            
+            print(f"    | {i+1} | {fastest_name} | {fastest_start_ts} | {fastest_end_ts_str} | {slowest_name} | {slowest_start_ts} | {slowest_end_ts_str} | {name_consistent} | {start_time_diff} | {end_time_diff} |")
+        
+        # 4. 检查kernel名称顺序一致性
+        fastest_kernel_names = [event.name for event in fastest_all_comm_events]
+        slowest_kernel_names = [event.name for event in slowest_all_comm_events]
+        
+        print(f"    最快卡通信kernel序列: {fastest_kernel_names}")
+        print(f"    最慢卡通信kernel序列: {slowest_kernel_names}")
+        
+        sequence_consistent = (fastest_kernel_names == slowest_kernel_names)
+        if not sequence_consistent:
+            print("    警告: 通信kernel名称序列不一致!")
+            print(f"    最快卡: {fastest_kernel_names}")
+            print(f"    最慢卡: {slowest_kernel_names}")
+        else:
+            print("    ✓ 通信kernel名称序列一致")
+        
+        # 3. 检查kernel结束时间一致性（1ms以内）
+        print("    检查通信kernel结束时间一致性...")
+        
+        if sequence_consistent:
+            # 如果序列一致，按顺序比较
+            print("    按顺序比较通信kernel结束时间...")
+            for i, (fastest_event, slowest_event) in enumerate(zip(fastest_all_comm_events, slowest_all_comm_events)):
+                fastest_end_time = fastest_event.ts + fastest_event.dur if fastest_event.ts is not None and fastest_event.dur is not None else 0
+                slowest_end_time = slowest_event.ts + slowest_event.dur if slowest_event.ts is not None and slowest_event.dur is not None else 0
+                
+                time_diff = abs(fastest_end_time - slowest_end_time)
+                print(f"      Kernel {i+1} ({fastest_event.name}):")
+                print(f"        最快卡结束时间: {fastest_end_time:.2f}")
+                print(f"        最慢卡结束时间: {slowest_end_time:.2f}")
+                print(f"        时间差: {time_diff:.2f} ms")
+                
+                if time_diff > 5000.0:  # 5ms以内
+                    print(f"        错误: 时间差超过5000us阈值!")
+                    return False
+                else:
+                    print(f"        ✓ 时间差在5000us以内")
+        else:
+            # 如果序列不一致，检查相同kernel的结束时间
+            print("    序列不一致，检查相同kernel的结束时间...")
+            
+            # 创建最快卡和最慢卡的kernel映射 {name: [events]}
+            fastest_kernel_map = {}
+            for event in fastest_all_comm_events:
+                if event.name not in fastest_kernel_map:
+                    fastest_kernel_map[event.name] = []
+                fastest_kernel_map[event.name].append(event)
+            
+            slowest_kernel_map = {}
+            for event in slowest_all_comm_events:
+                if event.name not in slowest_kernel_map:
+                    slowest_kernel_map[event.name] = []
+                slowest_kernel_map[event.name].append(event)
+            
+            # 检查共同的kernel
+            common_kernels = set(fastest_kernel_map.keys()) & set(slowest_kernel_map.keys())
+            print(f"    共同kernel: {sorted(common_kernels)}")
+            
+            if not common_kernels:
+                print("    错误: 没有共同的通信kernel!")
+                return False
+            
+            # 对每个共同的kernel，比较结束时间
+            for kernel_name in sorted(common_kernels):
+                fastest_kernels = fastest_kernel_map[kernel_name]
+                slowest_kernels = slowest_kernel_map[kernel_name]
+                
+                print(f"      检查kernel: {kernel_name}")
+                print(f"        最快卡有 {len(fastest_kernels)} 个实例")
+                print(f"        最慢卡有 {len(slowest_kernels)} 个实例")
+                
+                # 如果实例数量不同，取最小值进行比较
+                min_count = min(len(fastest_kernels), len(slowest_kernels))
+                
+                for i in range(min_count):
+                    fastest_event = fastest_kernels[i]
+                    slowest_event = slowest_kernels[i]
+                    
+                    fastest_end_time = fastest_event.ts + fastest_event.dur if fastest_event.ts is not None and fastest_event.dur is not None else 0
+                    slowest_end_time = slowest_event.ts + slowest_event.dur if slowest_event.ts is not None and slowest_event.dur is not None else 0
+                    
+                    time_diff = abs(fastest_end_time - slowest_end_time)
+                    print(f"        实例 {i+1}:")
+                    print(f"          最快卡结束时间: {fastest_end_time:.2f}")
+                    print(f"          最慢卡结束时间: {slowest_end_time:.2f}")
+                    print(f"          时间差: {time_diff:.2f} ms")
+                    
+                    if time_diff > 5000.0:  # 5ms以内
+                        print(f"          错误: 时间差超过5000us阈值!")
+                        return False
+                    else:
+                        print(f"          ✓ 时间差在5000us以内")
+        
+        print("    ✓ 通信kernel一致性检查通过")
+        return True
+    
+    def _get_analysis_start_time(self, data: 'ProfilerData', prev_all2all_event: Optional['ActivityEvent'], 
+                                current_all2all_event: 'ActivityEvent') -> float:
         """
         获取分析开始时间
         
         Args:
             data: ProfilerData对象
-            prev_all2all_events: 上一次all2all events
-            current_all2all_events: 当前all2all events
+            prev_all2all_event: 上一次all2all event
+            current_all2all_event: 当前all2all event
             
         Returns:
             float: 分析开始时间
         """
-        if prev_all2all_events:
+        if prev_all2all_event and prev_all2all_event.dur is not None:
             # 使用上一次all2all kernel的结束时间
-            return max(event.ts + event.dur for event in prev_all2all_events if event.dur is not None)
+            return prev_all2all_event.ts + prev_all2all_event.dur
         else:
             return 0.0
     
-    def _get_analysis_end_time(self, data: 'ProfilerData', all2all_events: List['ActivityEvent']) -> float:
+    def _get_analysis_end_time(self, data: 'ProfilerData', all2all_event: 'ActivityEvent') -> float:
         """
         获取分析结束时间
         
         Args:
             data: ProfilerData对象
-            all2all_events: all2all events
+            all2all_event: all2all event
             
         Returns:
-            float: 分析结束时间
+            float: 分析结束时间（使用目标通信kernel的开始时间）
         """
-        if all2all_events:
-            return max(event.ts + event.dur for event in all2all_events if event.dur is not None)
+        if all2all_event and all2all_event.ts is not None:
+            # 使用目标通信kernel的开始时间，而不是结束时间
+            return all2all_event.ts
         else:
             return float('inf')
     
@@ -2282,9 +2714,9 @@ class Analyzer:
         for events in slowest_events_by_external_id.values():
             slowest_kernel_events.extend([e for e in events if e.cat == 'kernel'])
         
-        # 按开始时间排序（ts已经标准化，直接使用）
-        fastest_kernel_events.sort(key=lambda x: x.ts)
-        slowest_kernel_events.sort(key=lambda x: x.ts)
+        # 按结束时间排序（ts已经标准化，直接使用）
+        fastest_kernel_events.sort(key=lambda x: (x.ts + x.dur) if (x.ts is not None and x.dur is not None) else 0)
+        slowest_kernel_events.sort(key=lambda x: (x.ts + x.dur) if (x.ts is not None and x.dur is not None) else 0)
         
         if len(fastest_kernel_events) != len(slowest_kernel_events):
             print(f"Kernel events数量不一致: 最快card {len(fastest_kernel_events)} 个, 最慢card {len(slowest_kernel_events)} 个")
@@ -2300,14 +2732,14 @@ class Analyzer:
         print(f"Kernel操作一致性检查通过: 共 {len(fastest_kernel_events)} 个操作")
         return True
     
-    def _generate_deep_analysis_excel(self, comparison_result: Dict, step: int, all2all_idx: int, output_dir: str) -> Path:
+    def _generate_deep_analysis_excel(self, comparison_result: Dict, step: int, comm_idx: int, output_dir: str) -> Path:
         """
         生成深度分析Excel文件
         
         Args:
             comparison_result: 对比分析结果
             step: step值
-            all2all_idx: all2all索引
+            comm_idx: 通信操作索引
             output_dir: 输出目录
             
         Returns:
@@ -2321,7 +2753,7 @@ class Analyzer:
         # 添加汇总信息
         summary_data = {
             'step': step,
-            'all2all_idx': all2all_idx,
+            'comm_idx': comm_idx,
             'fastest_card_idx': comparison_result['fastest_card_idx'],
             'slowest_card_idx': comparison_result['slowest_card_idx'],
             'fastest_duration': comparison_result['fastest_duration'],
@@ -2337,7 +2769,7 @@ class Analyzer:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        excel_file = output_path / f"all2all_deep_analysis_step_{step}_idx_{all2all_idx}.xlsx"
+        excel_file = output_path / f"comm_deep_analysis_step_{step}_idx_{comm_idx}.xlsx"
         
         with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
             # 写入详细对比数据

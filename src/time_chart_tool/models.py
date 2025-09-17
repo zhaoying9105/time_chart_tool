@@ -20,6 +20,7 @@ class ActivityEvent:
     args: Optional[Dict[str, Any]] = None
     id: Optional[str] = None
     stream_id: Optional[int] = None
+    readable_timestamp: Optional[str] = None
     
     def __post_init__(self):
         """初始化后处理"""

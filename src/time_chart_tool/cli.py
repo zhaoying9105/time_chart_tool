@@ -119,6 +119,8 @@ def parse_arguments():
                                 help='在输出结果时是否展示 kernel 持续时间信息 (默认: False)')
     analysis_parser.add_argument('--show-timestamp', action='store_true', 
                                 help='在输出结果时是否展示 CPU 操作启动时间戳 (默认: False)')
+    analysis_parser.add_argument('--show-readable-timestamp', action='store_true', 
+                                help='在输出结果时是否展示可读时间戳 (默认: False)')
     analysis_parser.add_argument('--print-markdown', action='store_true', 
                                 help='是否在stdout中以markdown格式打印表格 (默认: False)')
     analysis_parser.add_argument('--output-format', default='json,xlsx', 
@@ -126,12 +128,25 @@ def parse_arguments():
                                 help='输出格式 (默认: json,xlsx)')
     analysis_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
     
-    # all2all 命令 - 分析All-to-All通信性能
-    all2all_parser = subparsers.add_parser('all2all', help='分析All-to-All通信性能')
-    all2all_parser.add_argument('pod_dir', help='Pod文件夹路径，包含executor_trainer-runner_*_*_*格式的文件夹')
-    all2all_parser.add_argument('--step', type=int, help='指定要分析的step，如果不指定则分析所有step')
-    all2all_parser.add_argument('--all2all-idx', type=int, help='指定要分析的all2all索引，如果不指定则分析所有all2all操作')
-    all2all_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
+    # comm 命令 - 分析通信性能
+    comm_parser = subparsers.add_parser('comm', help='分析分布式训练中的通信性能')
+    comm_parser.add_argument('pod_dir', help='Pod文件夹路径，包含executor_trainer-runner_*_*_*格式的文件夹')
+    comm_parser.add_argument('--step', type=int, help='指定要分析的step，如果不指定则分析所有step')
+    comm_parser.add_argument('--comm-idx', type=int, help='指定要分析的通信操作索引，如果不指定则分析所有通信操作')
+    comm_parser.add_argument('--fastest-card-idx', type=int, help='指定最快卡的索引，用于深度分析')
+    comm_parser.add_argument('--slowest-card-idx', type=int, help='指定最慢卡的索引，用于深度分析')
+    comm_parser.add_argument('--kernel-prefix', default='TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL', 
+                            help='要检测的通信kernel前缀 (默认: TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL)\n'
+                                 '支持的通信kernel前缀:\n'
+                                 '  - TCDP_ONESHOT_ALLREDUCELL_SIMPLE\n'
+                                 '  - TCDP_RING_ALLGATHER_SIMPLE\n'
+                                 '  - TCDP_RING_ALLREDUCELL_SIMPLE\n'
+                                 '  - TCDP_RING_ALLREDUCE_SIMPLE\n'
+                                 '  - TCDP_RING_REDUCESCATTER_SIMPLE\n'
+                                 '  - TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL')
+    comm_parser.add_argument('--prev-kernel-pattern', default='TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL_BF16_ADD', 
+                            help='上一个通信kernel的匹配模式，用于确定对比区间 (默认: TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL_BF16_ADD)')
+    comm_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
     
     # compare 命令 - 分析多个文件并对比
     compare_parser = subparsers.add_parser('compare', help='分析多个 JSON 文件并对比')
@@ -154,6 +169,8 @@ def parse_arguments():
                                help='在输出结果时是否展示 kernel 持续时间信息 (默认: False)')
     compare_parser.add_argument('--show-timestamp', action='store_true', 
                                help='在输出结果时是否展示 CPU 操作启动时间戳 (默认: False)')
+    compare_parser.add_argument('--show-readable-timestamp', action='store_true', 
+                               help='在输出结果时是否展示可读时间戳 (默认: False)')
     compare_parser.add_argument('--print-markdown', action='store_true', 
                                help='是否在stdout中以markdown格式打印表格 (默认: False)')
     compare_parser.add_argument('--special-matmul', action='store_true',
@@ -242,6 +259,7 @@ def run_analysis(args):
     print(f"展示kernel名称: {args.show_kernel_names}")
     print(f"展示kernel持续时间: {args.show_kernel_duration}")
     print(f"展示时间戳: {args.show_timestamp}")
+    print(f"展示可读时间戳: {args.show_readable_timestamp}")
     print(f"打印markdown表格: {args.print_markdown}")
     print(f"输出格式: {args.output_format}")
     print(f"输出目录: {args.output_dir}")
@@ -269,6 +287,7 @@ def run_analysis(args):
             show_kernel_names=args.show_kernel_names,
             show_kernel_duration=args.show_kernel_duration,
             show_timestamp=args.show_timestamp,
+            show_readable_timestamp=args.show_readable_timestamp,
             output_dir=str(output_dir),
             label=args.label,
             print_markdown=args.print_markdown
@@ -291,12 +310,18 @@ def run_analysis(args):
         return 1
 
 
-def run_all2all_analysis(args):
-    """运行All-to-All通信性能分析"""
-    print(f"=== All-to-All通信性能分析 ===")
+def run_comm_analysis(args):
+    """运行通信性能分析"""
+    print(f"=== 通信性能分析 ===")
     print(f"Pod目录: {args.pod_dir}")
     print(f"Step: {args.step if args.step is not None else '所有step'}")
-    print(f"All2All索引: {args.all2all_idx if args.all2all_idx is not None else '所有all2all操作'}")
+    print(f"通信操作索引: {args.comm_idx if args.comm_idx is not None else '所有通信操作'}")
+    if args.fastest_card_idx is not None:
+        print(f"指定最快卡索引: {args.fastest_card_idx}")
+    if args.slowest_card_idx is not None:
+        print(f"指定最慢卡索引: {args.slowest_card_idx}")
+    print(f"通信Kernel前缀: {args.kernel_prefix}")
+    print(f"上一个通信Kernel模式: {args.prev_kernel_pattern}")
     print(f"输出目录: {args.output_dir}")
     print()
     
@@ -320,11 +345,15 @@ def run_all2all_analysis(args):
     try:
         start_time = time.time()
         
-        # 运行all2all分析
-        generated_files = analyzer.analyze_all2all_performance(
+        # 运行通信性能分析
+        generated_files = analyzer.analyze_communication_performance(
             pod_dir=str(pod_path),
             step=args.step,
-            all2all_idx=args.all2all_idx,
+            comm_idx=args.comm_idx,
+            fastest_card_idx=args.fastest_card_idx,
+            slowest_card_idx=args.slowest_card_idx,
+            kernel_prefix=args.kernel_prefix,
+            prev_kernel_pattern=args.prev_kernel_pattern,
             output_dir=str(output_dir)
         )
         
@@ -353,6 +382,8 @@ def run_compare_analysis(args):
     print(f"展示shape: {args.show_shape}")
     print(f"展示kernel名称: {args.show_kernel_names}")
     print(f"展示kernel持续时间: {args.show_kernel_duration}")
+    print(f"展示时间戳: {args.show_timestamp}")
+    print(f"展示可读时间戳: {args.show_readable_timestamp}")
     print(f"打印markdown表格: {args.print_markdown}")
     print(f"特殊matmul: {args.special_matmul}")
     print(f"每个标签最大文件数: {args.max_files_per_label if args.max_files_per_label else '不限制'}")
@@ -431,6 +462,7 @@ def run_compare_analysis(args):
             show_kernel_names=args.show_kernel_names,
             show_kernel_duration=args.show_kernel_duration,
             show_timestamp=args.show_timestamp,
+            show_readable_timestamp=args.show_readable_timestamp,
             special_matmul=args.special_matmul,
             output_dir=str(output_dir),
             compare_dtype=args.compare_dtype,
@@ -461,7 +493,7 @@ def main():
     args = parse_arguments()
     
     if not args.command:
-        print("错误: 请指定命令 (analysis, compare, all2all)")
+        print("错误: 请指定命令 (analysis, compare, comm)")
         print("使用 --help 查看帮助信息")
         return 1
     
@@ -469,8 +501,8 @@ def main():
         return run_analysis(args)
     elif args.command == 'compare':
         return run_compare_analysis(args)
-    elif args.command == 'all2all':
-        return run_all2all_analysis(args)
+    elif args.command == 'comm':
+        return run_comm_analysis(args)
     else:
         print(f"错误: 未知命令: {args.command}")
         return 1
