@@ -67,7 +67,7 @@ def parse_show_options(show_spec: str) -> Dict[str, bool]:
     """
     valid_show_options = {
         'dtype', 'shape', 'kernel-names', 'kernel-duration', 
-        'timestamp', 'readable-timestamp'
+        'timestamp', 'readable-timestamp', 'kernel-timestamp'
     }
     
     show_options = {
@@ -76,7 +76,8 @@ def parse_show_options(show_spec: str) -> Dict[str, bool]:
         'kernel_names': False,
         'kernel_duration': False,
         'timestamp': False,
-        'readable_timestamp': False
+        'readable_timestamp': False,
+        'kernel_timestamp': False
     }
     
     if not show_spec or not show_spec.strip():
@@ -97,6 +98,8 @@ def parse_show_options(show_spec: str) -> Dict[str, bool]:
             show_options['kernel_duration'] = True
         elif arg == 'readable-timestamp':
             show_options['readable_timestamp'] = True
+        elif arg == 'kernel-timestamp':
+            show_options['kernel_timestamp'] = True
         else:
             show_options[arg] = True
     
@@ -208,9 +211,9 @@ def parse_arguments():
     
     subparsers = parser.add_subparsers(dest='command', help='可用命令')
     
-    # analysis 命令 - 分析单个文件 (原来的 single 命令)
-    analysis_parser = subparsers.add_parser('analysis', help='分析单个 JSON 文件')
-    analysis_parser.add_argument('file', help='要分析的 JSON 文件路径')
+    # analysis 命令 - 分析单个或多个 JSON 文件
+    analysis_parser = subparsers.add_parser('analysis', help='分析单个或多个 JSON 文件')
+    analysis_parser.add_argument('file', help='要分析的 JSON 文件路径，支持 glob 模式 (如: "*.json" 或 "dir/*.json")')
     analysis_parser.add_argument('--label', default='single_file', help='文件标签 (默认: single_file)')
     analysis_parser.add_argument('--aggregation', default='name',
                                 help='聚合字段组合，使用逗号分隔的字段组合\n'
@@ -225,6 +228,7 @@ def parse_arguments():
                                      '  kernel-duration: 显示kernel持续时间\n'
                                      '  timestamp: 显示时间戳\n'
                                      '  readable-timestamp: 显示可读时间戳\n'
+                                     '  kernel-timestamp: 显示kernel时间戳\n'
                                      '示例: --show "dtype,shape,kernel-duration"')
     analysis_parser.add_argument('--print-markdown', action='store_true', 
                                 help='是否在stdout中以markdown格式打印表格 (默认: False)')
@@ -252,6 +256,16 @@ def parse_arguments():
     comm_parser.add_argument('--prev-kernel-pattern', default='TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL_BF16_ADD', 
                             help='上一个通信kernel的匹配模式，用于确定对比区间 (默认: TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL_BF16_ADD)')
     comm_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
+    comm_parser.add_argument('--show', type=str, default='',
+                            help='显示额外信息，使用逗号分隔的选项:\n'
+                                 '  dtype: 显示数据类型信息\n'
+                                 '  shape: 显示形状和步长信息\n'
+                                 '  kernel-names: 显示kernel名称\n'
+                                 '  kernel-duration: 显示kernel持续时间\n'
+                                 '  timestamp: 显示时间戳\n'
+                                 '  readable-timestamp: 显示可读时间戳\n'
+                                 '  kernel-timestamp: 显示kernel时间戳\n'
+                                 '示例: --show "dtype,shape,kernel-duration"')
     
     # compare 命令 - 分析多个文件并对比
     compare_parser = subparsers.add_parser('compare', help='分析多个 JSON 文件并对比')
@@ -274,6 +288,7 @@ def parse_arguments():
                                     '  kernel-duration: 显示kernel持续时间\n'
                                     '  timestamp: 显示时间戳\n'
                                     '  readable-timestamp: 显示可读时间戳\n'
+                                    '  kernel-timestamp: 显示kernel时间戳\n'
                                     '示例: --show "dtype,shape,kernel-duration"')
     compare_parser.add_argument('--print-markdown', action='store_true', 
                                help='是否在stdout中以markdown格式打印表格 (默认: False)')
@@ -308,6 +323,40 @@ def validate_file(file_path: str) -> bool:
         print(f"警告: 文件可能不是 JSON 格式: {file_path}")
     
     return True
+
+
+def parse_file_paths(file_pattern: str) -> List[str]:
+    """
+    解析文件路径，支持 glob 模式
+    
+    Args:
+        file_pattern: 文件路径模式，支持 glob 通配符
+        
+    Returns:
+        List[str]: 匹配的文件路径列表
+    """
+    # 检查是否包含 glob 通配符
+    if '*' in file_pattern or '?' in file_pattern or '[' in file_pattern:
+        # 使用 glob 模式匹配
+        matched_files = glob.glob(file_pattern)
+        if not matched_files:
+            raise ValueError(f"glob 模式 {file_pattern} 没有匹配到任何文件")
+        
+        # 过滤出 JSON 文件
+        json_files = [f for f in matched_files if f.lower().endswith('.json')]
+        if not json_files:
+            raise ValueError(f"glob 模式 {file_pattern} 没有匹配到任何 JSON 文件")
+        
+        return sorted(json_files)
+    else:
+        # 单个文件路径
+        if not os.path.exists(file_pattern):
+            raise ValueError(f"文件不存在: {file_pattern}")
+        
+        if not file_pattern.lower().endswith('.json'):
+            raise ValueError(f"文件不是 JSON 格式: {file_pattern}")
+        
+        return [file_pattern]
 
 
 def parse_file_label(file_label: str) -> Tuple[List[str], str]:
@@ -353,9 +402,9 @@ def parse_file_label(file_label: str) -> Tuple[List[str], str]:
 
 
 def run_analysis(args):
-    """运行单个文件分析"""
-    print(f"=== 单个文件分析 ===")
-    print(f"文件: {args.file}")
+    """运行单个或多个文件分析"""
+    print(f"=== 文件分析 ===")
+    print(f"文件模式: {args.file}")
     print(f"标签: {args.label}")
     print(f"聚合字段: {args.aggregation}")
     print(f"显示选项: {args.show if args.show else '无'}")
@@ -391,7 +440,19 @@ def run_analysis(args):
     if overlap:
         print(f"警告: 聚合字段 {list(overlap)} 与显示选项重复，将跳过重复的显示列")
     
-    if not validate_file(args.file):
+    # 解析文件路径，支持 glob 模式
+    try:
+        file_paths = parse_file_paths(args.file)
+        if not file_paths:
+            print(f"错误: 没有找到匹配的文件: {args.file}")
+            return 1
+        print(f"找到 {len(file_paths)} 个文件:")
+        for i, file_path in enumerate(file_paths[:5]):  # 只显示前5个
+            print(f"  {i+1}. {file_path}")
+        if len(file_paths) > 5:
+            print(f"  ... 还有 {len(file_paths) - 5} 个文件")
+    except Exception as e:
+        print(f"错误: 解析文件路径失败 - {e}")
         return 1
     
     # 创建输出目录
@@ -404,9 +465,9 @@ def run_analysis(args):
     try:
         start_time = time.time()
         
-        # 使用新的分析流程
-        generated_files = analyzer.analyze_single_file(
-            file_path=args.file,
+        # 使用新的分析流程 - 支持多文件独立解析和聚合
+        generated_files = analyzer.analyze_single_file_with_glob(
+            file_paths=file_paths,
             aggregation_spec=args.aggregation,
             show_dtype=show_options['dtype'],
             show_shape=show_options['shape'],
@@ -414,6 +475,7 @@ def run_analysis(args):
             show_kernel_duration=show_options['kernel_duration'],
             show_timestamp=show_options['timestamp'],
             show_readable_timestamp=show_options['readable_timestamp'],
+            show_kernel_timestamp=show_options['kernel_timestamp'],
             output_dir=str(output_dir),
             label=args.label,
             print_markdown=args.print_markdown
@@ -449,7 +511,16 @@ def run_comm_analysis(args):
     print(f"通信Kernel前缀: {args.kernel_prefix}")
     print(f"上一个通信Kernel模式: {args.prev_kernel_pattern}")
     print(f"输出目录: {args.output_dir}")
+    print(f"显示选项: {args.show if args.show else '无'}")
     print()
+    
+    # 解析show选项
+    try:
+        show_options = parse_show_options(args.show)
+        print(f"显示选项解析: {show_options}")
+    except ValueError as e:
+        print(f"错误: 显示选项解析失败 - {e}")
+        return 1
     
     # 验证pod目录
     pod_path = Path(args.pod_dir)
@@ -480,7 +551,14 @@ def run_comm_analysis(args):
             slowest_card_idx=args.slowest_card_idx,
             kernel_prefix=args.kernel_prefix,
             prev_kernel_pattern=args.prev_kernel_pattern,
-            output_dir=str(output_dir)
+            output_dir=str(output_dir),
+            show_dtype=show_options['dtype'],
+            show_shape=show_options['shape'],
+            show_kernel_names=show_options['kernel_names'],
+            show_kernel_duration=show_options['kernel_duration'],
+            show_timestamp=show_options['timestamp'],
+            show_readable_timestamp=show_options['readable_timestamp'],
+            show_kernel_timestamp=show_options['kernel_timestamp']
         )
         
         total_time = time.time() - start_time
@@ -611,6 +689,7 @@ def run_compare_analysis(args):
             show_kernel_duration=show_options['kernel_duration'],
             show_timestamp=show_options['timestamp'],
             show_readable_timestamp=show_options['readable_timestamp'],
+            show_kernel_timestamp=show_options['kernel_timestamp'],
             special_matmul=args.special_matmul,
             output_dir=str(output_dir),
             compare_dtype=args.compare_dtype,

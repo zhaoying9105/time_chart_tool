@@ -799,6 +799,7 @@ class Analyzer:
                            show_kernel_duration: bool = True,
                            show_timestamp: bool = False,
                            show_readable_timestamp: bool = False,
+                           show_kernel_timestamp: bool = False,
                            special_matmul: bool = False,
                            aggregation_spec: str = 'name',
                            compare_dtype: bool = False,
@@ -825,11 +826,11 @@ class Analyzer:
         print("=== Stage 4: 展示 ===")
         
         if comparison_result['type'] == 'single_file':
-            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, aggregation_spec, label, print_markdown)
+            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, show_kernel_timestamp, aggregation_spec, label, print_markdown)
         elif comparison_result['type'] == 'multiple_files':
             return self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, special_matmul, show_timestamp, show_readable_timestamp, aggregation_spec, compare_dtype, compare_shape, file_labels, print_markdown)
     
-    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, show_timestamp: bool = False, show_readable_timestamp: bool = False, aggregation_spec: str = 'name', label: str = None, print_markdown: bool = False) -> List[Path]:
+    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, show_timestamp: bool = False, show_readable_timestamp: bool = False, show_kernel_timestamp: bool = False, aggregation_spec: str = 'name', label: str = None, print_markdown: bool = False) -> List[Path]:
         """展示单文件数据"""
         print("生成单文件展示结果...")
         
@@ -921,7 +922,7 @@ class Analyzer:
                 row['shapes'] = '\n'.join(sorted(shapes)) if shapes else ''
                 row['strides'] = '\n'.join(sorted(strides)) if strides else ''
             
-            if show_kernel_names or show_kernel_duration:
+            if show_kernel_names or show_kernel_duration or show_kernel_timestamp:
                 # 收集 kernel 信息
                 kernel_stats = self._calculate_kernel_statistics(aggregated_data.kernel_events)
                 if kernel_stats:
@@ -935,6 +936,16 @@ class Analyzer:
                         row['kernel_max_duration'] = max(stats.max_duration for stats in kernel_stats)
                         row['kernel_total_duration'] = op_total_duration
                         row['kernel_duration_ratio'] = (op_total_duration / total_duration * 100) if total_duration > 0 else 0.0
+                    if show_kernel_timestamp:
+                        # 收集kernel时间戳信息
+                        kernel_timestamps = []
+                        for kernel_event in aggregated_data.kernel_events:
+                            if kernel_event.ts is not None:
+                                kernel_timestamps.append(kernel_event.ts)
+                        if kernel_timestamps:
+                            row['kernel_timestamps'] = '\n'.join(map(str, sorted(kernel_timestamps)))
+                        else:
+                            row['kernel_timestamps'] = ''
                 else:
                     row['kernel_count'] = 0
                     if show_kernel_names:
@@ -945,6 +956,8 @@ class Analyzer:
                         row['kernel_max_duration'] = 0.0
                         row['kernel_total_duration'] = 0.0
                         row['kernel_duration_ratio'] = 0.0
+                    if show_kernel_timestamp:
+                        row['kernel_timestamps'] = ''
             
             rows.append(row)
         
@@ -1376,7 +1389,8 @@ class Analyzer:
     
     def analyze_single_file(self, file_path: str, aggregation_spec: str = 'name', 
                            show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, 
-                           show_timestamp: bool = False, show_readable_timestamp: bool = False, output_dir: str = ".", label: str = None, print_markdown: bool = False) -> List[Path]:
+                           show_timestamp: bool = False, show_readable_timestamp: bool = False, show_kernel_timestamp: bool = False,
+                           output_dir: str = ".", label: str = None, print_markdown: bool = False) -> List[Path]:
         """
         分析单个文件的完整流程
         
@@ -1389,6 +1403,7 @@ class Analyzer:
             show_kernel_duration: 是否展示 kernel 持续时间信息
             show_timestamp: 是否展示 CPU 操作启动时间戳
             show_readable_timestamp: 是否展示可读时间戳
+            show_kernel_timestamp: 是否展示 kernel 时间戳
             output_dir: 输出目录
             label: 文件标签
             print_markdown: 是否打印markdown表格
@@ -1408,14 +1423,77 @@ class Analyzer:
         comparison_result = self.stage3_comparison(single_file_data=aggregated_data, aggregation_spec=aggregation_spec)
         
         # Stage 4: 展示
-        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, aggregation_spec=aggregation_spec, label=label, print_markdown=print_markdown)
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, show_kernel_timestamp, aggregation_spec=aggregation_spec, label=label, print_markdown=print_markdown)
         
         print("=== 单文件分析完成 ===")
         return generated_files
     
+    def analyze_single_file_with_glob(self, file_paths: List[str], aggregation_spec: str = 'name', 
+                                    show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, 
+                                    show_timestamp: bool = False, show_readable_timestamp: bool = False, show_kernel_timestamp: bool = False,
+                                    output_dir: str = ".", label: str = None, print_markdown: bool = False) -> List[Path]:
+        """
+        分析多个文件的完整流程，每个文件独立解析，然后一起聚合
+        
+        Args:
+            file_paths: JSON 文件路径列表
+            aggregation_spec: 聚合字段组合
+            show_dtype: 是否展示 dtype 信息
+            show_shape: 是否展示 shape 和 strides 信息
+            show_kernel_names: 是否展示 kernel 名称信息
+            show_kernel_duration: 是否展示 kernel 持续时间信息
+            show_timestamp: 是否展示 CPU 操作启动时间戳
+            show_readable_timestamp: 是否展示可读时间戳
+            show_kernel_timestamp: 是否展示 kernel 时间戳
+            output_dir: 输出目录
+            label: 文件标签
+            print_markdown: 是否打印markdown表格
+        """
+        print(f"=== 开始分析多个文件，共 {len(file_paths)} 个文件 ===")
+        
+        if len(file_paths) == 1:
+            # 只有一个文件，直接使用原来的方法
+            return self.analyze_single_file(
+                file_path=file_paths[0],
+                aggregation_spec=aggregation_spec,
+                show_dtype=show_dtype,
+                show_shape=show_shape,
+                show_kernel_names=show_kernel_names,
+                show_kernel_duration=show_kernel_duration,
+                show_timestamp=show_timestamp,
+                show_readable_timestamp=show_readable_timestamp,
+                show_kernel_timestamp=show_kernel_timestamp,
+                output_dir=output_dir,
+                label=label,
+                print_markdown=print_markdown
+            )
+        
+        # 多个文件，每个文件独立解析
+        print("每个文件独立解析，然后一起聚合...")
+        
+        # 使用多进程并行处理文件
+        max_workers = min(mp.cpu_count(), len(file_paths))
+        print(f"使用 {max_workers} 个进程并行处理文件")
+        
+        # 并行处理所有文件
+        aggregated_data_list = self._process_files_parallel(file_paths, aggregation_spec, max_workers)
+        
+        # 合并所有文件的聚合数据
+        print("合并所有文件的聚合数据...")
+        merged_aggregated_data = self._merge_same_label_files(aggregated_data_list, aggregation_spec)
+        
+        # Stage 3: 比较（单标签多文件无需比较）
+        comparison_result = self.stage3_comparison(single_file_data=merged_aggregated_data, aggregation_spec=aggregation_spec)
+        
+        # Stage 4: 展示
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, show_kernel_timestamp, aggregation_spec=aggregation_spec, label=label, print_markdown=print_markdown)
+        
+        print("=== 多文件分析完成 ===")
+        return generated_files
+    
     def analyze_multiple_files(self, file_labels: List[Tuple[List[str], str]], aggregation_spec: str = 'name',
                               show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, 
-                              show_timestamp: bool = False, show_readable_timestamp: bool = False, special_matmul: bool = False, output_dir: str = ".", compare_dtype: bool = False, compare_shape: bool = False, print_markdown: bool = False, 
+                              show_timestamp: bool = False, show_readable_timestamp: bool = False, show_kernel_timestamp: bool = False, special_matmul: bool = False, output_dir: str = ".", compare_dtype: bool = False, compare_shape: bool = False, print_markdown: bool = False, 
                               max_workers: Optional[int] = None) -> List[Path]:
         """
         分析多个文件的完整流程，支持同一label下多个文件的聚合，使用多进程并行读取JSON文件
@@ -1430,6 +1508,7 @@ class Analyzer:
             show_kernel_duration: 是否展示 kernel 持续时间信息
             show_timestamp: 是否展示 CPU 操作启动时间戳
             show_readable_timestamp: 是否展示可读时间戳
+            show_kernel_timestamp: 是否展示 kernel 时间戳
             special_matmul: 是否进行特殊的 matmul 展示
             output_dir: 输出目录
             compare_dtype: 是否添加 dtype 比较列
@@ -1470,7 +1549,7 @@ class Analyzer:
         
         # Stage 4: 展示
         file_labels_list = [label for _, label in file_labels]
-        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, special_matmul, aggregation_spec, compare_dtype, compare_shape, file_labels_list, print_markdown=print_markdown)
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, show_kernel_timestamp, special_matmul, aggregation_spec, compare_dtype, compare_shape, file_labels_list, print_markdown=print_markdown)
         
         print("=== 多文件分析完成 ===")
         return generated_files
@@ -1647,11 +1726,177 @@ class Analyzer:
         
         print()  # 添加空行
     
+    # ==================== 突变点检测工具函数 ====================
+    
+    def _print_combined_change_points(self, comparison_rows: List[Dict], cpu_start_time_change_points: List[int], 
+                                    kernel_duration_change_points: List[int]):
+        """
+        打印合并的突变点信息，按照操作执行顺序排列
+        
+        Args:
+            comparison_rows: 对比分析结果行
+            cpu_start_time_change_points: CPU启动时间差异突变点索引
+            kernel_duration_change_points: Kernel持续时间差异突变点索引
+        """
+        print("\n=== 突变点详情（按执行顺序） ===")
+        
+        # 合并所有突变点并按索引排序
+        all_change_points = sorted(list(set(cpu_start_time_change_points + kernel_duration_change_points)))
+        
+        if not all_change_points:
+            print("未发现突变点")
+            return
+        
+        for cp_idx in all_change_points:
+            if cp_idx >= len(comparison_rows):
+                continue
+                
+            row = comparison_rows[cp_idx]
+            is_cpu_change = cp_idx in cpu_start_time_change_points
+            is_kernel_change = cp_idx in kernel_duration_change_points
+            
+            # 确定突变类型
+            change_types = []
+            if is_cpu_change:
+                change_types.append("CPU操作")
+            if is_kernel_change:
+                change_types.append("Kernel")
+            change_type_str = " + ".join(change_types)
+            
+            print(f"\n事件 {cp_idx + 1}: {row['cpu_op_name']} [{change_type_str}突变]")
+            
+            # 显示当前事件信息
+            print(f"  当前事件:")
+            print(f"    最快卡时间戳: {row['fastest_cpu_start_time']:.2f}μs")
+            print(f"    最慢卡时间戳: {row['slowest_cpu_start_time']:.2f}μs")
+            print(f"    时间戳差异: {row['cpu_start_time_diff']:.2f}μs")
+            print(f"    CPU启动时间差异比例: {row['cpu_start_time_diff_ratio']:.4f}")
+            print(f"    Kernel持续时间差异比例: {row['kernel_duration_diff_ratio']:.4f}")
+            if row.get('fastest_cpu_readable_timestamp'):
+                print(f"    最快卡可读时间戳: {row['fastest_cpu_readable_timestamp']}")
+            if row.get('slowest_cpu_readable_timestamp'):
+                print(f"    最慢卡可读时间戳: {row['slowest_cpu_readable_timestamp']}")
+            
+            # 显示突变前后的对比
+            if cp_idx > 0:
+                prev_row = comparison_rows[cp_idx - 1]
+                print(f"  突变前事件 {cp_idx}: {prev_row['cpu_op_name']}")
+                print(f"    CPU启动时间差异比例: {prev_row['cpu_start_time_diff_ratio']:.4f}")
+                print(f"    Kernel持续时间差异比例: {prev_row['kernel_duration_diff_ratio']:.4f}")
+            
+            if cp_idx < len(comparison_rows) - 1:
+                next_row = comparison_rows[cp_idx + 1]
+                print(f"  突变后事件 {cp_idx + 2}: {next_row['cpu_op_name']}")
+                print(f"    CPU启动时间差异比例: {next_row['cpu_start_time_diff_ratio']:.4f}")
+                print(f"    Kernel持续时间差异比例: {next_row['kernel_duration_diff_ratio']:.4f}")
+            
+            # 计算突变幅度
+            if is_cpu_change and cp_idx > 0:
+                prev_cpu_ratio = comparison_rows[cp_idx - 1]['cpu_start_time_diff_ratio']
+                curr_cpu_ratio = row['cpu_start_time_diff_ratio']
+                cpu_change_magnitude = curr_cpu_ratio - prev_cpu_ratio
+                print(f"  CPU启动时间差异比例变化: {cpu_change_magnitude:.4f}")
+            
+            if is_kernel_change and cp_idx > 0:
+                prev_kernel_ratio = comparison_rows[cp_idx - 1]['kernel_duration_diff_ratio']
+                curr_kernel_ratio = row['kernel_duration_diff_ratio']
+                kernel_change_magnitude = curr_kernel_ratio - prev_kernel_ratio
+                print(f"  Kernel持续时间差异比例变化: {kernel_change_magnitude:.4f}")
+
+    # ==================== 突变点检测工具函数 ====================
+    
+    def detect_change_points(self, data: List[Dict], ratio_column: str, threshold: float = 0.3) -> List[int]:
+        """
+        检测数据中的突变点
+        
+        Args:
+            data: 数据列表，每个元素是包含ratio_column的字典
+            ratio_column: 要检测的比率列名（如'cpu_start_time_diff_ratio'或'kernel_duration_diff_ratio'）
+            threshold: 突变阈值，超过此值认为是突变点
+            
+        Returns:
+            List[int]: 突变点的索引列表
+        """
+        if len(data) < 3:
+            return []
+        
+        change_points = []
+        ratios = [row.get(ratio_column, 0) for row in data]
+        
+        # 计算一阶导数（差分）
+        for i in range(1, len(ratios) - 1):
+            # 计算前向和后向的差分
+            prev_diff = ratios[i] - ratios[i-1]
+            next_diff = ratios[i+1] - ratios[i]
+            
+            # 如果前向和后向差分符号相反且绝对值都超过阈值，认为是突变点
+            if (prev_diff * next_diff < 0) and (abs(prev_diff) > threshold or abs(next_diff) > threshold):
+                change_points.append(i)
+        
+        # 也检测边界处的突变
+        if len(ratios) >= 2:
+            # 检测第一个点
+            if abs(ratios[1] - ratios[0]) > threshold:
+                change_points.append(0)
+            # 检测最后一个点
+            if abs(ratios[-1] - ratios[-2]) > threshold:
+                change_points.append(len(ratios) - 1)
+        
+        return sorted(list(set(change_points)))
+    
+    def extract_change_point_data(self, data: List[Dict], change_points: List[int], context_size: int = 3) -> List[Dict]:
+        """
+        提取突变点前后的数据
+        
+        Args:
+            data: 原始数据列表
+            change_points: 突变点索引列表
+            context_size: 每个突变点前后保留的行数
+            
+        Returns:
+            List[Dict]: 包含突变点上下文的数据列表
+        """
+        if not change_points:
+            return []
+        
+        extracted_data = []
+        for cp_idx in change_points:
+            # 计算上下文范围
+            start_idx = max(0, cp_idx - context_size)
+            end_idx = min(len(data), cp_idx + context_size + 1)
+            
+            # 添加分隔符
+            if extracted_data:
+                extracted_data.append({
+                    'cpu_op_name': '--- 突变点分隔符 ---',
+                    'cpu_start_time_diff_ratio': '',
+                    'kernel_duration_diff_ratio': '',
+                    'fastest_cpu_start_time': '',
+                    'slowest_cpu_start_time': '',
+                    'cpu_start_time_diff': '',
+                    'fastest_cpu_readable_timestamp': '',
+                    'slowest_cpu_readable_timestamp': '',
+                    'is_change_point': False,
+                    'change_point_index': -1
+                })
+            
+            # 添加上下文数据
+            for i in range(start_idx, end_idx):
+                row = data[i].copy()
+                row['is_change_point'] = (i == cp_idx)
+                row['change_point_index'] = cp_idx
+                extracted_data.append(row)
+        
+        return extracted_data
+
     # ==================== All-to-All 通信性能分析 ====================
     
     def analyze_communication_performance(self, pod_dir: str, step: Optional[int] = None, comm_idx: Optional[int] = None, 
                                          fastest_card_idx: Optional[int] = None, slowest_card_idx: Optional[int] = None,
-                                         kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL", prev_kernel_pattern: str = "TCDP_.*", output_dir: str = ".") -> List[Path]:
+                                         kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL", prev_kernel_pattern: str = "TCDP_.*", output_dir: str = ".",
+                                         show_dtype: bool = False, show_shape: bool = False, show_kernel_names: bool = False, 
+                                         show_kernel_duration: bool = False, show_timestamp: bool = False, 
+                                         show_readable_timestamp: bool = False, show_kernel_timestamp: bool = False) -> List[Path]:
         """
         分析分布式训练中的通信性能
         
@@ -1664,6 +1909,13 @@ class Analyzer:
             kernel_prefix: 要检测的通信kernel前缀
             prev_kernel_pattern: 上一个通信kernel的匹配模式，用于确定对比区间
             output_dir: 输出目录
+            show_dtype: 是否显示数据类型信息
+            show_shape: 是否显示形状和步长信息
+            show_kernel_names: 是否显示kernel名称
+            show_kernel_duration: 是否显示kernel持续时间
+            show_timestamp: 是否显示时间戳
+            show_readable_timestamp: 是否显示可读时间戳
+            show_kernel_timestamp: 是否显示kernel时间戳
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -2245,7 +2497,11 @@ class Analyzer:
             'fastest_duration': fastest_comm_duration,
             'slowest_duration': slowest_comm_duration,
             'duration_ratio': slowest_comm_duration / fastest_comm_duration if fastest_comm_duration > 0 else 0,
-            'comparison_rows': comparison_rows
+            'comparison_rows': comparison_rows['comparison_rows'],
+            'cpu_start_time_change_points': comparison_rows['cpu_start_time_change_points'],
+            'kernel_duration_change_points': comparison_rows['kernel_duration_change_points'],
+            'all_change_points': comparison_rows['all_change_points'],
+            'change_point_data': comparison_rows['change_point_data']
         }
     
     def _find_communication_event(self, data: 'ProfilerData', comm_idx: int, kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL") -> Optional['ActivityEvent']:
@@ -2822,14 +3078,39 @@ class Analyzer:
                 'kernel_duration_diff': kernel_duration_diff,
                 'kernel_duration_diff_ratio': kernel_duration_diff_ratio,
                 'fastest_card_idx': fastest_card_idx,
-                'slowest_card_idx': slowest_card_idx
+                'slowest_card_idx': slowest_card_idx,
+                'fastest_cpu_readable_timestamp': fastest_cpu_event.readable_timestamp,
+                'slowest_cpu_readable_timestamp': slowest_cpu_event.readable_timestamp
             }
             
             comparison_rows.append(row)
         
         print(f"成功比较了 {len(comparison_rows)} 个CPU events")
         
-        return comparison_rows
+        # 9. 检测突变点
+        print("\n=== 检测突变点 ===")
+        cpu_start_time_change_points = self.detect_change_points(comparison_rows, 'cpu_start_time_diff_ratio', threshold=0.3)
+        kernel_duration_change_points = self.detect_change_points(comparison_rows, 'kernel_duration_diff_ratio', threshold=0.3)
+        
+        print(f"CPU启动时间差异突变点: {cpu_start_time_change_points}")
+        print(f"Kernel持续时间差异突变点: {kernel_duration_change_points}")
+        
+        # 10. 打印合并的突变点信息
+        self._print_combined_change_points(comparison_rows, cpu_start_time_change_points, kernel_duration_change_points)
+        
+        # 11. 合并所有突变点
+        all_change_points = sorted(list(set(cpu_start_time_change_points + kernel_duration_change_points)))
+        
+        # 12. 提取突变点数据
+        change_point_data = self.extract_change_point_data(comparison_rows, all_change_points, context_size=3)
+        
+        return {
+            'comparison_rows': comparison_rows,
+            'cpu_start_time_change_points': cpu_start_time_change_points,
+            'kernel_duration_change_points': kernel_duration_change_points,
+            'all_change_points': all_change_points,
+            'change_point_data': change_point_data
+        }
     
     def _find_kernel_events_for_cpu_event(self, cpu_event: 'ActivityEvent', 
                                         events_by_external_id: Dict[Union[int, str], List['ActivityEvent']]) -> List['ActivityEvent']:
@@ -2990,6 +3271,21 @@ class Analyzer:
             # 写入汇总信息
             summary_df = pd.DataFrame([summary_data])
             summary_df.to_excel(writer, sheet_name='汇总信息', index=False)
+            
+            # 写入突变点数据
+            if 'change_point_data' in comparison_result and comparison_result['change_point_data']:
+                change_point_df = pd.DataFrame(comparison_result['change_point_data'])
+                change_point_df.to_excel(writer, sheet_name='突变点分析', index=False)
+                
+                # 写入突变点汇总信息
+                change_point_summary = {
+                    'cpu_start_time_change_points': str(comparison_result.get('cpu_start_time_change_points', [])),
+                    'kernel_duration_change_points': str(comparison_result.get('kernel_duration_change_points', [])),
+                    'all_change_points': str(comparison_result.get('all_change_points', [])),
+                    'total_change_points': len(comparison_result.get('all_change_points', []))
+                }
+                change_point_summary_df = pd.DataFrame([change_point_summary])
+                change_point_summary_df.to_excel(writer, sheet_name='突变点汇总', index=False)
         
         print(f"深度分析Excel文件已生成: {excel_file}")
         
