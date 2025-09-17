@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Time Chart Tool
 
@@ -8,5 +9,5 @@ from .parser import PyTorchProfilerParser
 from .models import ActivityEvent, ProfilerData
 from .analyzer import Analyzer, KernelStatistics
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 __all__ = ["PyTorchProfilerParser", "ActivityEvent", "ProfilerData", "Analyzer", "KernelStatistics"]

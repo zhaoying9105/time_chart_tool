@@ -12,10 +12,95 @@ import time
 import os
 import glob
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 import json
 
 from .analyzer import Analyzer
+
+
+def validate_aggregation_fields(aggregation_spec: str) -> List[str]:
+    """
+    验证聚合字段组合是否合规
+    
+    Args:
+        aggregation_spec: 聚合字段组合字符串
+        
+    Returns:
+        List[str]: 验证后的字段列表
+        
+    Raises:
+        ValueError: 如果字段组合不合法
+    """
+    if not aggregation_spec or not aggregation_spec.strip():
+        raise ValueError("聚合字段不能为空")
+    
+    # 解析字段组合：逗号分隔的字段
+    if ',' in aggregation_spec:
+        fields = [field.strip() for field in aggregation_spec.split(',')]
+    else:
+        fields = [aggregation_spec.strip()]
+    
+    # 验证字段
+    valid_fields = {'call_stack', 'name', 'shape', 'dtype'}
+    for field in fields:
+        if not field:
+            raise ValueError("聚合字段不能为空字符串")
+        if field not in valid_fields:
+            raise ValueError(f"不支持的聚合字段: {field}。支持的字段: {', '.join(sorted(valid_fields))}")
+    
+    # 检查字段重复
+    if len(fields) != len(set(fields)):
+        raise ValueError("聚合字段不能重复")
+    
+    return fields
+
+
+def parse_show_options(show_spec: str) -> Dict[str, bool]:
+    """
+    解析show选项
+    
+    Args:
+        show_spec: show参数字符串，逗号分隔
+        
+    Returns:
+        Dict[str, bool]: 各show选项的开关状态
+    """
+    valid_show_options = {
+        'dtype', 'shape', 'kernel-names', 'kernel-duration', 
+        'timestamp', 'readable-timestamp'
+    }
+    
+    show_options = {
+        'dtype': False,
+        'shape': False, 
+        'kernel_names': False,
+        'kernel_duration': False,
+        'timestamp': False,
+        'readable_timestamp': False
+    }
+    
+    if not show_spec or not show_spec.strip():
+        return show_options
+    
+    # 解析逗号分隔的选项
+    show_args = [arg.strip() for arg in show_spec.split(',')]
+    
+    for arg in show_args:
+        if not arg:
+            continue
+        if arg not in valid_show_options:
+            raise ValueError(f"不支持的show选项: {arg}。支持的选项: {', '.join(sorted(valid_show_options))}")
+        
+        if arg == 'kernel-names':
+            show_options['kernel_names'] = True
+        elif arg == 'kernel-duration':
+            show_options['kernel_duration'] = True
+        elif arg == 'readable-timestamp':
+            show_options['readable_timestamp'] = True
+        else:
+            show_options[arg] = True
+    
+    return show_options
 
 
 def parse_arguments():
@@ -25,70 +110,91 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
-  # 分析单个文件 (基于CPU操作，默认方法，不包含kernel信息)
-  time-chart-tool analysis file.json --label "baseline" --aggregation on_op_name --output-format json,xlsx
+  # 分析单个文件 (按操作名聚合，默认方法)
+  time-chart-tool analysis file.json --label "baseline" --aggregation name --output-format json,xlsx
   
-  # 分析单个文件 (基于CPU操作，输出包含kernel信息)
-  time-chart-tool analysis file.json --label "baseline" --aggregation on_op_name --show-kernel-names --show-kernel-duration --output-format json,xlsx
+  # 分析单个文件 (按操作名聚合，显示kernel信息)
+  time-chart-tool analysis file.json --label "baseline" --aggregation name --show "kernel-names,kernel-duration" --output-format json,xlsx
   
   # 分析单个文件并在stdout中打印markdown表格
-  time-chart-tool analysis file.json --label "baseline" --aggregation on_op_name --show-kernel-duration --print-markdown
+  time-chart-tool analysis file.json --label "baseline" --aggregation name --show "kernel-duration" --print-markdown
   
-  # 分析单个文件 (基于调用栈，输出包含shape和strides信息)
-  time-chart-tool analysis file.json --label "baseline" --aggregation on_call_stack --show-shape --output-format json,xlsx
+  # 分析单个文件 (按调用栈和操作名聚合，显示shape信息)
+  time-chart-tool analysis file.json --label "baseline" --aggregation "call_stack,name" --show "shape" --output-format json,xlsx
   
-  # 分析单个文件 (基于调用栈，输出包含所有信息)
-  time-chart-tool analysis file.json --label "baseline" --aggregation on_call_stack --show-dtype --show-shape --show-kernel-names --show-kernel-duration --output-format json,xlsx
+  # 分析单个文件 (按调用栈和操作名聚合，显示所有信息)
+  time-chart-tool analysis file.json --label "baseline" --aggregation "call_stack,name" --show "dtype,shape,kernel-names,kernel-duration" --output-format json,xlsx
   
-  # 分析单个文件 (按CPU操作启动时间排序)
-  time-chart-tool analysis file.json --label "baseline" --aggregation on_op_timestamp --show-kernel-duration --output-format json,xlsx
+  # 分析单个文件 (按操作名和形状聚合)
+  time-chart-tool analysis file.json --label "baseline" --aggregation "name,shape" --show "dtype" --output-format json,xlsx
+  
+  # 分析单个文件 (按调用栈和操作名聚合)
+  time-chart-tool analysis file.json --label "baseline" --aggregation "call_stack,name" --show "shape" --output-format json,xlsx
+  
+  # 分析单个文件 (按操作名、形状和数据类型聚合)
+  time-chart-tool analysis file.json --label "baseline" --aggregation "name,shape,dtype" --output-format json,xlsx
   
   # 分析单个文件 (显示CPU操作启动时间戳)
-  time-chart-tool analysis file.json --label "baseline" --aggregation on_op_name --show-timestamp --output-format json,xlsx
+  time-chart-tool analysis file.json --label "baseline" --aggregation name --show "timestamp" --output-format json,xlsx
   
-  # 基于CPU操作对比多个文件 (默认方法，输出不包含kernel信息)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_op_name --output-format json,xlsx
+  # 基于操作名对比多个文件 (默认方法)
+  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation name --output-format json,xlsx
   
-  # 基于CPU操作对比多个文件 (输出包含kernel信息)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_op_name --show-kernel-names --show-kernel-duration --output-format json,xlsx
+  # 基于操作名对比多个文件 (显示kernel信息)
+  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation name --show "kernel-names,kernel-duration" --output-format json,xlsx
   
-  # 基于调用栈对比多个文件 (输出包含shape和strides信息)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_call_stack --show-shape --output-format json,xlsx
+  # 基于调用栈和操作名对比多个文件 (显示shape信息)
+  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation "call_stack,name" --show "shape" --output-format json,xlsx
   
-  # 基于调用栈对比多个文件 (输出包含所有信息)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_call_stack --show-dtype --show-shape --show-kernel-names --show-kernel-duration --output-format json,xlsx
+  # 基于调用栈和操作名对比多个文件 (显示所有信息)
+  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation "call_stack,name" --show "dtype,shape,kernel-names,kernel-duration" --output-format json,xlsx
   
-  # 按CPU操作启动时间排序对比多个文件
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_op_timestamp --show-kernel-duration --output-format json,xlsx
+  # 对比多个文件 (按操作名和形状聚合)
+  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation "name,shape" --show "dtype" --output-format json,xlsx
+  
+  # 对比多个文件 (按调用栈和操作名聚合)
+  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation "call_stack,name" --show "shape" --output-format json,xlsx
+  
+  # 对比多个文件 (按操作名、形状和数据类型聚合)
+  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation "name,shape,dtype" --output-format json,xlsx
   
   # 对比多个文件 (显示CPU操作启动时间戳)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation on_op_name --show-timestamp --output-format json,xlsx
+  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation name --show "timestamp" --output-format json,xlsx
   
   # 对比多个文件并包含特殊的matmul分析
-  time-chart-tool compare file1.json:fp32 file2.json:bf16 --aggregation on_op_name --special-matmul --output-format json,xlsx
+  time-chart-tool compare file1.json:fp32 file2.json:bf16 --aggregation name --special-matmul --output-format json,xlsx
   
   # 混合模式：支持单文件、多文件、目录混合使用
-  time-chart-tool compare single_file.json:baseline "dir/*.json":test --aggregation on_op_name --output-format json,xlsx
+  time-chart-tool compare single_file.json:baseline "dir/*.json":test --aggregation name --output-format json,xlsx
   
   # 多文件模式：同一标签下多个文件自动聚合
-  time-chart-tool compare "file1.json,file2.json,file3.json":baseline "file4.json,file5.json":optimized --aggregation on_op_name --output-format json,xlsx
+  time-chart-tool compare "file1.json,file2.json,file3.json":baseline "file4.json,file5.json":optimized --aggregation name --output-format json,xlsx
   
   # 目录模式：自动查找目录下所有json文件
-  time-chart-tool compare step1_results/:baseline step2_results/:optimized --aggregation on_op_name --output-format json,xlsx
+  time-chart-tool compare step1_results/:baseline step2_results/:optimized --aggregation name --output-format json,xlsx
   
   # 控制每个标签的文件数量，确保比较公平性
-  time-chart-tool compare "dir1/*.json":baseline "dir2/*.json":optimized --max-files-per-label 10 --random-seed 42 --aggregation on_op_name
+  time-chart-tool compare "dir1/*.json":baseline "dir2/*.json":optimized --max-files-per-label 10 --random-seed 42 --aggregation name
   
   # 混合模式：单文件 vs 多文件（限制数量）
-  time-chart-tool compare single_file.json:reference "multi_files/*.json":test --max-files-per-label 5 --aggregation on_op_name
+  time-chart-tool compare single_file.json:reference "multi_files/*.json":test --max-files-per-label 5 --aggregation name
+  
+  # 高级聚合示例：按操作名和数据类型对比
+  time-chart-tool compare file1.json:fp32 file2.json:bf16 --aggregation "name,dtype" --output-format json,xlsx
+  
+  # 高级聚合示例：按调用栈和形状对比
+  time-chart-tool compare file1.json:baseline file2.json:optimized --aggregation "call_stack,shape" --show-dtype --output-format json,xlsx
+  
+  # 高级聚合示例：四字段组合聚合
+  time-chart-tool compare file1.json:baseline file2.json:optimized --aggregation "call_stack,name,shape,dtype" --output-format json,xlsx
   
   # 只输出 JSON 格式
-  time-chart-tool analysis file.json --aggregation on_call_stack --output-format json
-  time-chart-tool compare file1.json:fp32 file2.json:tf32 --aggregation on_op_name --output-format json
+  time-chart-tool analysis file.json --aggregation "call_stack,name" --output-format json
+  time-chart-tool compare file1.json:fp32 file2.json:tf32 --aggregation name --output-format json
   
   # 只输出 XLSX 格式
-  time-chart-tool analysis file.json --aggregation on_op_name --output-format xlsx
-  time-chart-tool compare file1.json:baseline file2.json:optimized --aggregation on_call_stack --output-format xlsx
+  time-chart-tool analysis file.json --aggregation name --output-format xlsx
+  time-chart-tool compare file1.json:baseline file2.json:optimized --aggregation "call_stack,name" --output-format xlsx
   
   # 按时间排序分析
   time-chart-tool analysis file.json --aggregation on_op_timestamp --output-format json,xlsx
@@ -106,21 +212,20 @@ def parse_arguments():
     analysis_parser = subparsers.add_parser('analysis', help='分析单个 JSON 文件')
     analysis_parser.add_argument('file', help='要分析的 JSON 文件路径')
     analysis_parser.add_argument('--label', default='single_file', help='文件标签 (默认: single_file)')
-    analysis_parser.add_argument('--aggregation', choices=['on_op_name', 'on_op_shape', 'on_call_stack', 'on_op_timestamp'], 
-                                default='on_op_name',
-                                help='聚合方法: on_op_name (基于操作名) 或 on_op_shape (基于操作形状) 或 on_call_stack (基于调用栈) 或 on_op_timestamp (按CPU操作启动时间排序) (默认: on_op_name)')
-    analysis_parser.add_argument('--show-dtype', action='store_true', 
-                                help='在输出结果时是否展示 dtype 信息 (默认: False)')
-    analysis_parser.add_argument('--show-shape', action='store_true', 
-                                help='在输出结果时是否展示 shape 和 strides 信息 (默认: False)')
-    analysis_parser.add_argument('--show-kernel-names', action='store_true', 
-                                help='在输出结果时是否展示 kernel 名称信息 (默认: False)')
-    analysis_parser.add_argument('--show-kernel-duration', action='store_true', 
-                                help='在输出结果时是否展示 kernel 持续时间信息 (默认: False)')
-    analysis_parser.add_argument('--show-timestamp', action='store_true', 
-                                help='在输出结果时是否展示 CPU 操作启动时间戳 (默认: False)')
-    analysis_parser.add_argument('--show-readable-timestamp', action='store_true', 
-                                help='在输出结果时是否展示可读时间戳 (默认: False)')
+    analysis_parser.add_argument('--aggregation', default='name',
+                                help='聚合字段组合，使用逗号分隔的字段组合\n'
+                                     '支持的字段: call_stack, name, shape, dtype\n'
+                                     '示例: "name" 或 "name,shape" 或 "call_stack,name" 或 "name,shape,dtype"\n'
+                                     '(默认: name)')
+    analysis_parser.add_argument('--show', type=str, default='',
+                                help='显示额外信息，使用逗号分隔的选项:\n'
+                                     '  dtype: 显示数据类型信息\n'
+                                     '  shape: 显示形状和步长信息\n'
+                                     '  kernel-names: 显示kernel名称\n'
+                                     '  kernel-duration: 显示kernel持续时间\n'
+                                     '  timestamp: 显示时间戳\n'
+                                     '  readable-timestamp: 显示可读时间戳\n'
+                                     '示例: --show "dtype,shape,kernel-duration"')
     analysis_parser.add_argument('--print-markdown', action='store_true', 
                                 help='是否在stdout中以markdown格式打印表格 (默认: False)')
     analysis_parser.add_argument('--output-format', default='json,xlsx', 
@@ -156,21 +261,20 @@ def parse_arguments():
                                     '  多文件: "file1.json,file2.json,file3.json":label\n'
                                     '  目录: dir/:label (自动查找所有*.json文件)\n'
                                     '  通配符: "dir/*.json":label')
-    compare_parser.add_argument('--aggregation', choices=['on_op_name', 'on_op_shape', 'on_call_stack', 'on_op_timestamp'], 
-                               default='on_op_name',
-                               help='聚合方法: on_op_name (基于操作名) 或 on_op_shape (基于操作形状) 或 on_call_stack (基于调用栈) 或 on_op_timestamp (按CPU操作启动时间排序) (默认: on_op_name)')
-    compare_parser.add_argument('--show-dtype', action='store_true', 
-                               help='在输出结果时是否展示 dtype 信息 (默认: False)')
-    compare_parser.add_argument('--show-shape', action='store_true', 
-                               help='在输出结果时是否展示 shape 和 strides 信息 (默认: False)')
-    compare_parser.add_argument('--show-kernel-names', action='store_true', 
-                               help='在输出结果时是否展示 kernel 名称信息 (默认: False)')
-    compare_parser.add_argument('--show-kernel-duration', action='store_true', 
-                               help='在输出结果时是否展示 kernel 持续时间信息 (默认: False)')
-    compare_parser.add_argument('--show-timestamp', action='store_true', 
-                               help='在输出结果时是否展示 CPU 操作启动时间戳 (默认: False)')
-    compare_parser.add_argument('--show-readable-timestamp', action='store_true', 
-                               help='在输出结果时是否展示可读时间戳 (默认: False)')
+    compare_parser.add_argument('--aggregation', default='name',
+                               help='聚合字段组合，使用逗号分隔的字段组合\n'
+                                    '支持的字段: call_stack, name, shape, dtype\n'
+                                    '示例: "name" 或 "name,shape" 或 "call_stack,name" 或 "name,shape,dtype"\n'
+                                    '(默认: name)')
+    compare_parser.add_argument('--show', type=str, default='',
+                               help='显示额外信息，使用逗号分隔的选项:\n'
+                                    '  dtype: 显示数据类型信息\n'
+                                    '  shape: 显示形状和步长信息\n'
+                                    '  kernel-names: 显示kernel名称\n'
+                                    '  kernel-duration: 显示kernel持续时间\n'
+                                    '  timestamp: 显示时间戳\n'
+                                    '  readable-timestamp: 显示可读时间戳\n'
+                                    '示例: --show "dtype,shape,kernel-duration"')
     compare_parser.add_argument('--print-markdown', action='store_true', 
                                help='是否在stdout中以markdown格式打印表格 (默认: False)')
     compare_parser.add_argument('--special-matmul', action='store_true',
@@ -253,17 +357,39 @@ def run_analysis(args):
     print(f"=== 单个文件分析 ===")
     print(f"文件: {args.file}")
     print(f"标签: {args.label}")
-    print(f"聚合方法: {args.aggregation}")
-    print(f"展示dtype: {args.show_dtype}")
-    print(f"展示shape: {args.show_shape}")
-    print(f"展示kernel名称: {args.show_kernel_names}")
-    print(f"展示kernel持续时间: {args.show_kernel_duration}")
-    print(f"展示时间戳: {args.show_timestamp}")
-    print(f"展示可读时间戳: {args.show_readable_timestamp}")
+    print(f"聚合字段: {args.aggregation}")
+    print(f"显示选项: {args.show if args.show else '无'}")
     print(f"打印markdown表格: {args.print_markdown}")
     print(f"输出格式: {args.output_format}")
     print(f"输出目录: {args.output_dir}")
     print()
+    
+    # 验证聚合字段
+    try:
+        aggregation_fields = validate_aggregation_fields(args.aggregation)
+        print(f"聚合字段验证通过: {aggregation_fields}")
+    except ValueError as e:
+        print(f"错误: 聚合字段验证失败 - {e}")
+        return 1
+    
+    # 解析show选项
+    try:
+        show_options = parse_show_options(args.show)
+        print(f"显示选项: {show_options}")
+    except ValueError as e:
+        print(f"错误: 显示选项解析失败 - {e}")
+        return 1
+    
+    # 检查聚合字段和显示选项是否重复
+    show_fields = set()
+    for option, enabled in show_options.items():
+        if enabled and option in ['dtype', 'shape']:
+            show_fields.add(option)
+    
+    aggregation_fields_set = set(aggregation_fields)
+    overlap = show_fields.intersection(aggregation_fields_set)
+    if overlap:
+        print(f"警告: 聚合字段 {list(overlap)} 与显示选项重复，将跳过重复的显示列")
     
     if not validate_file(args.file):
         return 1
@@ -281,13 +407,13 @@ def run_analysis(args):
         # 使用新的分析流程
         generated_files = analyzer.analyze_single_file(
             file_path=args.file,
-            aggregation_type=args.aggregation,
-            show_dtype=args.show_dtype,
-            show_shape=args.show_shape,
-            show_kernel_names=args.show_kernel_names,
-            show_kernel_duration=args.show_kernel_duration,
-            show_timestamp=args.show_timestamp,
-            show_readable_timestamp=args.show_readable_timestamp,
+            aggregation_spec=args.aggregation,
+            show_dtype=show_options['dtype'],
+            show_shape=show_options['shape'],
+            show_kernel_names=show_options['kernel_names'],
+            show_kernel_duration=show_options['kernel_duration'],
+            show_timestamp=show_options['timestamp'],
+            show_readable_timestamp=show_options['readable_timestamp'],
             output_dir=str(output_dir),
             label=args.label,
             print_markdown=args.print_markdown
@@ -377,13 +503,8 @@ def run_comm_analysis(args):
 def run_compare_analysis(args):
     """运行多文件对比分析"""
     print(f"=== 多文件对比分析 ===")
-    print(f"聚合方法: {args.aggregation}")
-    print(f"展示dtype: {args.show_dtype}")
-    print(f"展示shape: {args.show_shape}")
-    print(f"展示kernel名称: {args.show_kernel_names}")
-    print(f"展示kernel持续时间: {args.show_kernel_duration}")
-    print(f"展示时间戳: {args.show_timestamp}")
-    print(f"展示可读时间戳: {args.show_readable_timestamp}")
+    print(f"聚合字段: {args.aggregation}")
+    print(f"显示选项: {args.show if args.show else '无'}")
     print(f"打印markdown表格: {args.print_markdown}")
     print(f"特殊matmul: {args.special_matmul}")
     print(f"每个标签最大文件数: {args.max_files_per_label if args.max_files_per_label else '不限制'}")
@@ -391,6 +512,33 @@ def run_compare_analysis(args):
     print(f"输出格式: {args.output_format}")
     print(f"输出目录: {args.output_dir}")
     print()
+    
+    # 验证聚合字段
+    try:
+        aggregation_fields = validate_aggregation_fields(args.aggregation)
+        print(f"聚合字段验证通过: {aggregation_fields}")
+    except ValueError as e:
+        print(f"错误: 聚合字段验证失败 - {e}")
+        return 1
+    
+    # 解析show选项
+    try:
+        show_options = parse_show_options(args.show)
+        print(f"显示选项: {show_options}")
+    except ValueError as e:
+        print(f"错误: 显示选项解析失败 - {e}")
+        return 1
+    
+    # 检查聚合字段和显示选项是否重复
+    show_fields = set()
+    for option, enabled in show_options.items():
+        if enabled and option in ['dtype', 'shape']:
+            show_fields.add(option)
+    
+    aggregation_fields_set = set(aggregation_fields)
+    overlap = show_fields.intersection(aggregation_fields_set)
+    if overlap:
+        print(f"警告: 聚合字段 {list(overlap)} 与显示选项重复，将跳过重复的显示列")
     
     # 解析文件列表
     file_labels = []
@@ -456,13 +604,13 @@ def run_compare_analysis(args):
         # 使用新的分析流程
         generated_files = analyzer.analyze_multiple_files(
             file_labels=file_labels,
-            aggregation_type=args.aggregation,
-            show_dtype=args.show_dtype,
-            show_shape=args.show_shape,
-            show_kernel_names=args.show_kernel_names,
-            show_kernel_duration=args.show_kernel_duration,
-            show_timestamp=args.show_timestamp,
-            show_readable_timestamp=args.show_readable_timestamp,
+            aggregation_spec=args.aggregation,
+            show_dtype=show_options['dtype'],
+            show_shape=show_options['shape'],
+            show_kernel_names=show_options['kernel_names'],
+            show_kernel_duration=show_options['kernel_duration'],
+            show_timestamp=show_options['timestamp'],
+            show_readable_timestamp=show_options['readable_timestamp'],
             special_matmul=args.special_matmul,
             output_dir=str(output_dir),
             compare_dtype=args.compare_dtype,

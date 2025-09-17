@@ -6,7 +6,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="time-chart-tool",
-    version="1.0.2",
+    version="1.0.3",
     author="PyTorch Profiler Parser Team",
     description="一个用于解析 PyTorch profiler 时间图表 JSON 数据的工具库",
     long_description="",

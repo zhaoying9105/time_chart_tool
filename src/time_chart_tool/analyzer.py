@@ -44,13 +44,13 @@ class AggregatedData:
     key: str  # 聚合键（op_name, op_shape, call_stack等）
 
 
-def _process_single_file_parallel(file_path: str, aggregation_type: str) -> Tuple[str, Dict[Union[str, tuple], 'AggregatedData']]:
+def _process_single_file_parallel(file_path: str, aggregation_spec: str) -> Tuple[str, Dict[Union[str, tuple], 'AggregatedData']]:
     """
     并行处理单个文件的函数
     
     Args:
         file_path: JSON文件路径
-        aggregation_type: 聚合类型
+        aggregation_spec: 聚合字段组合
         
     Returns:
         Tuple[str, Dict]: (文件路径, 聚合后的数据)
@@ -69,7 +69,7 @@ def _process_single_file_parallel(file_path: str, aggregation_type: str) -> Tupl
         cpu_events_by_external_id, kernel_events_by_external_id = analyzer.stage1_data_postprocessing(data)
         
         # Stage 2: 数据聚合
-        aggregated_data = analyzer.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_type)
+        aggregated_data = analyzer.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec)
         
         return file_path, aggregated_data
         
@@ -291,35 +291,111 @@ class Analyzer:
     
     # ==================== Stage 2: 数据聚合 ====================
     
+    def _generate_aggregation_key(self, cpu_event: ActivityEvent, aggregation_fields: List[str]) -> Union[str, tuple]:
+        """
+        根据指定的字段生成聚合键
+        
+        Args:
+            cpu_event: CPU事件
+            aggregation_fields: 聚合字段列表，支持: call_stack, name, shape, dtype
+            
+        Returns:
+            Union[str, tuple]: 聚合键
+        """
+        key_parts = []
+        
+        for field in aggregation_fields:
+            if field == 'call_stack':
+                if cpu_event.call_stack is not None:
+                    normalized_call_stack = self._normalize_call_stack(cpu_event.call_stack)
+                    if normalized_call_stack:
+                        key_parts.append(tuple(normalized_call_stack))
+                    else:
+                        key_parts.append(None)
+                else:
+                    key_parts.append(None)
+            elif field == 'name':
+                key_parts.append(cpu_event.name)
+            elif field == 'shape':
+                args = cpu_event.args or {}
+                input_dims = args.get('Input Dims', [])
+                # 递归地将嵌套列表转换为元组，使其可哈希
+                def list_to_tuple(obj):
+                    if isinstance(obj, list):
+                        return tuple(list_to_tuple(item) for item in obj)
+                    elif isinstance(obj, (int, float, str, bool)) or obj is None:
+                        return obj
+                    else:
+                        return str(obj)  # 对于其他类型，转换为字符串
+                key_parts.append(list_to_tuple(input_dims))
+            elif field == 'dtype':
+                args = cpu_event.args or {}
+                dtype = args.get('Input type', 'unknown')
+                # 确保dtype是可哈希的
+                if isinstance(dtype, (list, dict)):
+                    dtype = str(dtype)
+                key_parts.append(dtype)
+            else:
+                raise ValueError(f"不支持的聚合字段: {field}")
+        
+        # 如果只有一个字段且不是None，直接返回该字段
+        if len(key_parts) == 1 and key_parts[0] is not None:
+            return key_parts[0]
+        
+        # 否则返回元组
+        return tuple(key_parts)
+    
+    def _parse_aggregation_fields(self, aggregation_spec: str) -> List[str]:
+        """
+        解析聚合字段组合
+        
+        Args:
+            aggregation_spec: 聚合字段组合字符串，如 "name,shape" 或 "call_stack,name"
+            
+        Returns:
+            List[str]: 聚合字段列表
+        """
+        # 解析字段组合：逗号分隔的字段
+        if ',' in aggregation_spec:
+            fields = [field.strip() for field in aggregation_spec.split(',')]
+        else:
+            fields = [aggregation_spec.strip()]
+        
+        # 验证字段
+        valid_fields = {'call_stack', 'name', 'shape', 'dtype'}
+        for field in fields:
+            if field not in valid_fields:
+                raise ValueError(f"不支持的聚合字段: {field}。支持的字段: {', '.join(valid_fields)}")
+        
+        return fields
+    
     def stage2_data_aggregation(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
                                kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
-                               aggregation_type: str = 'on_op_name') -> Dict[Union[str, tuple], AggregatedData]:
+                               aggregation_spec: str = 'name') -> Dict[Union[str, tuple], AggregatedData]:
         """
         Stage 2: 数据聚合
-        分成四种聚合方式：
-        - on_op_name: 形成cpu_op event name -> cpu_op event list & 对应 kernel event list extend
-        - on_op_shape: 形成cpu_op event name & shape & strides -> cpu_op event list & 对应 kernel event list extend  
-        - on_call_stack: 形成(cpu_op call stack & cpu_op_name) -> cpu_op event list & 对应 kernel event list extend
-        - on_op_timestamp: 按CPU操作启动时间排序，每个操作单独一个条目
+        支持灵活的字段组合聚合：
+        - 支持的字段: call_stack, name, shape, dtype
+        - 使用逗号分隔的字段组合，如 "name,shape" 或 "call_stack,name,dtype"
         
         Args:
             cpu_events_by_external_id: external_id -> cpu_events 映射
             kernel_events_by_external_id: external_id -> kernel_events 映射
-            aggregation_type: 聚合类型 ('on_op_name', 'on_op_shape', 'on_call_stack', 'on_op_timestamp')
+            aggregation_spec: 聚合字段组合字符串
             
         Returns:
-            Dict[str, AggregatedData]: 聚合后的数据
+            Dict[Union[str, tuple], AggregatedData]: 聚合后的数据
         """
-        print(f"=== Stage 2: 数据聚合 ({aggregation_type}) ===")
+        print(f"=== Stage 2: 数据聚合 ({aggregation_spec}) ===")
         
-        if aggregation_type == 'on_call_stack':
-            # on_call_stack 需要特殊处理，因为需要合并相似的调用栈
-            return self._aggregate_on_call_stack(cpu_events_by_external_id, kernel_events_by_external_id)
+        # 解析聚合字段组合
+        aggregation_fields = self._parse_aggregation_fields(aggregation_spec)
         
-        if aggregation_type == 'on_op_timestamp':
-            # on_op_timestamp 需要特殊处理，按时间排序
-            return self._aggregate_on_op_timestamp(cpu_events_by_external_id, kernel_events_by_external_id)
+        if 'call_stack' in aggregation_fields:
+            # 包含调用栈的聚合需要特殊处理，因为需要合并相似的调用栈
+            return self._aggregate_with_call_stack(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_fields)
         
+        # 普通聚合处理
         aggregated_data = defaultdict(lambda: AggregatedData([], [], ""))
         
         for external_id in cpu_events_by_external_id:
@@ -327,29 +403,152 @@ class Analyzer:
             kernel_events = kernel_events_by_external_id.get(external_id, [])
             
             for cpu_event in cpu_events:
-                if aggregation_type == 'on_op_name':
-                    key = cpu_event.name
-                elif aggregation_type == 'on_op_shape':
-                    # 组合 name, shape, strides 为 tuple
-                    args = cpu_event.args or {}
-                    input_dims = args.get('Input Dims', [])
-                    input_strides = args.get('Input Strides', [])
-                    # 递归地将嵌套列表转换为元组，使其可哈希
-                    def list_to_tuple(obj):
-                        if isinstance(obj, list):
-                            return tuple(list_to_tuple(item) for item in obj)
-                        return obj
-                    key = (cpu_event.name, list_to_tuple(input_dims), list_to_tuple(input_strides))
-                else:
-                    raise ValueError(f"未知的聚合类型: {aggregation_type}")
-                
-                aggregated_data[key].cpu_events.append(cpu_event)
-                aggregated_data[key].kernel_events.extend(kernel_events)
-                aggregated_data[key].key = key
+                try:
+                    key = self._generate_aggregation_key(cpu_event, aggregation_fields)
+                    aggregated_data[key].cpu_events.append(cpu_event)
+                    aggregated_data[key].kernel_events.extend(kernel_events)
+                    aggregated_data[key].key = key
+                except Exception as e:
+                    print(f"警告: 跳过事件 {cpu_event.name}，错误: {e}")
+                    continue
         
         print(f"聚合后得到 {len(aggregated_data)} 个不同的键")
         
         return dict(aggregated_data)
+    
+    def _aggregate_with_call_stack(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
+                                  kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
+                                  aggregation_fields: List[str]) -> Dict[Union[str, tuple], AggregatedData]:
+        """
+        处理包含调用栈的聚合，实现 startswith 合并逻辑
+        
+        Args:
+            cpu_events_by_external_id: external_id -> cpu_events 映射
+            kernel_events_by_external_id: external_id -> kernel_events 映射
+            aggregation_fields: 聚合字段列表
+            
+        Returns:
+            Dict[Union[str, tuple], AggregatedData]: 聚合后的数据
+        """
+        aggregated_data = defaultdict(lambda: AggregatedData([], [], ""))
+        
+        for external_id in cpu_events_by_external_id:
+            cpu_events = cpu_events_by_external_id[external_id]
+            kernel_events = kernel_events_by_external_id.get(external_id, [])
+            
+            for cpu_event in cpu_events:
+                if cpu_event.call_stack is None:
+                    continue  # 跳过没有 call stack 的事件
+                
+                try:
+                    new_key = self._generate_aggregation_key(cpu_event, aggregation_fields)
+                    
+                    # 检查是否已有相似的调用栈（使用startswith判断）
+                    existing_key = None
+                    for existing_key_candidate in aggregated_data.keys():
+                        if self._is_similar_call_stack_key(new_key, existing_key_candidate, aggregation_fields):
+                            # 保留较长的调用栈
+                            if self._should_keep_new_key(new_key, existing_key_candidate, aggregation_fields):
+                                existing_key = new_key
+                            else:
+                                existing_key = existing_key_candidate
+                            break
+                    
+                    if existing_key:
+                        # 合并到现有键
+                        aggregated_data[existing_key].cpu_events.append(cpu_event)
+                        aggregated_data[existing_key].kernel_events.extend(kernel_events)
+                    else:
+                        # 创建新键
+                        aggregated_data[new_key] = AggregatedData(
+                            cpu_events=[cpu_event],
+                            kernel_events=kernel_events,
+                            key=new_key
+                        )
+                except Exception as e:
+                    print(f"警告: 跳过事件 {cpu_event.name}，错误: {e}")
+                    continue
+        
+        print(f"聚合后得到 {len(aggregated_data)} 个不同的键")
+        
+        return dict(aggregated_data)
+    
+    def _is_similar_call_stack_key(self, key1: Union[str, tuple], key2: Union[str, tuple], aggregation_fields: List[str]) -> bool:
+        """
+        判断两个键是否相似（调用栈部分使用startswith判断）
+        
+        Args:
+            key1: 第一个键
+            key2: 第二个键
+            aggregation_fields: 聚合字段列表
+            
+        Returns:
+            bool: 是否相似
+        """
+        # 确保键是元组格式
+        if not isinstance(key1, tuple):
+            key1 = (key1,)
+        if not isinstance(key2, tuple):
+            key2 = (key2,)
+        
+        # 检查非调用栈字段是否相同
+        for i, field in enumerate(aggregation_fields):
+            if field != 'call_stack':
+                if i < len(key1) and i < len(key2) and key1[i] != key2[i]:
+                    return False
+        
+        # 检查调用栈字段
+        call_stack_idx = aggregation_fields.index('call_stack') if 'call_stack' in aggregation_fields else -1
+        if call_stack_idx >= 0 and call_stack_idx < len(key1) and call_stack_idx < len(key2):
+            call_stack1 = key1[call_stack_idx]
+            call_stack2 = key2[call_stack_idx]
+            
+            if call_stack1 is None or call_stack2 is None:
+                return False
+            
+            # 将调用栈转换为字符串进行比较
+            call_stack1_str = ' -> '.join(call_stack1) if isinstance(call_stack1, tuple) else str(call_stack1)
+            call_stack2_str = ' -> '.join(call_stack2) if isinstance(call_stack2, tuple) else str(call_stack2)
+            
+            return (call_stack1_str.startswith(call_stack2_str) or 
+                    call_stack2_str.startswith(call_stack1_str))
+        
+        return False
+    
+    def _should_keep_new_key(self, new_key: Union[str, tuple], existing_key: Union[str, tuple], aggregation_fields: List[str]) -> bool:
+        """
+        判断是否应该保留新键（保留较长的调用栈）
+        
+        Args:
+            new_key: 新键
+            existing_key: 现有键
+            aggregation_fields: 聚合字段列表
+            
+        Returns:
+            bool: 是否保留新键
+        """
+        call_stack_idx = aggregation_fields.index('call_stack') if 'call_stack' in aggregation_fields else -1
+        if call_stack_idx < 0:
+            return False
+        
+        # 确保键是元组格式
+        if not isinstance(new_key, tuple):
+            new_key = (new_key,)
+        if not isinstance(existing_key, tuple):
+            existing_key = (existing_key,)
+        
+        if (call_stack_idx < len(new_key) and call_stack_idx < len(existing_key) and
+            new_key[call_stack_idx] is not None and existing_key[call_stack_idx] is not None):
+            
+            new_call_stack = new_key[call_stack_idx]
+            existing_call_stack = existing_key[call_stack_idx]
+            
+            new_len = len(new_call_stack) if isinstance(new_call_stack, tuple) else 1
+            existing_len = len(existing_call_stack) if isinstance(existing_call_stack, tuple) else 1
+            
+            return new_len > existing_len
+        
+        return False
     
     def _aggregate_on_call_stack(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
                                 kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]]) -> Dict[Union[str, tuple], AggregatedData]:
@@ -420,7 +619,7 @@ class Analyzer:
     
     def stage3_comparison(self, single_file_data: Optional[Dict[Union[str, tuple], AggregatedData]] = None,
                          multiple_files_data: Optional[Dict[str, Dict[Union[str, tuple], AggregatedData]]] = None,
-                         aggregation_type: str = 'on_op_name') -> Dict[str, Any]:
+                         aggregation_spec: str = 'name') -> Dict[str, Any]:
         """
         Stage 3: 比较
         区分处理单个 time tracing json 还是 多个 time tracing json
@@ -445,12 +644,12 @@ class Analyzer:
         elif single_file_data is None and multiple_files_data is not None:
             # 多个 time tracing json - 进行跨文件聚合
             print(f"处理多个文件，共 {len(multiple_files_data)} 个文件")
-            return self._merge_multiple_files_data(multiple_files_data, aggregation_type)
+            return self._merge_multiple_files_data(multiple_files_data, aggregation_spec)
         
         else:
             raise ValueError("必须提供 single_file_data 或 multiple_files_data 中的一个")
     
-    def _merge_multiple_files_data(self, multiple_files_data: Dict[str, Dict[Union[str, tuple], AggregatedData]], aggregation_type: str = 'on_op_name') -> Dict[str, Any]:
+    def _merge_multiple_files_data(self, multiple_files_data: Dict[str, Dict[Union[str, tuple], AggregatedData]], aggregation_spec: str = 'name') -> Dict[str, Any]:
         """
         合并多个文件的聚合数据
         
@@ -460,8 +659,10 @@ class Analyzer:
         Returns:
             Dict[str, Any]: 合并后的数据
         """
-        if aggregation_type == 'on_call_stack':
-            # on_call_stack 需要特殊处理，合并相似的调用栈
+        # 检查是否包含调用栈字段，需要特殊处理
+        aggregation_fields = self._parse_aggregation_fields(aggregation_spec)
+        if 'call_stack' in aggregation_fields:
+            # 包含调用栈的聚合需要特殊处理，合并相似的调用栈
             return self._merge_multiple_files_call_stack(multiple_files_data)
         
         # 收集所有唯一的键
@@ -599,7 +800,7 @@ class Analyzer:
                            show_timestamp: bool = False,
                            show_readable_timestamp: bool = False,
                            special_matmul: bool = False,
-                           aggregation_type: str = 'on_op_name',
+                           aggregation_spec: str = 'name',
                            compare_dtype: bool = False,
                            compare_shape: bool = False,
                            file_labels: List[str] = None,
@@ -624,11 +825,11 @@ class Analyzer:
         print("=== Stage 4: 展示 ===")
         
         if comparison_result['type'] == 'single_file':
-            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, aggregation_type, label, print_markdown)
+            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, aggregation_spec, label, print_markdown)
         elif comparison_result['type'] == 'multiple_files':
-            return self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, special_matmul, show_timestamp, show_readable_timestamp, aggregation_type, compare_dtype, compare_shape, file_labels, print_markdown)
+            return self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, special_matmul, show_timestamp, show_readable_timestamp, aggregation_spec, compare_dtype, compare_shape, file_labels, print_markdown)
     
-    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, show_timestamp: bool = False, show_readable_timestamp: bool = False, aggregation_type: str = 'on_op_name', label: str = None, print_markdown: bool = False) -> List[Path]:
+    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, show_timestamp: bool = False, show_readable_timestamp: bool = False, aggregation_spec: str = 'name', label: str = None, print_markdown: bool = False) -> List[Path]:
         """展示单文件数据"""
         print("生成单文件展示结果...")
         
@@ -657,48 +858,52 @@ class Analyzer:
                 else:
                     row['cpu_start_timestamp'] = 0.0
             
-            # 根据聚合类型生成相应的列
-            if aggregation_type == 'on_op_name':
-                # 字符串键：操作名称
-                row.update({
-                    'op_name': key,
-                    'cpu_event_count': len(aggregated_data.cpu_events)
-                })
-            elif aggregation_type == 'on_op_shape':
-                # tuple键：(op_name, input_dims, input_strides)
-                op_name, input_dims, input_strides = key
-                row.update({
-                    'op_name': op_name,
-                    'input_dims': str(input_dims),
-                    'input_strides': str(input_strides),
-                    'cpu_event_count': len(aggregated_data.cpu_events)
-                })
-            elif aggregation_type == 'on_call_stack':
-                # tuple键：(call_stack_tuple, op_name)
-                call_stack_tuple, op_name = key
-                call_stack_str = ' -> '.join(call_stack_tuple)
-                row.update({
-                    'call_stack': call_stack_str,
-                    'op_name': op_name,
-                    'cpu_event_count': len(aggregated_data.cpu_events)
-                })
+            # 根据聚合字段组合生成相应的列
+            aggregation_fields = self._parse_aggregation_fields(aggregation_spec)
+            
+            # 解析键的各个部分
+            if isinstance(key, tuple):
+                key_parts = list(key)
             else:
-                # 未知聚合类型，使用通用格式
-                row.update({
-                    'key': str(key),
-                    'cpu_event_count': len(aggregated_data.cpu_events)
-                })
+                key_parts = [key]
+            
+            # 为每个字段添加对应的列
+            for i, field in enumerate(aggregation_fields):
+                if i < len(key_parts) and key_parts[i] is not None:
+                    if field == 'name':
+                        row['op_name'] = key_parts[i]
+                    elif field == 'shape':
+                        row['input_dims'] = str(key_parts[i])
+                    elif field == 'call_stack':
+                        call_stack_str = ' -> '.join(key_parts[i]) if isinstance(key_parts[i], tuple) else str(key_parts[i])
+                        row['call_stack'] = call_stack_str
+                    elif field == 'dtype':
+                        row['input_type'] = str(key_parts[i])
+                else:
+                    if field == 'name':
+                        row['op_name'] = 'None'
+                    elif field == 'shape':
+                        row['input_dims'] = 'None'
+                    elif field == 'call_stack':
+                        row['call_stack'] = 'None'
+                    elif field == 'dtype':
+                        row['input_type'] = 'None'
+            
+            row['cpu_event_count'] = len(aggregated_data.cpu_events)
             
             if show_dtype:
-                # 收集 dtype 种类信息
-                dtypes = set()
-                for cpu_event in aggregated_data.cpu_events:
-                    args = cpu_event.args or {}
-                    input_types = args.get('Input type', [])
-                    # 将每个event的输入类型信息作为一个整体来记录
-                    if input_types:
-                        dtypes.add(str(input_types))
-                row['dtypes'] = '\n'.join(sorted(dtypes)) if dtypes else ''
+                # 检查聚合字段是否已经包含dtype，如果包含则不重复添加dtypes列
+                aggregation_fields = self._parse_aggregation_fields(aggregation_spec)
+                if 'dtype' not in aggregation_fields:
+                    # 收集 dtype 种类信息
+                    dtypes = set()
+                    for cpu_event in aggregated_data.cpu_events:
+                        args = cpu_event.args or {}
+                        input_types = args.get('Input type', [])
+                        # 将每个event的输入类型信息作为一个整体来记录
+                        if input_types:
+                            dtypes.add(str(input_types))
+                    row['dtypes'] = '\n'.join(sorted(dtypes)) if dtypes else ''
             
             if show_shape:
                 # 收集 shape 和 strides 种类信息
@@ -753,7 +958,7 @@ class Analyzer:
         base_name = f"{label}_analysis" if label else "single_file_analysis"
         return self._generate_output_files(rows, output_dir, base_name)
     
-    def _present_multiple_files(self, data: Dict[str, Any], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, special_matmul: bool, show_timestamp: bool = False, show_readable_timestamp: bool = False, aggregation_type: str = 'on_op_name', compare_dtype: bool = False, compare_shape: bool = False, file_labels: List[str] = None, print_markdown: bool = False) -> List[Path]:
+    def _present_multiple_files(self, data: Dict[str, Any], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, special_matmul: bool, show_timestamp: bool = False, show_readable_timestamp: bool = False, aggregation_spec: str = 'name', compare_dtype: bool = False, compare_shape: bool = False, file_labels: List[str] = None, print_markdown: bool = False) -> List[Path]:
         """展示多文件数据"""
         print("生成多文件展示结果...")
         
@@ -790,29 +995,36 @@ class Analyzer:
                             break
                 row['cpu_start_timestamp'] = first_timestamp if first_timestamp is not None else 0.0
             
-            # 根据聚合类型生成相应的列
-            if aggregation_type == 'on_op_name':
-                # 字符串键：操作名称
-                row.update({'op_name': key})
-            elif aggregation_type == 'on_op_shape':
-                # tuple键：(op_name, input_dims, input_strides)
-                op_name, input_dims, input_strides = key
-                row.update({
-                    'op_name': op_name,
-                    'input_dims': str(input_dims),
-                    'input_strides': str(input_strides)
-                })
-            elif aggregation_type == 'on_call_stack':
-                # tuple键：(call_stack_tuple, op_name)
-                call_stack_tuple, op_name = key
-                call_stack_str = ' -> '.join(call_stack_tuple)
-                row.update({
-                    'call_stack': call_stack_str,
-                    'op_name': op_name
-                })
+            # 根据聚合字段组合生成相应的列
+            aggregation_fields = self._parse_aggregation_fields(aggregation_spec)
+            
+            # 解析键的各个部分
+            if isinstance(key, tuple):
+                key_parts = list(key)
             else:
-                # 未知聚合类型，使用通用格式
-                row.update({'key': str(key)})
+                key_parts = [key]
+            
+            # 为每个字段添加对应的列
+            for i, field in enumerate(aggregation_fields):
+                if i < len(key_parts) and key_parts[i] is not None:
+                    if field == 'name':
+                        row['op_name'] = key_parts[i]
+                    elif field == 'shape':
+                        row['input_dims'] = str(key_parts[i])
+                    elif field == 'call_stack':
+                        call_stack_str = ' -> '.join(key_parts[i]) if isinstance(key_parts[i], tuple) else str(key_parts[i])
+                        row['call_stack'] = call_stack_str
+                    elif field == 'dtype':
+                        row['input_type'] = str(key_parts[i])
+                else:
+                    if field == 'name':
+                        row['op_name'] = 'None'
+                    elif field == 'shape':
+                        row['input_dims'] = 'None'
+                    elif field == 'call_stack':
+                        row['call_stack'] = 'None'
+                    elif field == 'dtype':
+                        row['input_type'] = 'None'
             
             # 为每个文件添加数据
             for label, file_data in entry['files'].items():
@@ -1162,7 +1374,7 @@ class Analyzer:
     
     # ==================== 完整的分析流程 ====================
     
-    def analyze_single_file(self, file_path: str, aggregation_type: str = 'on_op_name', 
+    def analyze_single_file(self, file_path: str, aggregation_spec: str = 'name', 
                            show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, 
                            show_timestamp: bool = False, show_readable_timestamp: bool = False, output_dir: str = ".", label: str = None, print_markdown: bool = False) -> List[Path]:
         """
@@ -1170,7 +1382,7 @@ class Analyzer:
         
         Args:
             file_path: JSON 文件路径
-            aggregation_type: 聚合类型
+            aggregation_spec: 聚合字段组合
             show_dtype: 是否展示 dtype 信息
             show_shape: 是否展示 shape 和 strides 信息
             show_kernel_names: 是否展示 kernel 名称信息
@@ -1190,18 +1402,18 @@ class Analyzer:
         cpu_events_by_external_id, kernel_events_by_external_id = self.stage1_data_postprocessing(data)
         
         # Stage 2: 数据聚合
-        aggregated_data = self.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_type)
+        aggregated_data = self.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec)
         
         # Stage 3: 比较（单文件无需比较）
-        comparison_result = self.stage3_comparison(single_file_data=aggregated_data, aggregation_type=aggregation_type)
+        comparison_result = self.stage3_comparison(single_file_data=aggregated_data, aggregation_spec=aggregation_spec)
         
         # Stage 4: 展示
-        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, aggregation_type=aggregation_type, label=label, print_markdown=print_markdown)
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, aggregation_spec=aggregation_spec, label=label, print_markdown=print_markdown)
         
         print("=== 单文件分析完成 ===")
         return generated_files
     
-    def analyze_multiple_files(self, file_labels: List[Tuple[List[str], str]], aggregation_type: str = 'on_op_name',
+    def analyze_multiple_files(self, file_labels: List[Tuple[List[str], str]], aggregation_spec: str = 'name',
                               show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, 
                               show_timestamp: bool = False, show_readable_timestamp: bool = False, special_matmul: bool = False, output_dir: str = ".", compare_dtype: bool = False, compare_shape: bool = False, print_markdown: bool = False, 
                               max_workers: Optional[int] = None) -> List[Path]:
@@ -1211,7 +1423,7 @@ class Analyzer:
         Args:
             file_labels: [(file_paths, label), ...] 文件路径列表和标签的列表
                         每个label可以对应多个文件，会自动聚合
-            aggregation_type: 聚合类型
+            aggregation_spec: 聚合字段组合
             show_dtype: 是否展示 dtype 信息
             show_shape: 是否展示 shape 和 strides 信息
             show_kernel_names: 是否展示 kernel 名称信息
@@ -1242,7 +1454,7 @@ class Analyzer:
             print(f"正在分析标签: {label} ({len(file_paths)} 个文件)")
             
             # 使用多进程并行处理文件
-            label_aggregated_data_list = self._process_files_parallel(file_paths, aggregation_type, max_workers)
+            label_aggregated_data_list = self._process_files_parallel(file_paths, aggregation_spec, max_workers)
             
             # 聚合同一标签下的多个文件
             if len(label_aggregated_data_list) == 1:
@@ -1251,25 +1463,25 @@ class Analyzer:
             else:
                 # 多个文件，进行聚合
                 print(f"  聚合 {len(label_aggregated_data_list)} 个文件的数据...")
-                multiple_files_data[label] = self._merge_same_label_files(label_aggregated_data_list, aggregation_type)
+                multiple_files_data[label] = self._merge_same_label_files(label_aggregated_data_list, aggregation_spec)
         
         # Stage 3: 比较（多文件比较）
-        comparison_result = self.stage3_comparison(multiple_files_data=multiple_files_data, aggregation_type=aggregation_type)
+        comparison_result = self.stage3_comparison(multiple_files_data=multiple_files_data, aggregation_spec=aggregation_spec)
         
         # Stage 4: 展示
         file_labels_list = [label for _, label in file_labels]
-        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, special_matmul, aggregation_type, compare_dtype, compare_shape, file_labels_list, print_markdown=print_markdown)
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, special_matmul, aggregation_spec, compare_dtype, compare_shape, file_labels_list, print_markdown=print_markdown)
         
         print("=== 多文件分析完成 ===")
         return generated_files
     
-    def _process_files_parallel(self, file_paths: List[str], aggregation_type: str, max_workers: int) -> List[Dict[Union[str, tuple], 'AggregatedData']]:
+    def _process_files_parallel(self, file_paths: List[str], aggregation_spec: str, max_workers: int) -> List[Dict[Union[str, tuple], 'AggregatedData']]:
         """
         使用多进程并行处理文件列表
         
         Args:
             file_paths: 文件路径列表
-            aggregation_type: 聚合类型
+            aggregation_spec: 聚合字段组合
             max_workers: 最大工作进程数
             
         Returns:
@@ -1279,7 +1491,7 @@ class Analyzer:
             # 只有一个文件，直接处理
             file_path = file_paths[0]
             print(f"  处理文件: {file_path}")
-            _, aggregated_data = _process_single_file_parallel(file_path, aggregation_type)
+            _, aggregated_data = _process_single_file_parallel(file_path, aggregation_spec)
             return [aggregated_data]
         
         # 多个文件，使用进程池并行处理
@@ -1289,7 +1501,7 @@ class Analyzer:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             # 提交所有任务
             future_to_file = {
-                executor.submit(_process_single_file_parallel, file_path, aggregation_type): file_path 
+                executor.submit(_process_single_file_parallel, file_path, aggregation_spec): file_path 
                 for file_path in file_paths
             }
             
@@ -1309,13 +1521,13 @@ class Analyzer:
         
         return aggregated_data_list
     
-    def _merge_same_label_files(self, aggregated_data_list: List[Dict[Union[str, tuple], 'AggregatedData']], aggregation_type: str) -> Dict[Union[str, tuple], 'AggregatedData']:
+    def _merge_same_label_files(self, aggregated_data_list: List[Dict[Union[str, tuple], 'AggregatedData']], aggregation_spec: str) -> Dict[Union[str, tuple], 'AggregatedData']:
         """
         聚合同一标签下的多个文件的聚合数据
         
         Args:
             aggregated_data_list: 多个文件的聚合数据列表
-            aggregation_type: 聚合类型
+            aggregation_spec: 聚合字段组合
             
         Returns:
             合并后的聚合数据
