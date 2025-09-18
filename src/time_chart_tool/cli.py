@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Time Chart Tool 命令行工具 - 重构版本
 
@@ -41,7 +42,7 @@ def validate_aggregation_fields(aggregation_spec: str) -> List[str]:
         fields = [aggregation_spec.strip()]
     
     # 验证字段
-    valid_fields = {'call_stack', 'name', 'shape', 'dtype'}
+    valid_fields = {'call_stack', 'name', 'shape', 'dtype', 'op_index'}
     for field in fields:
         if not field:
             raise ValueError("聚合字段不能为空字符串")
@@ -67,7 +68,7 @@ def parse_show_options(show_spec: str) -> Dict[str, bool]:
     """
     valid_show_options = {
         'dtype', 'shape', 'kernel-names', 'kernel-duration', 
-        'timestamp', 'readable-timestamp', 'kernel-timestamp'
+        'timestamp', 'readable-timestamp', 'kernel-timestamp', 'name'
     }
     
     show_options = {
@@ -77,7 +78,8 @@ def parse_show_options(show_spec: str) -> Dict[str, bool]:
         'kernel_duration': False,
         'timestamp': False,
         'readable_timestamp': False,
-        'kernel_timestamp': False
+        'kernel_timestamp': False,
+        'name': False
     }
     
     if not show_spec or not show_spec.strip():
@@ -104,6 +106,44 @@ def parse_show_options(show_spec: str) -> Dict[str, bool]:
             show_options[arg] = True
     
     return show_options
+
+
+def parse_compare_options(compare_spec: str) -> Dict[str, bool]:
+    """
+    解析compare选项
+    
+    Args:
+        compare_spec: compare参数字符串，逗号分隔
+        
+    Returns:
+        Dict[str, bool]: 各compare选项的开关状态
+    """
+    valid_compare_options = {
+        'dtype', 'shape', 'name', 'kernel_name'
+    }
+    
+    compare_options = {
+        'dtype': False,
+        'shape': False,
+        'name': False,
+        'kernel_name': False
+    }
+    
+    if not compare_spec or not compare_spec.strip():
+        return compare_options
+    
+    # 解析逗号分隔的选项
+    compare_args = [arg.strip() for arg in compare_spec.split(',')]
+    
+    for arg in compare_args:
+        if not arg:
+            continue
+        if arg not in valid_compare_options:
+            raise ValueError(f"不支持的compare选项: {arg}。支持的选项: {', '.join(sorted(valid_compare_options))}")
+        
+        compare_options[arg] = True
+    
+    return compare_options
 
 
 def parse_arguments():
@@ -229,7 +269,8 @@ def parse_arguments():
                                      '  timestamp: 显示时间戳\n'
                                      '  readable-timestamp: 显示可读时间戳\n'
                                      '  kernel-timestamp: 显示kernel时间戳\n'
-                                     '示例: --show "dtype,shape,kernel-duration"')
+                                     '  name: 显示cpu_op名称\n'
+                                     '示例: --show "dtype,shape,kernel-duration,name"')
     analysis_parser.add_argument('--print-markdown', action='store_true', 
                                 help='是否在stdout中以markdown格式打印表格 (默认: False)')
     analysis_parser.add_argument('--drop', choices=['comm'], default=None,
@@ -291,15 +332,19 @@ def parse_arguments():
                                     '  timestamp: 显示时间戳\n'
                                     '  readable-timestamp: 显示可读时间戳\n'
                                     '  kernel-timestamp: 显示kernel时间戳\n'
-                                    '示例: --show "dtype,shape,kernel-duration"')
+                                    '  name: 显示cpu_op名称\n'
+                                    '示例: --show "dtype,shape,kernel-duration,name"')
     compare_parser.add_argument('--print-markdown', action='store_true', 
                                help='是否在stdout中以markdown格式打印表格 (默认: False)')
     compare_parser.add_argument('--special-matmul', action='store_true',
                                help='是否进行特殊的 matmul 分析 (默认: False)')
-    compare_parser.add_argument('--compare-dtype', action='store_true',
-                               help='是否添加 dtype 比较列 (默认: False)')
-    compare_parser.add_argument('--compare-shape', action='store_true',
-                               help='是否添加 shape 比较列 (默认: False)')
+    compare_parser.add_argument('--compare', type=str, default='',
+                               help='比较选项，使用逗号分隔的选项:\n'
+                                    '  dtype: 比较数据类型\n'
+                                    '  shape: 比较形状\n'
+                                    '  name: 比较操作名称\n'
+                                    '  kernel_name: 比较kernel名称\n'
+                                    '示例: --compare "dtype,shape,name"')
     compare_parser.add_argument('--max-files-per-label', type=int, default=None,
                                help='每个标签最多使用的文件数量，用于随机采样确保比较公平性 (默认: 不限制)')
     compare_parser.add_argument('--random-seed', type=int, default=42,
@@ -611,6 +656,14 @@ def run_compare_analysis(args):
         print(f"错误: 显示选项解析失败 - {e}")
         return 1
     
+    # 解析compare选项
+    try:
+        compare_options = parse_compare_options(args.compare)
+        print(f"比较选项: {compare_options}")
+    except ValueError as e:
+        print(f"错误: 比较选项解析失败 - {e}")
+        return 1
+    
     # 检查聚合字段和显示选项是否重复
     show_fields = set()
     for option, enabled in show_options.items():
@@ -694,10 +747,12 @@ def run_compare_analysis(args):
             show_timestamp=show_options['timestamp'],
             show_readable_timestamp=show_options['readable_timestamp'],
             show_kernel_timestamp=show_options['kernel_timestamp'],
+            show_name=show_options['name'],
             special_matmul=args.special_matmul,
             output_dir=str(output_dir),
-            compare_dtype=args.compare_dtype,
-            compare_shape=args.compare_shape,
+            compare_dtype=compare_options['dtype'],
+            compare_shape=compare_options['shape'],
+            compare_name=compare_options['name'],
             print_markdown=args.print_markdown,
             max_workers=args.max_workers
         )

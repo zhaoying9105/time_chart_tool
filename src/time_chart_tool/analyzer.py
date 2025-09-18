@@ -412,6 +412,9 @@ class Analyzer:
                 if isinstance(dtype, (list, dict)):
                     dtype = str(dtype)
                 key_parts.append(dtype)
+            elif field == 'op_index':
+                # op_index需要特殊处理，这里先返回None，后续在聚合时处理
+                key_parts.append(None)
             else:
                 raise ValueError(f"不支持的聚合字段: {field}")
         
@@ -439,7 +442,7 @@ class Analyzer:
             fields = [aggregation_spec.strip()]
         
         # 验证字段
-        valid_fields = {'call_stack', 'name', 'shape', 'dtype'}
+        valid_fields = {'call_stack', 'name', 'shape', 'dtype', 'op_index'}
         for field in fields:
             if field not in valid_fields:
                 raise ValueError(f"不支持的聚合字段: {field}。支持的字段: {', '.join(valid_fields)}")
@@ -472,6 +475,10 @@ class Analyzer:
             # 包含调用栈的聚合需要特殊处理，因为需要合并相似的调用栈
             return self._aggregate_with_call_stack(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_fields)
         
+        if 'op_index' in aggregation_fields:
+            # 包含op_index的聚合需要特殊处理，按时间顺序排列
+            return self._aggregate_with_op_index(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_fields)
+        
         # 普通聚合处理
         aggregated_data = defaultdict(lambda: AggregatedData([], [], ""))
         
@@ -492,6 +499,93 @@ class Analyzer:
         print(f"聚合后得到 {len(aggregated_data)} 个不同的键")
         
         return dict(aggregated_data)
+    
+    def _aggregate_with_op_index(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
+                                kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
+                                aggregation_fields: List[str]) -> Dict[Union[str, tuple], AggregatedData]:
+        """
+        处理包含op_index的聚合，按执行顺序(ts从小到大)排列cpu_op
+        
+        Args:
+            cpu_events_by_external_id: external_id -> cpu_events 映射
+            kernel_events_by_external_id: external_id -> kernel_events 映射
+            aggregation_fields: 聚合字段列表
+            
+        Returns:
+            Dict[Union[str, tuple], AggregatedData]: 聚合后的数据
+        """
+        print("=== 按op_index聚合，按执行顺序排列 ===")
+        
+        # 收集所有CPU事件并按时间排序
+        all_cpu_events = []
+        for external_id in cpu_events_by_external_id:
+            cpu_events = cpu_events_by_external_id[external_id]
+            all_cpu_events.extend(cpu_events)
+        
+        # 按启动时间排序
+        all_cpu_events.sort(key=lambda x: x.ts if x.ts is not None else 0)
+        
+        print(f"找到 {len(all_cpu_events)} 个CPU操作，按启动时间排序")
+        
+        # 创建聚合数据，每个操作按索引排列
+        aggregated_data = {}
+        
+        for i, cpu_event in enumerate(all_cpu_events):
+            # 生成聚合键，将op_index替换为实际的索引
+            key_parts = []
+            for field in aggregation_fields:
+                if field == 'op_index':
+                    key_parts.append(i)  # 使用实际的操作索引
+                elif field == 'call_stack':
+                    if cpu_event.call_stack is not None:
+                        normalized_call_stack = self._normalize_call_stack(cpu_event.call_stack)
+                        if normalized_call_stack:
+                            key_parts.append(tuple(normalized_call_stack))
+                        else:
+                            key_parts.append(None)
+                    else:
+                        key_parts.append(None)
+                elif field == 'name':
+                    key_parts.append(cpu_event.name)
+                elif field == 'shape':
+                    args = cpu_event.args or {}
+                    input_dims = args.get('Input Dims', [])
+                    def list_to_tuple(obj):
+                        if isinstance(obj, list):
+                            return tuple(list_to_tuple(item) for item in obj)
+                        elif isinstance(obj, (int, float, str, bool)) or obj is None:
+                            return obj
+                        else:
+                            return str(obj)
+                    key_parts.append(list_to_tuple(input_dims))
+                elif field == 'dtype':
+                    args = cpu_event.args or {}
+                    dtype = args.get('Input type', 'unknown')
+                    if isinstance(dtype, (list, dict)):
+                        dtype = str(dtype)
+                    key_parts.append(dtype)
+            
+            # 生成键
+            if len(key_parts) == 1 and key_parts[0] is not None:
+                key = key_parts[0]
+            else:
+                key = tuple(key_parts)
+            
+            # 找到对应的kernel事件
+            kernel_events = []
+            if cpu_event.external_id is not None:
+                kernel_events = kernel_events_by_external_id.get(cpu_event.external_id, [])
+            
+            # 创建聚合数据条目
+            aggregated_data[key] = AggregatedData(
+                cpu_events=[cpu_event],
+                kernel_events=kernel_events,
+                key=key
+            )
+        
+        print(f"聚合后得到 {len(aggregated_data)} 个按索引排序的操作")
+        
+        return aggregated_data
     
     def _aggregate_with_call_stack(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
                                   kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
@@ -877,10 +971,12 @@ class Analyzer:
                            show_timestamp: bool = False,
                            show_readable_timestamp: bool = False,
                            show_kernel_timestamp: bool = False,
+                           show_name: bool = False,
                            special_matmul: bool = False,
                            aggregation_spec: str = 'name',
                            compare_dtype: bool = False,
                            compare_shape: bool = False,
+                           compare_name: bool = False,
                            file_labels: List[str] = None,
                            label: str = None,
                            print_markdown: bool = False,
@@ -905,11 +1001,11 @@ class Analyzer:
         print("=== Stage 4: 展示 ===")
         
         if comparison_result['type'] == 'single_file':
-            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, show_kernel_timestamp, aggregation_spec, label, print_markdown, per_rank_stats)
+            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, show_kernel_timestamp, show_name, aggregation_spec, label, print_markdown, per_rank_stats)
         elif comparison_result['type'] == 'multiple_files':
-            return self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, special_matmul, show_timestamp, show_readable_timestamp, aggregation_spec, compare_dtype, compare_shape, file_labels, print_markdown)
+            return self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, special_matmul, show_timestamp, show_readable_timestamp, show_name, aggregation_spec, compare_dtype, compare_shape, compare_name, file_labels, print_markdown)
     
-    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, show_timestamp: bool = False, show_readable_timestamp: bool = False, show_kernel_timestamp: bool = False, aggregation_spec: str = 'name', label: str = None, print_markdown: bool = False, per_rank_stats: Dict[str, Dict[str, int]] = None) -> List[Path]:
+    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, show_timestamp: bool = False, show_readable_timestamp: bool = False, show_kernel_timestamp: bool = False, show_name: bool = False, aggregation_spec: str = 'name', label: str = None, print_markdown: bool = False, per_rank_stats: Dict[str, Dict[str, int]] = None) -> List[Path]:
         """展示单文件数据"""
         print("生成单文件展示结果...")
         
@@ -1024,6 +1120,13 @@ class Analyzer:
                 row['shapes'] = '\n'.join(sorted(shapes)) if shapes else ''
                 row['strides'] = '\n'.join(sorted(strides)) if strides else ''
             
+            if show_name:
+                # 收集 cpu_op 名称信息
+                names = set()
+                for cpu_event in aggregated_data.cpu_events:
+                    names.add(cpu_event.name)
+                row['cpu_op_names'] = '\n'.join(sorted(names)) if names else ''
+            
             if show_kernel_names or show_kernel_duration or show_kernel_timestamp:
                 # 收集 kernel 信息
                 kernel_stats = self._calculate_kernel_statistics(aggregated_data.kernel_events)
@@ -1073,7 +1176,7 @@ class Analyzer:
         base_name = f"{label}_analysis" if label else "single_file_analysis"
         return self._generate_output_files(rows, output_dir, base_name)
     
-    def _present_multiple_files(self, data: Dict[str, Any], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, special_matmul: bool, show_timestamp: bool = False, show_readable_timestamp: bool = False, aggregation_spec: str = 'name', compare_dtype: bool = False, compare_shape: bool = False, file_labels: List[str] = None, print_markdown: bool = False) -> List[Path]:
+    def _present_multiple_files(self, data: Dict[str, Any], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, special_matmul: bool, show_timestamp: bool = False, show_readable_timestamp: bool = False, show_name: bool = False, aggregation_spec: str = 'name', compare_dtype: bool = False, compare_shape: bool = False, compare_name: bool = False, file_labels: List[str] = None, print_markdown: bool = False) -> List[Path]:
         """展示多文件数据"""
         print("生成多文件展示结果...")
         
@@ -1173,6 +1276,13 @@ class Analyzer:
                     row[f'{label}_shapes'] = '\n'.join(sorted(shapes)) if shapes else ''
                     row[f'{label}_strides'] = '\n'.join(sorted(strides)) if strides else ''
                 
+                if show_name:
+                    # 收集 cpu_op 名称信息
+                    names = set()
+                    for cpu_event in cpu_events:
+                        names.add(cpu_event.name)
+                    row[f'{label}_cpu_op_names'] = '\n'.join(sorted(names)) if names else ''
+                
                 if show_kernel_names or show_kernel_duration:
                     kernel_stats = self._calculate_kernel_statistics(kernel_events)
                     if kernel_stats:
@@ -1198,7 +1308,7 @@ class Analyzer:
                             row[f'{label}_kernel_duration_ratio'] = 0.0
             
             # 添加比较列
-            if compare_dtype or compare_shape or show_kernel_duration:
+            if compare_dtype or compare_shape or compare_name or show_kernel_duration:
                 # 获取所有文件的标签
                 file_labels = list(entry['files'].keys())
                 if len(file_labels) >= 2:
@@ -1238,6 +1348,15 @@ class Analyzer:
                                 # 将单个event的input_dims转换为字符串
                                 shapes2.add(str(input_dims))
                         row['shape_equal'] = shapes1 == shapes2
+                    
+                    if compare_name:
+                        names1 = set()
+                        names2 = set()
+                        for cpu_event in entry['files'][label1]['cpu_events']:
+                            names1.add(cpu_event.name)
+                        for cpu_event in entry['files'][label2]['cpu_events']:
+                            names2.add(cpu_event.name)
+                        row['name_equal'] = names1 == names2
                     
                     # 添加 mean duration ratio 比较
                     if show_kernel_duration:
@@ -1601,7 +1720,7 @@ class Analyzer:
     
     def analyze_multiple_files(self, file_labels: List[Tuple[List[str], str]], aggregation_spec: str = 'name',
                               show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, 
-                              show_timestamp: bool = False, show_readable_timestamp: bool = False, show_kernel_timestamp: bool = False, special_matmul: bool = False, output_dir: str = ".", compare_dtype: bool = False, compare_shape: bool = False, print_markdown: bool = False, 
+                              show_timestamp: bool = False, show_readable_timestamp: bool = False, show_kernel_timestamp: bool = False, show_name: bool = False, special_matmul: bool = False, output_dir: str = ".", compare_dtype: bool = False, compare_shape: bool = False, compare_name: bool = False, print_markdown: bool = False, 
                               max_workers: Optional[int] = None) -> List[Path]:
         """
         分析多个文件的完整流程，支持同一label下多个文件的聚合，使用多进程并行读取JSON文件
@@ -1657,7 +1776,7 @@ class Analyzer:
         
         # Stage 4: 展示
         file_labels_list = [label for _, label in file_labels]
-        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, show_kernel_timestamp, special_matmul, aggregation_spec, compare_dtype, compare_shape, file_labels_list, print_markdown=print_markdown)
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, show_kernel_timestamp, show_name, special_matmul, aggregation_spec, compare_dtype, compare_shape, compare_name, file_labels_list, print_markdown=print_markdown)
         
         print("=== 多文件分析完成 ===")
         return generated_files
