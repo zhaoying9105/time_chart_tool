@@ -132,6 +132,49 @@ def parse_compare_options(compare_spec: str) -> Dict[str, bool]:
     return compare_options
 
 
+def validate_filter_options(include_op: str = None, exclude_op: str = None, 
+                           include_kernel: str = None, exclude_kernel: str = None) -> None:
+    """
+    验证过滤选项是否合规
+    
+    Args:
+        include_op: 包含的操作名称模式
+        exclude_op: 排除的操作名称模式
+        include_kernel: 包含的kernel名称模式
+        exclude_kernel: 排除的kernel名称模式
+        
+    Raises:
+        ValueError: 如果选项组合不合法
+    """
+    # 检查 include_op 和 exclude_op 不能同时存在
+    if include_op and exclude_op:
+        raise ValueError("--include-op 和 --exclude-op 不能同时使用")
+    
+    # 检查 include_kernel 和 exclude_kernel 不能同时存在
+    if include_kernel and exclude_kernel:
+        raise ValueError("--include-kernel 和 --exclude-kernel 不能同时使用")
+
+
+def parse_filter_patterns(pattern_str: str) -> List[str]:
+    """
+    解析过滤模式字符串
+    
+    Args:
+        pattern_str: 逗号分隔的模式字符串
+        
+    Returns:
+        List[str]: 解析后的模式列表
+    """
+    if not pattern_str or not pattern_str.strip():
+        return []
+    
+    patterns = [pattern.strip() for pattern in pattern_str.split(',')]
+    # 过滤掉空字符串
+    patterns = [pattern for pattern in patterns if pattern]
+    
+    return patterns
+
+
 def validate_file(file_path: str) -> bool:
     """验证文件是否存在且为 JSON 格式"""
     from pathlib import Path

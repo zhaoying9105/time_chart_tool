@@ -27,9 +27,13 @@ class Analyzer:
     
     # ==================== Stage 1: 数据后处理 ====================
     
-    def stage1_data_postprocessing(self, data, drop_type: str = None):
+    def stage1_data_postprocessing(self, data, 
+                                 include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
+                                 include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None):
         """Stage 1: 数据后处理"""
-        return self.postprocessor.stage1_data_postprocessing(data, drop_type)
+        return self.postprocessor.stage1_data_postprocessing(data, 
+                                                           include_op_patterns, exclude_op_patterns,
+                                                           include_kernel_patterns, exclude_kernel_patterns)
     
     # ==================== Stage 2: 数据聚合 ====================
     
@@ -56,8 +60,7 @@ class Analyzer:
                            show_kernel_names: bool = False, show_kernel_duration: bool = False,
                            show_timestamp: bool = False, show_readable_timestamp: bool = False,
                            show_kernel_timestamp: bool = False, show_name: bool = False,
-                           output_dir: str = ".", label: str = None, print_markdown: bool = False,
-                           drop_type: str = None) -> List[Path]:
+                           output_dir: str = ".", label: str = None, print_markdown: bool = False) -> List[Path]:
         """
         分析单个文件
         
@@ -75,7 +78,6 @@ class Analyzer:
             output_dir: 输出目录
             label: 文件标签
             print_markdown: 是否打印markdown表格
-            drop_type: 丢弃类型
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -86,7 +88,7 @@ class Analyzer:
         data = self.parser.load_json_file(file_path)
         
         # Stage 1: 数据后处理
-        cpu_events_by_external_id, kernel_events_by_external_id = self.stage1_data_postprocessing(data, drop_type)
+        cpu_events_by_external_id, kernel_events_by_external_id = self.stage1_data_postprocessing(data)
         
         # Stage 2: 数据聚合
         aggregated_data = self.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec)
@@ -118,8 +120,7 @@ class Analyzer:
                                      show_kernel_names: bool = False, show_kernel_duration: bool = False,
                                      show_timestamp: bool = False, show_readable_timestamp: bool = False,
                                      show_kernel_timestamp: bool = False, show_name: bool = False,
-                                     output_dir: str = ".", label: str = None, print_markdown: bool = False,
-                                     drop_type: str = None) -> List[Path]:
+                                     output_dir: str = ".", label: str = None, print_markdown: bool = False) -> List[Path]:
         """
         分析多个文件（使用glob模式）
         
@@ -137,7 +138,6 @@ class Analyzer:
             output_dir: 输出目录
             label: 文件标签
             print_markdown: 是否打印markdown表格
-            drop_type: 丢弃类型
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -145,7 +145,7 @@ class Analyzer:
         print(f"=== 分析多个文件: {len(file_paths)} 个文件 ===")
         
         # 并行处理文件
-        aggregated_data_list = self._process_files_parallel(file_paths, aggregation_spec, mp.cpu_count(), drop_type)
+        aggregated_data_list = self._process_files_parallel(file_paths, aggregation_spec, mp.cpu_count())
         
         # 合并相同标签的文件
         merged_data = self._merge_same_label_files(aggregated_data_list, aggregation_spec)
@@ -183,7 +183,9 @@ class Analyzer:
                               show_kernel_timestamp: bool = False, show_name: bool = False,
                               special_matmul: bool = False, output_dir: str = ".",
                               compare_dtype: bool = False, compare_shape: bool = False, compare_name: bool = False,
-                              print_markdown: bool = False, max_workers: int = None) -> List[Path]:
+                              print_markdown: bool = False, max_workers: int = None,
+                              include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
+                              include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None) -> List[Path]:
         """
         分析多个文件并对比
         
@@ -205,6 +207,10 @@ class Analyzer:
             compare_name: 是否比较名称
             print_markdown: 是否打印markdown表格
             max_workers: 最大工作进程数
+            include_op_patterns: 包含的操作名称模式列表
+            exclude_op_patterns: 排除的操作名称模式列表
+            include_kernel_patterns: 包含的kernel名称模式列表
+            exclude_kernel_patterns: 排除的kernel名称模式列表
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -217,7 +223,9 @@ class Analyzer:
         
         for file_paths, label in file_labels:
             # 并行处理文件
-            aggregated_data_list = self._process_files_parallel(file_paths, aggregation_spec, max_workers or mp.cpu_count())
+            aggregated_data_list = self._process_files_parallel(file_paths, aggregation_spec, max_workers or mp.cpu_count(), 
+                                                              include_op_patterns, exclude_op_patterns,
+                                                              include_kernel_patterns, exclude_kernel_patterns)
             
             # 合并相同标签的文件
             merged_data = self._merge_same_label_files(aggregated_data_list, aggregation_spec)
@@ -295,7 +303,9 @@ class Analyzer:
     
     # ==================== 辅助方法 ====================
     
-    def _process_files_parallel(self, file_paths: List[str], aggregation_spec: str, max_workers: int, drop_type: str = None) -> List[Dict[Union[str, tuple], AggregatedData]]:
+    def _process_files_parallel(self, file_paths: List[str], aggregation_spec: str, max_workers: int, 
+                              include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
+                              include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None) -> List[Dict[Union[str, tuple], AggregatedData]]:
         """
         并行处理文件
         
@@ -303,7 +313,10 @@ class Analyzer:
             file_paths: 文件路径列表
             aggregation_spec: 聚合字段组合
             max_workers: 最大工作进程数
-            drop_type: 丢弃类型
+            include_op_patterns: 包含的操作名称模式列表
+            exclude_op_patterns: 排除的操作名称模式列表
+            include_kernel_patterns: 包含的kernel名称模式列表
+            exclude_kernel_patterns: 排除的kernel名称模式列表
             
         Returns:
             List[Dict[Union[str, tuple], AggregatedData]]: 每个文件的聚合数据列表
@@ -315,7 +328,8 @@ class Analyzer:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             # 提交任务
             future_to_file = {
-                executor.submit(process_single_file_parallel, file_path, aggregation_spec, drop_type): file_path
+                executor.submit(process_single_file_parallel, file_path, aggregation_spec,
+                              include_op_patterns, exclude_op_patterns, include_kernel_patterns, exclude_kernel_patterns): file_path
                 for file_path in file_paths
             }
             

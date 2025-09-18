@@ -2,11 +2,13 @@
 数据后处理阶段
 """
 
+import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Tuple, Union, Optional
 
 from ...models import ActivityEvent, ProfilerData
+from ..utils.data_structures import AggregatedData
 
 
 class DataPostProcessor:
@@ -15,15 +17,22 @@ class DataPostProcessor:
     def __init__(self):
         pass
     
-    def stage1_data_postprocessing(self, data: ProfilerData, drop_type: str = None) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
+    def stage1_data_postprocessing(self, data: ProfilerData, 
+                                 include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
+                                 include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
         """
         Stage 1: 数据后处理
         1. 时间戳标准化已在parser中完成
         2. 根据 cpu_op event & kernel event 的external id 分类，形成两个map
         3. 然后对一个 external id 下的 cpu_event 进行call stack 合并，保留call stack 最长的哪个 event
+        4. 根据过滤模式过滤操作和kernel事件
         
         Args:
             data: ProfilerData 对象
+            include_op_patterns: 包含的操作名称模式列表
+            exclude_op_patterns: 排除的操作名称模式列表
+            include_kernel_patterns: 包含的kernel名称模式列表
+            exclude_kernel_patterns: 排除的kernel名称模式列表
             
         Returns:
             Tuple[Dict[external_id, cpu_events], Dict[external_id, kernel_events]]: 
@@ -46,14 +55,17 @@ class DataPostProcessor:
         print(f"找到 {len(cpu_events_by_external_id)} 个有 cpu_op 的 external_id")
         print(f"找到 {len(kernel_events_by_external_id)} 个有 kernel 的 external_id")
         
-        # 丢弃特定类型的 events
-        if drop_type == 'comm':
-            print("丢弃包含 TCDP 的通信 kernel events...")
-            cpu_events_by_external_id, kernel_events_by_external_id = self._drop_communication_events(
-                cpu_events_by_external_id, kernel_events_by_external_id
+        
+        # 根据过滤模式过滤事件
+        if include_op_patterns or exclude_op_patterns or include_kernel_patterns or exclude_kernel_patterns:
+            print("根据过滤模式过滤事件...")
+            cpu_events_by_external_id, kernel_events_by_external_id = self._filter_events_by_patterns(
+                cpu_events_by_external_id, kernel_events_by_external_id,
+                include_op_patterns, exclude_op_patterns,
+                include_kernel_patterns, exclude_kernel_patterns
             )
-            print(f"丢弃后剩余 {len(cpu_events_by_external_id)} 个有 cpu_op 的 external_id")
-            print(f"丢弃后剩余 {len(kernel_events_by_external_id)} 个有 kernel 的 external_id")
+            print(f"过滤后剩余 {len(cpu_events_by_external_id)} 个有 cpu_op 的 external_id")
+            print(f"过滤后剩余 {len(kernel_events_by_external_id)} 个有 kernel 的 external_id")
         
         # 2. 过滤：保留有对应 kernel 事件的 cpu_op，如果没有 kernel 事件则保留所有 cpu_op
         filtered_cpu_events = {}
@@ -78,6 +90,113 @@ class DataPostProcessor:
             print(f"没有找到 kernel 事件，保留所有 {len(filtered_cpu_events)} 个 cpu_op external_id")
         
         return filtered_cpu_events, filtered_kernel_events
+    
+    def _filter_events_by_patterns(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
+                                 kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]],
+                                 include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
+                                 include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
+        """
+        根据过滤模式过滤事件
+        
+        Args:
+            cpu_events_by_external_id: CPU events 按 external_id 分组
+            kernel_events_by_external_id: Kernel events 按 external_id 分组
+            include_op_patterns: 包含的操作名称模式列表
+            exclude_op_patterns: 排除的操作名称模式列表
+            include_kernel_patterns: 包含的kernel名称模式列表
+            exclude_kernel_patterns: 排除的kernel名称模式列表
+            
+        Returns:
+            Tuple: 过滤后的 CPU events 和 Kernel events
+        """
+        # 编译正则表达式模式
+        include_op_regexes = self._compile_patterns(include_op_patterns) if include_op_patterns else []
+        exclude_op_regexes = self._compile_patterns(exclude_op_patterns) if exclude_op_patterns else []
+        include_kernel_regexes = self._compile_patterns(include_kernel_patterns) if include_kernel_patterns else []
+        exclude_kernel_regexes = self._compile_patterns(exclude_kernel_patterns) if exclude_kernel_patterns else []
+        
+        # 找到需要保留的 external_id
+        keep_external_ids = set()
+        
+        # 检查 CPU events
+        for external_id, cpu_events in cpu_events_by_external_id.items():
+            should_keep = True
+            
+            # 检查操作名称过滤
+            for cpu_event in cpu_events:
+                op_name = cpu_event.name
+                
+                # 检查包含模式
+                if include_op_regexes:
+                    if not any(regex.search(op_name) for regex in include_op_regexes):
+                        should_keep = False
+                        break
+                
+                # 检查排除模式
+                if exclude_op_regexes:
+                    if any(regex.search(op_name) for regex in exclude_op_regexes):
+                        should_keep = False
+                        break
+            
+            if should_keep:
+                keep_external_ids.add(external_id)
+        
+        # 检查 Kernel events
+        for external_id, kernel_events in kernel_events_by_external_id.items():
+            should_keep = True
+            
+            # 检查kernel名称过滤
+            for kernel_event in kernel_events:
+                kernel_name = kernel_event.name
+                
+                # 检查包含模式
+                if include_kernel_regexes:
+                    if not any(regex.search(kernel_name) for regex in include_kernel_regexes):
+                        should_keep = False
+                        break
+                
+                # 检查排除模式
+                if exclude_kernel_regexes:
+                    if any(regex.search(kernel_name) for regex in exclude_kernel_regexes):
+                        should_keep = False
+                        break
+            
+            if should_keep:
+                keep_external_ids.add(external_id)
+        
+        # 过滤事件
+        filtered_cpu_events = {}
+        filtered_kernel_events = {}
+        
+        for external_id in keep_external_ids:
+            if external_id in cpu_events_by_external_id:
+                filtered_cpu_events[external_id] = cpu_events_by_external_id[external_id]
+            if external_id in kernel_events_by_external_id:
+                filtered_kernel_events[external_id] = kernel_events_by_external_id[external_id]
+        
+        return filtered_cpu_events, filtered_kernel_events
+    
+    def _compile_patterns(self, patterns: List[str]) -> List[re.Pattern]:
+        """
+        编译正则表达式模式
+        
+        Args:
+            patterns: 模式字符串列表
+            
+        Returns:
+            List[re.Pattern]: 编译后的正则表达式列表
+        """
+        compiled_patterns = []
+        for pattern in patterns:
+            try:
+                # 尝试作为正则表达式编译
+                compiled_patterns.append(re.compile(pattern))
+            except re.error:
+                # 如果编译失败，作为普通字符串匹配
+                escaped_pattern = re.escape(pattern)
+                compiled_patterns.append(re.compile(escaped_pattern))
+        
+        return compiled_patterns
     
     def _drop_communication_events(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
                                  kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]]) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:

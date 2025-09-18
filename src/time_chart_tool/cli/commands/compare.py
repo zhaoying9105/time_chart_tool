@@ -7,7 +7,7 @@ import random
 from pathlib import Path
 from typing import List, Tuple
 
-from ..validators import validate_aggregation_fields, parse_show_options, parse_compare_options, validate_file
+from ..validators import validate_aggregation_fields, parse_show_options, parse_compare_options, validate_file, validate_filter_options, parse_filter_patterns
 from ..file_utils import parse_file_label
 from ...analyzer import Analyzer
 
@@ -29,6 +29,10 @@ class CompareCommand:
         print(f"随机种子: {args.random_seed}")
         print(f"输出格式: {args.output_format}")
         print(f"输出目录: {args.output_dir}")
+        print(f"包含操作模式: {args.include_op if args.include_op else '无'}")
+        print(f"排除操作模式: {args.exclude_op if args.exclude_op else '无'}")
+        print(f"包含kernel模式: {args.include_kernel if args.include_kernel else '无'}")
+        print(f"排除kernel模式: {args.exclude_kernel if args.exclude_kernel else '无'}")
         print()
         
         # 验证聚合字段
@@ -54,6 +58,29 @@ class CompareCommand:
         except ValueError as e:
             print(f"错误: 比较选项解析失败 - {e}")
             return 1
+        
+        # 验证过滤选项
+        try:
+            validate_filter_options(args.include_op, args.exclude_op, args.include_kernel, args.exclude_kernel)
+            print("过滤选项验证通过")
+        except ValueError as e:
+            print(f"错误: 过滤选项验证失败 - {e}")
+            return 1
+        
+        # 解析过滤模式
+        include_op_patterns = parse_filter_patterns(args.include_op) if args.include_op else None
+        exclude_op_patterns = parse_filter_patterns(args.exclude_op) if args.exclude_op else None
+        include_kernel_patterns = parse_filter_patterns(args.include_kernel) if args.include_kernel else None
+        exclude_kernel_patterns = parse_filter_patterns(args.exclude_kernel) if args.exclude_kernel else None
+        
+        if include_op_patterns:
+            print(f"包含操作模式: {include_op_patterns}")
+        if exclude_op_patterns:
+            print(f"排除操作模式: {exclude_op_patterns}")
+        if include_kernel_patterns:
+            print(f"包含kernel模式: {include_kernel_patterns}")
+        if exclude_kernel_patterns:
+            print(f"排除kernel模式: {exclude_kernel_patterns}")
         
         # 检查聚合字段和显示选项是否重复
         show_fields = set()
@@ -141,7 +168,11 @@ class CompareCommand:
                 compare_shape=compare_options['shape'],
                 compare_name=compare_options['name'],
                 print_markdown=args.print_markdown,
-                max_workers=args.max_workers
+                max_workers=args.max_workers,
+                include_op_patterns=include_op_patterns,
+                exclude_op_patterns=exclude_op_patterns,
+                include_kernel_patterns=include_kernel_patterns,
+                exclude_kernel_patterns=exclude_kernel_patterns
             )
             
             total_time = time.time() - start_time

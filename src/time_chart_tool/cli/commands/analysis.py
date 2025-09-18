@@ -25,7 +25,6 @@ class AnalysisCommand:
         print(f"聚合字段: {args.aggregation}")
         print(f"显示选项: {args.show if args.show else '无'}")
         print(f"打印markdown表格: {args.print_markdown}")
-        print(f"丢弃类型: {args.drop if args.drop else '无'}")
         print(f"输出格式: {args.output_format}")
         print(f"输出目录: {args.output_dir}")
         print()
@@ -93,7 +92,6 @@ class AnalysisCommand:
                 output_dir=str(output_dir),
                 label=args.label,
                 print_markdown=args.print_markdown,
-                drop_type=args.drop
             )
             
             total_time = time.time() - start_time

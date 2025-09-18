@@ -134,8 +134,6 @@ def parse_arguments():
                                      '示例: --show "dtype,shape,kernel-duration,name"')
     analysis_parser.add_argument('--print-markdown', action='store_true', 
                                 help='是否在stdout中以markdown格式打印表格 (默认: False)')
-    analysis_parser.add_argument('--drop', choices=['comm'], default=None,
-                                help='丢弃特定类型的 event，目前支持: comm (丢弃包含TCDP的kernel events) (默认: None)')
     analysis_parser.add_argument('--output-format', default='json,xlsx', 
                                 choices=['json', 'xlsx', 'json,xlsx'],
                                 help='输出格式 (默认: json,xlsx)')
@@ -216,6 +214,14 @@ def parse_arguments():
     compare_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
     compare_parser.add_argument('--max-workers', type=int, default=None,
                                help='并行处理的最大工作进程数，默认为CPU核心数')
+    compare_parser.add_argument('--include-op', type=str, default=None,
+                               help='包含的操作名称模式，逗号分隔的字符串列表，支持正则表达式 (与 --exclude-op 互斥)')
+    compare_parser.add_argument('--exclude-op', type=str, default=None,
+                               help='排除的操作名称模式，逗号分隔的字符串列表，支持正则表达式 (与 --include-op 互斥)')
+    compare_parser.add_argument('--include-kernel', type=str, default=None,
+                               help='包含的kernel名称模式，逗号分隔的字符串列表，支持正则表达式 (与 --exclude-kernel 互斥)')
+    compare_parser.add_argument('--exclude-kernel', type=str, default=None,
+                               help='排除的kernel名称模式，逗号分隔的字符串列表，支持正则表达式 (与 --include-kernel 互斥)')
     
     return parser.parse_args()
 
