@@ -34,7 +34,11 @@ class DataPresenter:
                            file_labels: Optional[List[str]] = None,
                            print_markdown: bool = False,
                            per_rank_stats: Optional[Dict[str, Dict[str, int]]] = None,
-                           label: Optional[str] = None) -> List[Path]:
+                           label: Optional[str] = None,
+                           include_op_patterns: Optional[List[str]] = None,
+                           exclude_op_patterns: Optional[List[str]] = None,
+                           include_kernel_patterns: Optional[List[str]] = None,
+                           exclude_kernel_patterns: Optional[List[str]] = None) -> List[Path]:
         """
         Stage 4: 数据展示
         生成各种格式的输出文件
@@ -58,6 +62,11 @@ class DataPresenter:
             file_labels: 文件标签列表
             print_markdown: 是否打印markdown表格
             per_rank_stats: 每个rank的统计信息
+            label: 文件标签
+            include_op_patterns: 包含的操作名称模式列表
+            exclude_op_patterns: 排除的操作名称模式列表
+            include_kernel_patterns: 包含的kernel名称模式列表
+            exclude_kernel_patterns: 排除的kernel名称模式列表
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -105,7 +114,11 @@ class DataPresenter:
                 compare_shape=compare_shape,
                 compare_name=compare_name,
                 file_labels=file_labels,
-                print_markdown=print_markdown
+                print_markdown=print_markdown,
+                include_op_patterns=include_op_patterns,
+                exclude_op_patterns=exclude_op_patterns,
+                include_kernel_patterns=include_kernel_patterns,
+                exclude_kernel_patterns=exclude_kernel_patterns
             )
             generated_files.extend(files)
         
@@ -336,7 +349,11 @@ class DataPresenter:
                               compare_shape: bool = False,
                               compare_name: bool = False,
                               file_labels: List[str] = None,
-                              print_markdown: bool = False) -> List[Path]:
+                              print_markdown: bool = False,
+                              include_op_patterns: List[str] = None,
+                              exclude_op_patterns: List[str] = None,
+                              include_kernel_patterns: List[str] = None,
+                              exclude_kernel_patterns: List[str] = None) -> List[Path]:
         """
         展示多文件数据
         
@@ -357,6 +374,10 @@ class DataPresenter:
             compare_name: 是否比较名称
             file_labels: 文件标签列表
             print_markdown: 是否打印markdown表格
+            include_op_patterns: 包含的操作名称模式列表
+            exclude_op_patterns: 排除的操作名称模式列表
+            include_kernel_patterns: 包含的kernel名称模式列表
+            exclude_kernel_patterns: 排除的kernel名称模式列表
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -382,7 +403,7 @@ class DataPresenter:
             
             # 添加时间戳列（如果启用，作为第一列）
             if show_timestamp:
-                # 获取第一个文件的第一个CPU事件的启动时间戳
+                # 获取第一个文件的第一个CPU事件的启动时间戳作为基准时间戳
                 first_timestamp = None
                 for label, file_data in entry.items():
                     cpu_events = file_data.cpu_events
@@ -437,6 +458,19 @@ class DataPresenter:
                 kernel_events = file_data.kernel_events
                 
                 row[f'{label}_cpu_event_count'] = len(cpu_events)
+                
+                # 添加每个文件的时间戳
+                if show_timestamp:
+                    if cpu_events:
+                        first_cpu_event = cpu_events[0]
+                        if show_readable_timestamp and first_cpu_event.readable_timestamp:
+                            row[f'{label}_cpu_start_timestamp'] = first_cpu_event.readable_timestamp
+                        elif first_cpu_event.ts is not None:
+                            row[f'{label}_cpu_start_timestamp'] = first_cpu_event.ts
+                        else:
+                            row[f'{label}_cpu_start_timestamp'] = 0.0
+                    else:
+                        row[f'{label}_cpu_start_timestamp'] = 0.0
                 
                 if show_dtype:
                     dtypes = set()
@@ -555,7 +589,7 @@ class DataPresenter:
             rows.append(row)
         
         # 生成输出文件
-        base_name = self._generate_base_name(aggregation_spec, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_name, file_labels)
+        base_name = self._generate_base_name(aggregation_spec, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_name, file_labels, include_op_patterns, exclude_op_patterns, include_kernel_patterns, exclude_kernel_patterns)
         generated_files = self._generate_output_files(rows, output_dir, base_name)
         
         # 特殊的 matmul 展示
@@ -622,9 +656,11 @@ class DataPresenter:
     
     def _generate_base_name(self, aggregation_spec: str, show_dtype: bool, show_shape: bool, 
                            show_kernel_names: bool, show_kernel_duration: bool, show_timestamp: bool,
-                           show_name: bool, file_labels: List[str] = None) -> str:
+                           show_name: bool, file_labels: List[str] = None,
+                           include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
+                           include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None) -> str:
         """
-        生成基础文件名，包含聚合字段、显示选项和标签信息
+        生成基础文件名，包含聚合字段、显示选项、标签信息和过滤选项
         
         Args:
             aggregation_spec: 聚合字段组合
@@ -635,6 +671,10 @@ class DataPresenter:
             show_timestamp: 是否显示时间戳
             show_name: 是否显示名称
             file_labels: 文件标签列表
+            include_op_patterns: 包含的操作名称模式列表
+            exclude_op_patterns: 排除的操作名称模式列表
+            include_kernel_patterns: 包含的kernel名称模式列表
+            exclude_kernel_patterns: 排除的kernel名称模式列表
             
         Returns:
             str: 基础文件名
@@ -667,6 +707,25 @@ class DataPresenter:
         
         if show_options:
             name_parts.append(f"show_{'_'.join(show_options)}")
+        
+        # 添加过滤选项
+        filter_options = []
+        if include_op_patterns:
+            # 简化操作模式名称，避免文件名过长
+            op_patterns_str = "_".join([p[:10] for p in include_op_patterns[:3]])  # 只取前3个模式，每个最多10个字符
+            filter_options.append(f"inc_op_{op_patterns_str}")
+        if exclude_op_patterns:
+            op_patterns_str = "_".join([p[:10] for p in exclude_op_patterns[:3]])
+            filter_options.append(f"exc_op_{op_patterns_str}")
+        if include_kernel_patterns:
+            kernel_patterns_str = "_".join([p[:10] for p in include_kernel_patterns[:3]])
+            filter_options.append(f"inc_kernel_{kernel_patterns_str}")
+        if exclude_kernel_patterns:
+            kernel_patterns_str = "_".join([p[:10] for p in exclude_kernel_patterns[:3]])
+            filter_options.append(f"exc_kernel_{kernel_patterns_str}")
+        
+        if filter_options:
+            name_parts.append(f"filter_{'_'.join(filter_options)}")
         
         # 组合文件名
         base_name = "_".join(name_parts)

@@ -254,7 +254,11 @@ class Analyzer:
             compare_shape=compare_shape,
             compare_name=compare_name,
             file_labels=file_labels_list,
-            print_markdown=print_markdown
+            print_markdown=print_markdown,
+            include_op_patterns=include_op_patterns,
+            exclude_op_patterns=exclude_op_patterns,
+            include_kernel_patterns=include_kernel_patterns,
+            exclude_kernel_patterns=exclude_kernel_patterns
         )
         
         return generated_files

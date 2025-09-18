@@ -45,16 +45,20 @@ class DataPostProcessor:
         cpu_events_by_external_id = defaultdict(list)
         kernel_events_by_external_id = defaultdict(list)
         
+        # 首先统计所有 external_id 下的 cpu_op 和 kernel 事件
         for event in data.events:
             if event.external_id is not None:
                 if event.cat == 'cpu_op':
                     cpu_events_by_external_id[event.external_id].append(event)
                 elif event.cat == 'kernel':
                     kernel_events_by_external_id[event.external_id].append(event)
-        
-        print(f"找到 {len(cpu_events_by_external_id)} 个有 cpu_op 的 external_id")
-        print(f"找到 {len(kernel_events_by_external_id)} 个有 kernel 的 external_id")
-        
+
+        # 只保留那些同时拥有 cpu_op 和 kernel 的 external_id
+        valid_external_ids = set(cpu_events_by_external_id.keys()) & set(kernel_events_by_external_id.keys())
+        cpu_events_by_external_id = {eid: cpu_events_by_external_id[eid] for eid in valid_external_ids}
+        kernel_events_by_external_id = {eid: kernel_events_by_external_id[eid] for eid in valid_external_ids}
+
+        print(f"找到 {len(cpu_events_by_external_id)} 个同时有 cpu_op 和 kernel 的 external_id")
         
         # 根据过滤模式过滤事件
         if include_op_patterns or exclude_op_patterns or include_kernel_patterns or exclude_kernel_patterns:
@@ -122,21 +126,23 @@ class DataPostProcessor:
         for external_id, cpu_events in cpu_events_by_external_id.items():
             should_keep = True
             
-            # 检查操作名称过滤
-            for cpu_event in cpu_events:
-                op_name = cpu_event.name
-                
-                # 检查包含模式
-                if include_op_regexes:
-                    if not any(regex.search(op_name) for regex in include_op_regexes):
-                        should_keep = False
-                        break
-                
-                # 检查排除模式
-                if exclude_op_regexes:
-                    if any(regex.search(op_name) for regex in exclude_op_regexes):
-                        should_keep = False
-                        break
+            # 如果设置了包含模式，需要至少有一个操作匹配
+            if include_op_regexes:
+                has_matching_op = any(
+                    any(regex.search(cpu_event.name) for regex in include_op_regexes)
+                    for cpu_event in cpu_events
+                )
+                if not has_matching_op:
+                    should_keep = False
+            
+            # 如果设置了排除模式，任何操作都不能匹配
+            if exclude_op_regexes and should_keep:
+                has_excluded_op = any(
+                    any(regex.search(cpu_event.name) for regex in exclude_op_regexes)
+                    for cpu_event in cpu_events
+                )
+                if has_excluded_op:
+                    should_keep = False
             
             if should_keep:
                 keep_external_ids.add(external_id)
@@ -169,16 +175,61 @@ class DataPostProcessor:
         filtered_kernel_events = {}
         
         for external_id in keep_external_ids:
+            # 过滤 CPU events
             if external_id in cpu_events_by_external_id:
-                filtered_cpu_events[external_id] = cpu_events_by_external_id[external_id]
+                cpu_events = cpu_events_by_external_id[external_id]
+                filtered_cpu_events_list = []
+                
+                for cpu_event in cpu_events:
+                    op_name = cpu_event.name
+                    should_include = True
+                    
+                    # 检查包含模式
+                    if include_op_regexes:
+                        if not any(regex.search(op_name) for regex in include_op_regexes):
+                            should_include = False
+                    
+                    # 检查排除模式
+                    if exclude_op_regexes and should_include:
+                        if any(regex.search(op_name) for regex in exclude_op_regexes):
+                            should_include = False
+                    
+                    if should_include:
+                        filtered_cpu_events_list.append(cpu_event)
+                
+                if filtered_cpu_events_list:  # 只有当过滤后还有操作时才保留
+                    filtered_cpu_events[external_id] = filtered_cpu_events_list
+            
+            # 过滤 Kernel events
             if external_id in kernel_events_by_external_id:
-                filtered_kernel_events[external_id] = kernel_events_by_external_id[external_id]
+                kernel_events = kernel_events_by_external_id[external_id]
+                filtered_kernel_events_list = []
+                
+                for kernel_event in kernel_events:
+                    kernel_name = kernel_event.name
+                    should_include = True
+                    
+                    # 检查包含模式
+                    if include_kernel_regexes:
+                        if not any(regex.search(kernel_name) for regex in include_kernel_regexes):
+                            should_include = False
+                    
+                    # 检查排除模式
+                    if exclude_kernel_regexes and should_include:
+                        if any(regex.search(kernel_name) for regex in exclude_kernel_regexes):
+                            should_include = False
+                    
+                    if should_include:
+                        filtered_kernel_events_list.append(kernel_event)
+                
+                if filtered_kernel_events_list:  # 只有当过滤后还有kernel时才保留
+                    filtered_kernel_events[external_id] = filtered_kernel_events_list
         
         return filtered_cpu_events, filtered_kernel_events
     
     def _compile_patterns(self, patterns: List[str]) -> List[re.Pattern]:
         """
-        编译正则表达式模式
+        编译正则表达式模式，支持通配符语法
         
         Args:
             patterns: 模式字符串列表
@@ -188,8 +239,20 @@ class DataPostProcessor:
         """
         compiled_patterns = []
         for pattern in patterns:
+            # 首先检查是否包含通配符语法
+            if '*' in pattern or '?' in pattern:
+                # 将通配符转换为正则表达式
+                # * -> .*
+                # ? -> .
+                regex_pattern = pattern.replace('*', '.*').replace('?', '.')
+                try:
+                    compiled_patterns.append(re.compile(regex_pattern))
+                    continue
+                except re.error:
+                    pass
+            
+            # 尝试作为正则表达式编译
             try:
-                # 尝试作为正则表达式编译
                 compiled_patterns.append(re.compile(pattern))
             except re.error:
                 # 如果编译失败，作为普通字符串匹配
