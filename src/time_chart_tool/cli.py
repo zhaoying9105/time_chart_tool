@@ -232,6 +232,8 @@ def parse_arguments():
                                      '示例: --show "dtype,shape,kernel-duration"')
     analysis_parser.add_argument('--print-markdown', action='store_true', 
                                 help='是否在stdout中以markdown格式打印表格 (默认: False)')
+    analysis_parser.add_argument('--drop', choices=['comm'], default=None,
+                                help='丢弃特定类型的 event，目前支持: comm (丢弃包含TCDP的kernel events) (默认: None)')
     analysis_parser.add_argument('--output-format', default='json,xlsx', 
                                 choices=['json', 'xlsx', 'json,xlsx'],
                                 help='输出格式 (默认: json,xlsx)')
@@ -409,6 +411,7 @@ def run_analysis(args):
     print(f"聚合字段: {args.aggregation}")
     print(f"显示选项: {args.show if args.show else '无'}")
     print(f"打印markdown表格: {args.print_markdown}")
+    print(f"丢弃类型: {args.drop if args.drop else '无'}")
     print(f"输出格式: {args.output_format}")
     print(f"输出目录: {args.output_dir}")
     print()
@@ -478,7 +481,8 @@ def run_analysis(args):
             show_kernel_timestamp=show_options['kernel_timestamp'],
             output_dir=str(output_dir),
             label=args.label,
-            print_markdown=args.print_markdown
+            print_markdown=args.print_markdown,
+            drop_type=args.drop
         )
         
         total_time = time.time() - start_time

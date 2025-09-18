@@ -44,13 +44,14 @@ class AggregatedData:
     key: str  # 聚合键（op_name, op_shape, call_stack等）
 
 
-def _process_single_file_parallel(file_path: str, aggregation_spec: str) -> Tuple[str, Dict[Union[str, tuple], 'AggregatedData']]:
+def _process_single_file_parallel(file_path: str, aggregation_spec: str, drop_type: str = None) -> Tuple[str, Dict[Union[str, tuple], 'AggregatedData']]:
     """
     并行处理单个文件的函数
     
     Args:
         file_path: JSON文件路径
         aggregation_spec: 聚合字段组合
+        drop_type: 丢弃类型，目前支持 'comm' (丢弃包含TCDP的kernel events)
         
     Returns:
         Tuple[str, Dict]: (文件路径, 聚合后的数据)
@@ -66,7 +67,7 @@ def _process_single_file_parallel(file_path: str, aggregation_spec: str) -> Tupl
         analyzer = Analyzer()
         
         # Stage 1: 数据后处理
-        cpu_events_by_external_id, kernel_events_by_external_id = analyzer.stage1_data_postprocessing(data)
+        cpu_events_by_external_id, kernel_events_by_external_id = analyzer.stage1_data_postprocessing(data, drop_type=drop_type)
         
         # Stage 2: 数据聚合
         aggregated_data = analyzer.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec)
@@ -94,7 +95,7 @@ class Analyzer:
     
     # ==================== Stage 1: 数据后处理 ====================
     
-    def stage1_data_postprocessing(self, data: ProfilerData) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
+    def stage1_data_postprocessing(self, data: ProfilerData, drop_type: str = None) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
         """
         Stage 1: 数据后处理
         1. 时间戳标准化已在parser中完成
@@ -125,6 +126,15 @@ class Analyzer:
         print(f"找到 {len(cpu_events_by_external_id)} 个有 cpu_op 的 external_id")
         print(f"找到 {len(kernel_events_by_external_id)} 个有 kernel 的 external_id")
         
+        # 丢弃特定类型的 events
+        if drop_type == 'comm':
+            print("丢弃包含 TCDP 的通信 kernel events...")
+            cpu_events_by_external_id, kernel_events_by_external_id = self._drop_communication_events(
+                cpu_events_by_external_id, kernel_events_by_external_id
+            )
+            print(f"丢弃后剩余 {len(cpu_events_by_external_id)} 个有 cpu_op 的 external_id")
+            print(f"丢弃后剩余 {len(kernel_events_by_external_id)} 个有 kernel 的 external_id")
+        
         # 2. 过滤：保留有对应 kernel 事件的 cpu_op，如果没有 kernel 事件则保留所有 cpu_op
         filtered_cpu_events = {}
         filtered_kernel_events = {}
@@ -148,6 +158,73 @@ class Analyzer:
             print(f"没有找到 kernel 事件，保留所有 {len(filtered_cpu_events)} 个 cpu_op external_id")
         
         return filtered_cpu_events, filtered_kernel_events
+    
+    def _drop_communication_events(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
+                                 kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]]) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
+        """
+        丢弃包含 TCDP 的通信 kernel events 及其对应的 CPU events
+        
+        Args:
+            cpu_events_by_external_id: CPU events 按 external_id 分组
+            kernel_events_by_external_id: Kernel events 按 external_id 分组
+            
+        Returns:
+            Tuple: 过滤后的 CPU events 和 Kernel events
+        """
+        # 找到包含 TCDP 的 external_id
+        tcdp_external_ids = set()
+        
+        for external_id, kernel_events in kernel_events_by_external_id.items():
+            for kernel_event in kernel_events:
+                if 'TCDP' in kernel_event.name:
+                    tcdp_external_ids.add(external_id)
+                    break
+        
+        print(f"找到 {len(tcdp_external_ids)} 个包含 TCDP kernel 的 external_id")
+        
+        # 过滤掉包含 TCDP 的 external_id
+        filtered_cpu_events = {}
+        filtered_kernel_events = {}
+        
+        for external_id in cpu_events_by_external_id:
+            if external_id not in tcdp_external_ids:
+                filtered_cpu_events[external_id] = cpu_events_by_external_id[external_id]
+        
+        for external_id in kernel_events_by_external_id:
+            if external_id not in tcdp_external_ids:
+                filtered_kernel_events[external_id] = kernel_events_by_external_id[external_id]
+        
+        return filtered_cpu_events, filtered_kernel_events
+    
+    def _collect_per_rank_statistics(self, file_paths: List[str], aggregated_data_list: List[Dict[Union[str, tuple], 'AggregatedData']]) -> Dict[str, Dict[str, int]]:
+        """
+        收集每个文件的统计信息
+        
+        Args:
+            file_paths: 文件路径列表
+            aggregated_data_list: 每个文件的聚合数据列表
+            
+        Returns:
+            Dict[str, Dict[str, int]]: 每个文件的统计信息 {file_path: {cpu_count: int, kernel_count: int}}
+        """
+        per_rank_stats = {}
+        
+        for i, (file_path, aggregated_data) in enumerate(zip(file_paths, aggregated_data_list)):
+            cpu_count = 0
+            kernel_count = 0
+            
+            for key, agg_data in aggregated_data.items():
+                cpu_count += len(agg_data.cpu_events)
+                kernel_count += len(agg_data.kernel_events)
+            
+            # 提取文件名作为 rank 标识
+            file_name = Path(file_path).name
+            per_rank_stats[file_name] = {
+                'cpu_count': cpu_count,
+                'kernel_count': kernel_count
+            }
+        
+        return per_rank_stats
     
     def _merge_cpu_events_by_call_stack(self, cpu_events: List[ActivityEvent]) -> List[ActivityEvent]:
         """
@@ -806,7 +883,8 @@ class Analyzer:
                            compare_shape: bool = False,
                            file_labels: List[str] = None,
                            label: str = None,
-                           print_markdown: bool = False) -> List[Path]:
+                           print_markdown: bool = False,
+                           per_rank_stats: Dict[str, Dict[str, int]] = None) -> List[Path]:
         """
         Stage 4: 展示
         根据配置决定是否展示 dtype 信息，是否展示 shape 信息，是否展示kernel 信息，是否展示时间戳信息
@@ -822,17 +900,41 @@ class Analyzer:
             show_kernel_duration: 是否展示 kernel 持续时间信息
             show_timestamp: 是否展示 CPU 操作启动时间戳
             special_matmul: 是否进行特殊的 matmul 展示
+            per_rank_stats: 每个 rank 的统计信息 {file_name: {cpu_count: int, kernel_count: int}}
         """
         print("=== Stage 4: 展示 ===")
         
         if comparison_result['type'] == 'single_file':
-            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, show_kernel_timestamp, aggregation_spec, label, print_markdown)
+            return self._present_single_file(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, show_kernel_timestamp, aggregation_spec, label, print_markdown, per_rank_stats)
         elif comparison_result['type'] == 'multiple_files':
             return self._present_multiple_files(comparison_result['data'], output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, special_matmul, show_timestamp, show_readable_timestamp, aggregation_spec, compare_dtype, compare_shape, file_labels, print_markdown)
     
-    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, show_timestamp: bool = False, show_readable_timestamp: bool = False, show_kernel_timestamp: bool = False, aggregation_spec: str = 'name', label: str = None, print_markdown: bool = False) -> List[Path]:
+    def _present_single_file(self, data: Dict[Union[str, tuple], AggregatedData], output_dir: str, show_dtype: bool, show_shape: bool, show_kernel_names: bool, show_kernel_duration: bool, show_timestamp: bool = False, show_readable_timestamp: bool = False, show_kernel_timestamp: bool = False, aggregation_spec: str = 'name', label: str = None, print_markdown: bool = False, per_rank_stats: Dict[str, Dict[str, int]] = None) -> List[Path]:
         """展示单文件数据"""
         print("生成单文件展示结果...")
+        
+        # 显示每个 rank 的统计信息（如果有的话）
+        if per_rank_stats:
+            print("\n=== 每个 Rank 的统计信息 ===")
+            total_cpu_count = 0
+            total_kernel_count = 0
+            
+            for rank_name, stats in per_rank_stats.items():
+                cpu_count = stats['cpu_count']
+                kernel_count = stats['kernel_count']
+                total_cpu_count += cpu_count
+                total_kernel_count += kernel_count
+                print(f"  {rank_name}: CPU events = {cpu_count}, Kernel events = {kernel_count}")
+            
+            print(f"  总计: CPU events = {total_cpu_count}, Kernel events = {total_kernel_count}")
+            
+            # 计算平均值
+            rank_count = len(per_rank_stats)
+            if rank_count > 0:
+                avg_cpu_count = total_cpu_count / rank_count
+                avg_kernel_count = total_kernel_count / rank_count
+                print(f"  平均每个 rank: CPU events = {avg_cpu_count:.1f}, Kernel events = {avg_kernel_count:.1f}")
+            print()
         
         # 如果显示kernel duration，先计算总耗时
         total_duration = 0.0
@@ -1390,7 +1492,7 @@ class Analyzer:
     def analyze_single_file(self, file_path: str, aggregation_spec: str = 'name', 
                            show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, 
                            show_timestamp: bool = False, show_readable_timestamp: bool = False, show_kernel_timestamp: bool = False,
-                           output_dir: str = ".", label: str = None, print_markdown: bool = False) -> List[Path]:
+                           output_dir: str = ".", label: str = None, print_markdown: bool = False, drop_type: str = None) -> List[Path]:
         """
         分析单个文件的完整流程
         
@@ -1407,6 +1509,7 @@ class Analyzer:
             output_dir: 输出目录
             label: 文件标签
             print_markdown: 是否打印markdown表格
+            drop_type: 丢弃类型，目前支持 'comm' (丢弃包含TCDP的kernel events)
         """
         print(f"=== 开始分析单个文件: {file_path} ===")
         
@@ -1414,7 +1517,7 @@ class Analyzer:
         data = self.parser.load_json_file(file_path)
         
         # Stage 1: 数据后处理
-        cpu_events_by_external_id, kernel_events_by_external_id = self.stage1_data_postprocessing(data)
+        cpu_events_by_external_id, kernel_events_by_external_id = self.stage1_data_postprocessing(data, drop_type=drop_type)
         
         # Stage 2: 数据聚合
         aggregated_data = self.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec)
@@ -1431,7 +1534,7 @@ class Analyzer:
     def analyze_single_file_with_glob(self, file_paths: List[str], aggregation_spec: str = 'name', 
                                     show_dtype: bool = True, show_shape: bool = True, show_kernel_names: bool = True, show_kernel_duration: bool = True, 
                                     show_timestamp: bool = False, show_readable_timestamp: bool = False, show_kernel_timestamp: bool = False,
-                                    output_dir: str = ".", label: str = None, print_markdown: bool = False) -> List[Path]:
+                                    output_dir: str = ".", label: str = None, print_markdown: bool = False, drop_type: str = None) -> List[Path]:
         """
         分析多个文件的完整流程，每个文件独立解析，然后一起聚合
         
@@ -1448,6 +1551,7 @@ class Analyzer:
             output_dir: 输出目录
             label: 文件标签
             print_markdown: 是否打印markdown表格
+            drop_type: 丢弃类型，目前支持 'comm' (丢弃包含TCDP的kernel events)
         """
         print(f"=== 开始分析多个文件，共 {len(file_paths)} 个文件 ===")
         
@@ -1465,7 +1569,8 @@ class Analyzer:
                 show_kernel_timestamp=show_kernel_timestamp,
                 output_dir=output_dir,
                 label=label,
-                print_markdown=print_markdown
+                print_markdown=print_markdown,
+                drop_type=drop_type
             )
         
         # 多个文件，每个文件独立解析
@@ -1476,7 +1581,10 @@ class Analyzer:
         print(f"使用 {max_workers} 个进程并行处理文件")
         
         # 并行处理所有文件
-        aggregated_data_list = self._process_files_parallel(file_paths, aggregation_spec, max_workers)
+        aggregated_data_list = self._process_files_parallel(file_paths, aggregation_spec, max_workers, drop_type)
+        
+        # 收集每个文件的统计信息
+        per_rank_stats = self._collect_per_rank_statistics(file_paths, aggregated_data_list)
         
         # 合并所有文件的聚合数据
         print("合并所有文件的聚合数据...")
@@ -1486,7 +1594,7 @@ class Analyzer:
         comparison_result = self.stage3_comparison(single_file_data=merged_aggregated_data, aggregation_spec=aggregation_spec)
         
         # Stage 4: 展示
-        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, show_kernel_timestamp, aggregation_spec=aggregation_spec, label=label, print_markdown=print_markdown)
+        generated_files = self.stage4_presentation(comparison_result, output_dir, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_readable_timestamp, show_kernel_timestamp, aggregation_spec=aggregation_spec, label=label, print_markdown=print_markdown, per_rank_stats=per_rank_stats)
         
         print("=== 多文件分析完成 ===")
         return generated_files
@@ -1554,7 +1662,7 @@ class Analyzer:
         print("=== 多文件分析完成 ===")
         return generated_files
     
-    def _process_files_parallel(self, file_paths: List[str], aggregation_spec: str, max_workers: int) -> List[Dict[Union[str, tuple], 'AggregatedData']]:
+    def _process_files_parallel(self, file_paths: List[str], aggregation_spec: str, max_workers: int, drop_type: str = None) -> List[Dict[Union[str, tuple], 'AggregatedData']]:
         """
         使用多进程并行处理文件列表
         
@@ -1562,6 +1670,7 @@ class Analyzer:
             file_paths: 文件路径列表
             aggregation_spec: 聚合字段组合
             max_workers: 最大工作进程数
+            drop_type: 丢弃类型，目前支持 'comm' (丢弃包含TCDP的kernel events)
             
         Returns:
             List[Dict]: 聚合后的数据列表
@@ -1570,7 +1679,7 @@ class Analyzer:
             # 只有一个文件，直接处理
             file_path = file_paths[0]
             print(f"  处理文件: {file_path}")
-            _, aggregated_data = _process_single_file_parallel(file_path, aggregation_spec)
+            _, aggregated_data = _process_single_file_parallel(file_path, aggregation_spec, drop_type)
             return [aggregated_data]
         
         # 多个文件，使用进程池并行处理
@@ -1580,7 +1689,7 @@ class Analyzer:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             # 提交所有任务
             future_to_file = {
-                executor.submit(_process_single_file_parallel, file_path, aggregation_spec): file_path 
+                executor.submit(_process_single_file_parallel, file_path, aggregation_spec, drop_type): file_path 
                 for file_path in file_paths
             }
             
