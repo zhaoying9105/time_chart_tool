@@ -8,29 +8,51 @@ import re
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ...parser import PyTorchProfilerParser
 
 
 def _readable_timestamp_to_microseconds(readable_timestamp: str) -> float:
-    """
-    将readable_timestamp转换为微秒时间戳
-    
-    Args:
-        readable_timestamp: 格式为 "YYYY-MM-DD HH:MM:SS.ffffff" 的时间字符串
-        
-    Returns:
-        float: 微秒时间戳
-    """
+    """将readable_timestamp转换为微秒时间戳"""
     try:
-        # 解析时间字符串
         dt = datetime.strptime(readable_timestamp, "%Y-%m-%d %H:%M:%S.%f")
-        # 转换为微秒时间戳
-        return dt.timestamp() * 1_000_000  # 转换为微秒
+        return dt.timestamp() * 1_000_000
     except Exception as e:
         print(f"警告: 时间戳转换失败: {e}")
         return 0.0
+
+
+def _format_timestamp_display(event, show_readable: bool = True) -> str:
+    """格式化时间戳显示"""
+    if show_readable and event.readable_timestamp:
+        return event.readable_timestamp
+    elif event.ts is not None:
+        return f"{event.ts:.2f}μs"
+    else:
+        return "N/A"
+
+
+def _calculate_end_time_display(event) -> str:
+    """计算并格式化结束时间显示"""
+    if event.ts is not None and event.dur is not None:
+        if event.readable_timestamp:
+            start_dt = datetime.strptime(event.readable_timestamp, "%Y-%m-%d %H:%M:%S.%f")
+            end_dt = start_dt + timedelta(microseconds=event.dur)
+            return end_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+        else:
+            return f"{event.ts + event.dur:.2f}μs"
+    return "N/A"
+
+
+def _calculate_time_diff_readable(event1, event2) -> float:
+    """使用readable_timestamp计算时间差（微秒）"""
+    if (event1 and event2 and 
+        event1.readable_timestamp and event2.readable_timestamp):
+        start1 = _readable_timestamp_to_microseconds(event1.readable_timestamp)
+        start2 = _readable_timestamp_to_microseconds(event2.readable_timestamp)
+        return abs(start1 - start2)
+    return 0.0
 
 
 class CommunicationAnalyzer:
@@ -399,6 +421,65 @@ class CommunicationAnalyzer:
         
         return comm_events
 
+    def _print_communication_events_table(self, fastest_events, slowest_events) -> bool:
+        """打印通信事件对比表格并返回一致性检查结果"""
+        print("    通信事件对比表格:")
+        print("    | 序号 | 最快卡Kernel名称 | 最快卡开始时间 | 最快卡结束时间 | 最慢卡Kernel名称 | 最慢卡开始时间 | 最慢卡结束时间 | 名称一致 | 开始时间差(ms) | 结束时间差(ms) | 超过阈值 |")
+        print("    |------|----------------|-------------|-------------|----------------|-------------|-------------|----------|---------------|---------------|----------|")
+        
+        max_events = max(len(fastest_events), len(slowest_events))
+        consistency_check_passed = True
+        
+        for i in range(max_events):
+            fastest_event = fastest_events[i] if i < len(fastest_events) else None
+            slowest_event = slowest_events[i] if i < len(slowest_events) else None
+            
+            # 基本信息
+            fastest_name = fastest_event.name if fastest_event else "N/A"
+            slowest_name = slowest_event.name if slowest_event else "N/A"
+            name_consistent = "✓" if fastest_name == slowest_name else "✗"
+            
+            # 时间戳显示
+            fastest_start_ts = _format_timestamp_display(fastest_event) if fastest_event else "N/A"
+            slowest_start_ts = _format_timestamp_display(slowest_event) if slowest_event else "N/A"
+            fastest_end_ts = _calculate_end_time_display(fastest_event) if fastest_event else "N/A"
+            slowest_end_ts = _calculate_end_time_display(slowest_event) if slowest_event else "N/A"
+            
+            # 时间差计算
+            start_time_diff, end_time_diff, threshold_exceeded = self._calculate_time_differences(
+                fastest_event, slowest_event
+            )
+            
+            if threshold_exceeded == "✗":
+                consistency_check_passed = False
+            
+            print(f"    | {i+1} | {fastest_name} | {fastest_start_ts} | {fastest_end_ts} | {slowest_name} | {slowest_start_ts} | {slowest_end_ts} | {name_consistent} | {start_time_diff} | {end_time_diff} | {threshold_exceeded} |")
+        
+        return consistency_check_passed
+
+    def _calculate_time_differences(self, fastest_event, slowest_event) -> tuple:
+        """计算时间差并检查阈值"""
+        if not (fastest_event and slowest_event and 
+                fastest_event.readable_timestamp and slowest_event.readable_timestamp):
+            return "N/A", "N/A", "N/A"
+        
+        # 开始时间差
+        start_diff_us = _calculate_time_diff_readable(fastest_event, slowest_event)
+        start_time_diff = f"{start_diff_us / 1000.0:.3f}"
+        
+        # 结束时间差
+        fastest_start_us = _readable_timestamp_to_microseconds(fastest_event.readable_timestamp)
+        slowest_start_us = _readable_timestamp_to_microseconds(slowest_event.readable_timestamp)
+        fastest_end_us = fastest_start_us + (fastest_event.dur or 0)
+        slowest_end_us = slowest_start_us + (slowest_event.dur or 0)
+        end_diff_ms = abs(fastest_end_us - slowest_end_us) / 1000.0
+        end_time_diff = f"{end_diff_ms:.3f}"
+        
+        # 阈值检查
+        threshold_exceeded = "✗" if end_diff_ms > 5.0 else "✓"
+        
+        return start_time_diff, end_time_diff, threshold_exceeded
+
     def _check_communication_kernel_consistency(self, fastest_data: 'ProfilerData', slowest_data: 'ProfilerData',
                                               kernel_prefix: str, comm_idx: int) -> bool:
         """
@@ -434,99 +515,10 @@ class CommunicationAnalyzer:
         # 2. 时间戳标准化已在parser中完成
         print("    时间戳标准化已在parser中完成")
         
-        # 3. 打印通信事件的markdown表格
-        print("    通信事件对比表格:")
-        print("    | 序号 | 最快卡Kernel名称 | 最快卡开始时间 | 最快卡结束时间 | 最慢卡Kernel名称 | 最慢卡开始时间 | 最慢卡结束时间 | 名称一致 | 开始时间差(ms) | 结束时间差(ms) | 超过阈值 |")
-        print("    |------|----------------|-------------|-------------|----------------|-------------|-------------|----------|---------------|---------------|----------|")
-        
-        # 按顺序对比通信事件
-        max_events = max(len(fastest_all_comm_events), len(slowest_all_comm_events))
-        consistency_check_passed = True
-        
-        for i in range(max_events):
-            # 获取当前索引的事件
-            fastest_event = fastest_all_comm_events[i] if i < len(fastest_all_comm_events) else None
-            slowest_event = slowest_all_comm_events[i] if i < len(slowest_all_comm_events) else None
-            
-            # 获取kernel名称
-            fastest_name = fastest_event.name if fastest_event else "N/A"
-            slowest_name = slowest_event.name if slowest_event else "N/A"
-            
-            # 获取开始时间戳
-            if fastest_event and fastest_event.readable_timestamp:
-                fastest_start_ts = fastest_event.readable_timestamp
-            elif fastest_event:
-                fastest_start_ts = f"{fastest_event.ts:.2f}μs"
-            else:
-                fastest_start_ts = "N/A"
-            
-            if slowest_event and slowest_event.readable_timestamp:
-                slowest_start_ts = slowest_event.readable_timestamp
-            elif slowest_event:
-                slowest_start_ts = f"{slowest_event.ts:.2f}μs"
-            else:
-                slowest_start_ts = "N/A"
-            
-            # 计算结束时间戳
-            if fastest_event and fastest_event.ts is not None and fastest_event.dur is not None:
-                fastest_end_ts = fastest_event.ts + fastest_event.dur
-                if fastest_event.readable_timestamp:
-                    # 如果有可读时间戳，计算结束时间戳
-                    import datetime
-                    start_dt = datetime.datetime.strptime(fastest_event.readable_timestamp, "%Y-%m-%d %H:%M:%S.%f")
-                    end_dt = start_dt + datetime.timedelta(microseconds=fastest_event.dur)
-                    fastest_end_ts_str = end_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
-                else:
-                    fastest_end_ts_str = f"{fastest_end_ts:.2f}μs"
-            else:
-                fastest_end_ts_str = "N/A"
-                fastest_end_ts = None
-            
-            if slowest_event and slowest_event.ts is not None and slowest_event.dur is not None:
-                slowest_end_ts = slowest_event.ts + slowest_event.dur
-                if slowest_event.readable_timestamp:
-                    # 如果有可读时间戳，计算结束时间戳
-                    import datetime
-                    start_dt = datetime.datetime.strptime(slowest_event.readable_timestamp, "%Y-%m-%d %H:%M:%S.%f")
-                    end_dt = start_dt + datetime.timedelta(microseconds=slowest_event.dur)
-                    slowest_end_ts_str = end_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
-                else:
-                    slowest_end_ts_str = f"{slowest_end_ts:.2f}μs"
-            else:
-                slowest_end_ts_str = "N/A"
-                slowest_end_ts = None
-            
-            # 检查名称是否一致
-            name_consistent = "✓" if fastest_name == slowest_name else "✗"
-            
-            # 计算开始时间差（使用readable_timestamp）
-            start_time_diff = "N/A"
-            if fastest_event and slowest_event and fastest_event.readable_timestamp and slowest_event.readable_timestamp:
-                fastest_start_us = _readable_timestamp_to_microseconds(fastest_event.readable_timestamp)
-                slowest_start_us = _readable_timestamp_to_microseconds(slowest_event.readable_timestamp)
-                diff_ms = abs(fastest_start_us - slowest_start_us) / 1000.0  # 转换为毫秒
-                start_time_diff = f"{diff_ms:.3f}"
-            
-            # 计算结束时间差（使用readable_timestamp）
-            end_time_diff = "N/A"
-            threshold_exceeded = "N/A"
-            if fastest_event and slowest_event and fastest_event.readable_timestamp and slowest_event.readable_timestamp:
-                # 使用readable_timestamp计算结束时间
-                fastest_start_us = _readable_timestamp_to_microseconds(fastest_event.readable_timestamp)
-                slowest_start_us = _readable_timestamp_to_microseconds(slowest_event.readable_timestamp)
-                fastest_end_us = fastest_start_us + (fastest_event.dur or 0)
-                slowest_end_us = slowest_start_us + (slowest_event.dur or 0)
-                diff_ms = abs(fastest_end_us - slowest_end_us) / 1000.0  # 转换为毫秒
-                end_time_diff = f"{diff_ms:.3f}"
-                
-                # 检查是否超过5000us阈值
-                if diff_ms > 5.0:  # 5ms = 5000us
-                    threshold_exceeded = "✗"
-                    consistency_check_passed = False
-                else:
-                    threshold_exceeded = "✓"
-            
-            print(f"    | {i+1} | {fastest_name} | {fastest_start_ts} | {fastest_end_ts_str} | {slowest_name} | {slowest_start_ts} | {slowest_end_ts_str} | {name_consistent} | {start_time_diff} | {end_time_diff} | {threshold_exceeded} |")
+        # 3. 打印通信事件对比表格
+        consistency_check_passed = self._print_communication_events_table(
+            fastest_all_comm_events, slowest_all_comm_events
+        )
         
         # 4. 检查kernel名称顺序一致性
         fastest_kernel_names = [event.name for event in fastest_all_comm_events]
@@ -552,22 +544,21 @@ class CommunicationAnalyzer:
             return True
     
     def _find_communication_event(self, data, comm_idx, kernel_prefix):
-        """找到指定comm_idx的通信kernel操作event（简化版本）"""
-        comm_events = []
-        comm_count = 0
+        """找到指定comm_idx的通信kernel操作event"""
+        events = self._find_events_by_criteria(
+            data.events, 
+            lambda e: e.cat == 'kernel' and e.name.startswith(kernel_prefix)
+        )
         
-        for event in data.events:
-            if (event.cat == 'kernel' and 
-                event.name.startswith(kernel_prefix)):
-                if comm_count == comm_idx:
-                    comm_events.append(event)
-                comm_count += 1
-        
-        if comm_events:
-            print(f"    找到 1 个目标通信kernel event: {comm_events[0].name}")
-            return comm_events[0]
+        if comm_idx < len(events):
+            print(f"    找到目标通信kernel event: {events[comm_idx].name}")
+            return events[comm_idx]
         
         return None
+    
+    def _find_events_by_criteria(self, events, criteria_func):
+        """根据条件查找事件"""
+        return [event for event in events if criteria_func(event)]
     
     def _find_prev_communication_kernel_events(self, data, target_kernel_events, prev_kernel_pattern):
         """找到目标通信kernel之前的通信kernel events"""
@@ -575,46 +566,28 @@ class CommunicationAnalyzer:
             print("    警告: 目标通信kernel events为空")
             return []
         
-        # 找到目标kernel的最早开始时间
         target_start_time = min(event.ts for event in target_kernel_events if event.ts is not None)
         target_kernel_name = target_kernel_events[0].name
         print(f"    目标通信kernel: {target_kernel_name}, 开始时间: {target_start_time:.2f}")
         
-        # 找到所有匹配模式的通信kernel events，按结束时间排序
-        communication_kernels = []
-        for event in data.events:
-            if (event.cat == 'kernel' and
-                event.ts is not None and
-                event.ts < target_start_time and
-                re.match(prev_kernel_pattern, event.name)):
-                # 检查是否在黑名单中
-                is_blacklisted = any(pattern in event.name for pattern in self.COMMUNICATION_BLACKLIST_PATTERNS)
-                if not is_blacklisted:
-                    communication_kernels.append(event)
+        # 查找匹配条件的通信kernel events
+        communication_kernels = self._find_events_by_criteria(
+            data.events,
+            lambda e: (e.cat == 'kernel' and e.ts is not None and e.ts < target_start_time and
+                      re.match(prev_kernel_pattern, e.name) and
+                      not any(pattern in e.name for pattern in self.COMMUNICATION_BLACKLIST_PATTERNS))
+        )
         
-        print(f"    找到 {len(communication_kernels)} 个匹配模式 '{prev_kernel_pattern}' 的通信kernel events（已过滤机内通信）")
-        
-        # 按结束时间排序，取最后一个（最接近目标kernel的）
-        communication_kernels.sort(key=lambda x: (x.ts + x.dur) if (x.ts is not None and x.dur is not None) else 0)
+        print(f"    找到 {len(communication_kernels)} 个匹配的通信kernel events")
         
         if communication_kernels:
-            # 返回最后一个通信kernel（最接近目标kernel的）
+            # 按结束时间排序，取最后一个
+            communication_kernels.sort(key=lambda x: (x.ts + x.dur) if (x.ts is not None and x.dur is not None) else 0)
             last_kernel_event = communication_kernels[-1]
-            print(f"    上一个通信kernel: {last_kernel_event.name}")
             
-            # 打印找到的上一个通信事件的可读时间戳
-            start_time = last_kernel_event.readable_timestamp if last_kernel_event.readable_timestamp else f"{last_kernel_event.ts:.2f}μs"
-            end_time = "N/A"
-            if last_kernel_event.ts is not None and last_kernel_event.dur is not None:
-                if last_kernel_event.readable_timestamp:
-                    import datetime
-                    start_dt = datetime.datetime.strptime(last_kernel_event.readable_timestamp, "%Y-%m-%d %H:%M:%S.%f")
-                    end_dt = start_dt + datetime.timedelta(microseconds=last_kernel_event.dur)
-                    end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
-                else:
-                    end_time = f"{last_kernel_event.ts + last_kernel_event.dur:.2f}μs"
-            print(f"    开始时间: {start_time}")
-            print(f"    结束时间: {end_time}")
+            print(f"    上一个通信kernel: {last_kernel_event.name}")
+            print(f"    开始时间: {_format_timestamp_display(last_kernel_event)}")
+            print(f"    结束时间: {_calculate_end_time_display(last_kernel_event)}")
             
             return [last_kernel_event]
         else:
@@ -1120,99 +1093,86 @@ class CommunicationAnalyzer:
             return []
     
     def _generate_raw_data_excel(self, all2all_data: Dict[int, Dict[int, List[float]]], output_dir: str) -> Path:
-        """
-        生成原始数据Excel文件
-        
-        Args:
-            all2all_data: 通信数据
-            output_dir: 输出目录
-            
-        Returns:
-            Path: 生成的文件路径
-        """
-        if pd is None:
-            raise ImportError("pandas is required for Excel output. Please install pandas and openpyxl.")
-        
-        output_path = Path(output_dir) / "communication_raw_data.xlsx"
-        
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            for step, card_data in all2all_data.items():
-                # 创建DataFrame
-                rows = []
-                for card_idx, durations in card_data.items():
-                    for i, duration in enumerate(durations):
-                        rows.append({
-                            'Step': step,
-                            'Card_Index': card_idx,
-                            'Comm_Index': i,
-                            'Duration_us': duration
-                        })
-                
-                if rows:
-                    df = pd.DataFrame(rows)
-                    df.to_excel(writer, sheet_name=f'Step_{step}', index=False)
-        
-        print(f"生成原始数据文件: {output_path}")
-        return output_path
+        """生成原始数据Excel文件"""
+        return self._generate_excel_file(
+            all2all_data, output_dir, "communication_raw_data.xlsx", 
+            self._create_raw_data_sheets
+        )
     
     def _generate_statistics_excel(self, all2all_data: Dict[int, Dict[int, List[float]]], output_dir: str) -> Path:
-        """
-        生成统计信息Excel文件
-        
-        Args:
-            all2all_data: 通信数据
-            output_dir: 输出目录
-            
-        Returns:
-            Path: 生成的文件路径
-        """
+        """生成统计信息Excel文件"""
+        return self._generate_excel_file(
+            all2all_data, output_dir, "communication_statistics.xlsx",
+            self._create_statistics_sheets
+        )
+    
+    def _generate_excel_file(self, data, output_dir: str, filename: str, sheet_creator) -> Path:
+        """通用的Excel文件生成方法"""
         if pd is None:
             raise ImportError("pandas is required for Excel output. Please install pandas and openpyxl.")
         
-        output_path = Path(output_dir) / "communication_statistics.xlsx"
+        output_path = Path(output_dir) / filename
         
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            # 按step统计
-            step_stats = []
-            for step, card_data in all2all_data.items():
-                all_durations = []
-                for durations in card_data.values():
-                    all_durations.extend(durations)
-                
-                if all_durations:
-                    step_stats.append({
-                        'Step': step,
-                        'Total_Cards': len(card_data),
-                        'Total_Comm_Ops': len(all_durations),
-                        'Min_Duration_us': min(all_durations),
-                        'Max_Duration_us': max(all_durations),
-                        'Mean_Duration_us': sum(all_durations) / len(all_durations),
-                        'Std_Duration_us': (sum((x - sum(all_durations) / len(all_durations))**2 for x in all_durations) / len(all_durations))**0.5
+            sheet_creator(data, writer)
+        
+        print(f"生成文件: {output_path}")
+        return output_path
+    
+    def _create_raw_data_sheets(self, all2all_data, writer):
+        """创建原始数据表格"""
+        for step, card_data in all2all_data.items():
+            rows = []
+            for card_idx, durations in card_data.items():
+                for i, duration in enumerate(durations):
+                    rows.append({
+                        'Step': step, 'Card_Index': card_idx, 
+                        'Comm_Index': i, 'Duration_us': duration
                     })
             
-            if step_stats:
-                df = pd.DataFrame(step_stats)
-                df.to_excel(writer, sheet_name='Step_Statistics', index=False)
-            
-            # 按card统计
-            card_stats = []
-            for step, card_data in all2all_data.items():
-                for card_idx, durations in card_data.items():
-                    if durations:
-                        card_stats.append({
-                            'Step': step,
-                            'Card_Index': card_idx,
-                            'Comm_Ops_Count': len(durations),
-                            'Min_Duration_us': min(durations),
-                            'Max_Duration_us': max(durations),
-                            'Mean_Duration_us': sum(durations) / len(durations),
-                            'Std_Duration_us': (sum((x - sum(durations) / len(durations))**2 for x in durations) / len(durations))**0.5
-                        })
-            
-            if card_stats:
-                df = pd.DataFrame(card_stats)
-                df.to_excel(writer, sheet_name='Card_Statistics', index=False)
+            if rows:
+                df = pd.DataFrame(rows)
+                df.to_excel(writer, sheet_name=f'Step_{step}', index=False)
+    
+    def _create_statistics_sheets(self, all2all_data, writer):
+        """创建统计信息表格"""
+        # Step统计
+        step_stats = self._calculate_step_statistics(all2all_data)
+        if step_stats:
+            pd.DataFrame(step_stats).to_excel(writer, sheet_name='Step_Statistics', index=False)
         
-        print(f"生成统计信息文件: {output_path}")
-        return output_path
+        # Card统计
+        card_stats = self._calculate_card_statistics(all2all_data)
+        if card_stats:
+            pd.DataFrame(card_stats).to_excel(writer, sheet_name='Card_Statistics', index=False)
+    
+    def _calculate_step_statistics(self, all2all_data):
+        """计算step级别统计信息"""
+        step_stats = []
+        for step, card_data in all2all_data.items():
+            all_durations = [d for durations in card_data.values() for d in durations]
+            if all_durations:
+                mean_dur = sum(all_durations) / len(all_durations)
+                step_stats.append({
+                    'Step': step, 'Total_Cards': len(card_data), 'Total_Comm_Ops': len(all_durations),
+                    'Min_Duration_us': min(all_durations), 'Max_Duration_us': max(all_durations),
+                    'Mean_Duration_us': mean_dur,
+                    'Std_Duration_us': (sum((x - mean_dur)**2 for x in all_durations) / len(all_durations))**0.5
+                })
+        return step_stats
+    
+    def _calculate_card_statistics(self, all2all_data):
+        """计算card级别统计信息"""
+        card_stats = []
+        for step, card_data in all2all_data.items():
+            for card_idx, durations in card_data.items():
+                if durations:
+                    mean_dur = sum(durations) / len(durations)
+                    card_stats.append({
+                        'Step': step, 'Card_Index': card_idx, 'Comm_Ops_Count': len(durations),
+                        'Min_Duration_us': min(durations), 'Max_Duration_us': max(durations),
+                        'Mean_Duration_us': mean_dur,
+                        'Std_Duration_us': (sum((x - mean_dur)**2 for x in durations) / len(durations))**0.5
+                    })
+        return card_stats
     
