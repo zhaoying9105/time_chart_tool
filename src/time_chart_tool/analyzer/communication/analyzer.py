@@ -25,34 +25,24 @@ def _readable_timestamp_to_microseconds(readable_timestamp: str) -> float:
 
 def _format_timestamp_display(event, show_readable: bool = True) -> str:
     """格式化时间戳显示"""
-    if show_readable and event.readable_timestamp:
+    if show_readable:
         return event.readable_timestamp
-    elif event.ts is not None:
-        return f"{event.ts:.2f}μs"
     else:
-        return "N/A"
+        return f"{event.ts:.2f}μs"
 
 
 def _calculate_end_time_display(event) -> str:
     """计算并格式化结束时间显示"""
-    if event.ts is not None and event.dur is not None:
-        if event.readable_timestamp:
-            start_dt = datetime.strptime(event.readable_timestamp, "%Y-%m-%d %H:%M:%S.%f")
-            end_dt = start_dt + timedelta(microseconds=event.dur)
-            return end_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
-        else:
-            return f"{event.ts + event.dur:.2f}μs"
-    return "N/A"
+    start_dt = datetime.strptime(event.readable_timestamp, "%Y-%m-%d %H:%M:%S.%f")
+    end_dt = start_dt + timedelta(microseconds=event.dur)
+    return end_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
 def _calculate_time_diff_readable(event1, event2) -> float:
     """使用readable_timestamp计算时间差（微秒）"""
-    if (event1 and event2 and 
-        event1.readable_timestamp and event2.readable_timestamp):
-        start1 = _readable_timestamp_to_microseconds(event1.readable_timestamp)
-        start2 = _readable_timestamp_to_microseconds(event2.readable_timestamp)
-        return abs(start1 - start2)
-    return 0.0
+    start1 = _readable_timestamp_to_microseconds(event1.readable_timestamp)
+    start2 = _readable_timestamp_to_microseconds(event2.readable_timestamp)
+    return abs(start1 - start2)
 
 
 class CommunicationAnalyzer:
@@ -417,7 +407,7 @@ class CommunicationAnalyzer:
                     comm_events.append(event)
         
         # 按结束时间排序（从早到晚）
-        comm_events.sort(key=lambda x: (x.ts + x.dur) if (x.ts is not None and x.dur is not None) else 0)
+        comm_events.sort(key=lambda x: x.ts + x.dur)
         
         return comm_events
 
@@ -459,9 +449,6 @@ class CommunicationAnalyzer:
 
     def _calculate_time_differences(self, fastest_event, slowest_event) -> tuple:
         """计算时间差并检查阈值"""
-        if not (fastest_event and slowest_event and 
-                fastest_event.readable_timestamp and slowest_event.readable_timestamp):
-            return "N/A", "N/A", "N/A"
         
         # 开始时间差
         start_diff_us = _calculate_time_diff_readable(fastest_event, slowest_event)
@@ -470,8 +457,8 @@ class CommunicationAnalyzer:
         # 结束时间差
         fastest_start_us = _readable_timestamp_to_microseconds(fastest_event.readable_timestamp)
         slowest_start_us = _readable_timestamp_to_microseconds(slowest_event.readable_timestamp)
-        fastest_end_us = fastest_start_us + (fastest_event.dur or 0)
-        slowest_end_us = slowest_start_us + (slowest_event.dur or 0)
+        fastest_end_us = fastest_start_us + fastest_event.dur
+        slowest_end_us = slowest_start_us + slowest_event.dur
         end_diff_ms = abs(fastest_end_us - slowest_end_us) / 1000.0
         end_time_diff = f"{end_diff_ms:.3f}"
         
@@ -566,14 +553,14 @@ class CommunicationAnalyzer:
             print("    警告: 目标通信kernel events为空")
             return []
         
-        target_start_time = min(event.ts for event in target_kernel_events if event.ts is not None)
+        target_start_time = min(event.ts for event in target_kernel_events)
         target_kernel_name = target_kernel_events[0].name
         print(f"    目标通信kernel: {target_kernel_name}, 开始时间: {target_start_time:.2f}")
         
         # 查找匹配条件的通信kernel events
         communication_kernels = self._find_events_by_criteria(
             data.events,
-            lambda e: (e.cat == 'kernel' and e.ts is not None and e.ts < target_start_time and
+            lambda e: (e.cat == 'kernel' and e.ts < target_start_time and
                       re.match(prev_kernel_pattern, e.name) and
                       not any(pattern in e.name for pattern in self.COMMUNICATION_BLACKLIST_PATTERNS))
         )
@@ -582,7 +569,7 @@ class CommunicationAnalyzer:
         
         if communication_kernels:
             # 按结束时间排序，取最后一个
-            communication_kernels.sort(key=lambda x: (x.ts + x.dur) if (x.ts is not None and x.dur is not None) else 0)
+            communication_kernels.sort(key=lambda x: x.ts + x.dur)
             last_kernel_event = communication_kernels[-1]
             
             print(f"    上一个通信kernel: {last_kernel_event.name}")
@@ -597,17 +584,11 @@ class CommunicationAnalyzer:
     
     def _get_analysis_start_time(self, data, prev_event, current_event):
         """获取分析开始时间（简化版本）"""
-        if prev_event and prev_event.dur is not None:
-            return prev_event.ts + prev_event.dur
-        else:
-            return 0.0
+        return prev_event.ts + prev_event.dur
     
     def _get_analysis_end_time(self, data, comm_event):
         """获取分析结束时间（简化版本）"""
-        if comm_event and comm_event.ts is not None:
-            return comm_event.ts
-        else:
-            return float('inf')
+        return comm_event.ts
     
     def _extract_events_in_range_with_intersection(self, data, start_time, end_time, 
                                                  filtered_cpu_events_by_external_id, 
@@ -719,20 +700,15 @@ class CommunicationAnalyzer:
             slowest_kernel_events = self._find_kernel_events_for_cpu_event(slowest_cpu_event, slowest_events_by_external_id)
             
             # 计算时间差异 - 使用readable_timestamp
-            if fastest_cpu_event.readable_timestamp and slowest_cpu_event.readable_timestamp:
-                # 将readable_timestamp转换为微秒时间戳
-                fastest_start_us = _readable_timestamp_to_microseconds(fastest_cpu_event.readable_timestamp)
-                slowest_start_us = _readable_timestamp_to_microseconds(slowest_cpu_event.readable_timestamp)
-                cpu_start_time_diff = slowest_start_us - fastest_start_us
-            else:
-                # 回退到原来的ts计算方式
-                cpu_start_time_diff = slowest_cpu_event.ts - fastest_cpu_event.ts
+            fastest_start_us = _readable_timestamp_to_microseconds(fastest_cpu_event.readable_timestamp)
+            slowest_start_us = _readable_timestamp_to_microseconds(slowest_cpu_event.readable_timestamp)
+            cpu_start_time_diff = slowest_start_us - fastest_start_us
             
-            cpu_duration_diff = (slowest_cpu_event.dur or 0) - (fastest_cpu_event.dur or 0)
+            cpu_duration_diff = slowest_cpu_event.dur - fastest_cpu_event.dur
             
             # 计算kernel时间差异
-            fastest_kernel_duration = sum(e.dur for e in fastest_kernel_events if e.dur is not None)
-            slowest_kernel_duration = sum(e.dur for e in slowest_kernel_events if e.dur is not None)
+            fastest_kernel_duration = sum(e.dur for e in fastest_kernel_events)
+            slowest_kernel_duration = sum(e.dur for e in slowest_kernel_events)
             kernel_duration_diff = slowest_kernel_duration - fastest_kernel_duration
             
             # 计算时间差异占all2all duration差异的比例
@@ -742,7 +718,7 @@ class CommunicationAnalyzer:
             
             # 构建行数据
             # 根据show参数决定展示的时间格式和列名
-            if show_readable_timestamp and fastest_cpu_event.readable_timestamp and slowest_cpu_event.readable_timestamp:
+            if show_readable_timestamp:
                 # 使用readable_timestamp转换后的值
                 fastest_display_time = _readable_timestamp_to_microseconds(fastest_cpu_event.readable_timestamp)
                 slowest_display_time = _readable_timestamp_to_microseconds(slowest_cpu_event.readable_timestamp)
@@ -764,8 +740,8 @@ class CommunicationAnalyzer:
                 slowest_time_col: slowest_display_time,
                 'cpu_start_time_diff': cpu_start_time_diff,
                 'cpu_start_time_diff_ratio': cpu_start_time_diff_ratio,
-                'fastest_cpu_duration': fastest_cpu_event.dur or 0,
-                'slowest_cpu_duration': slowest_cpu_event.dur or 0,
+                'fastest_cpu_duration': fastest_cpu_event.dur,
+                'slowest_cpu_duration': slowest_cpu_event.dur,
                 'cpu_duration_diff': cpu_duration_diff,
                 'fastest_kernel_duration': fastest_kernel_duration,
                 'slowest_kernel_duration': slowest_kernel_duration,
