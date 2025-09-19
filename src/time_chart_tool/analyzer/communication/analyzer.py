@@ -333,10 +333,8 @@ class CommunicationAnalyzer:
             'slowest_duration': slowest_comm_duration,
             'duration_ratio': slowest_comm_duration / fastest_comm_duration if fastest_comm_duration > 0 else 0,
             'comparison_rows': comparison_rows['comparison_rows'],
-            'cpu_start_time_change_points': comparison_rows['cpu_start_time_change_points'],
-            'kernel_duration_change_points': comparison_rows['kernel_duration_change_points'],
-            'all_change_points': comparison_rows['all_change_points'],
-            'change_point_data': comparison_rows['change_point_data']
+            'top_kernel_duration_ratios': comparison_rows['top_kernel_duration_ratios'],
+            'top_cpu_start_time_differences': comparison_rows['top_cpu_start_time_differences']
         }
     
     def _generate_deep_analysis_excel(self, comparison_result, step, comm_idx, output_dir):
@@ -378,10 +376,63 @@ class CommunicationAnalyzer:
             summary_df = pd.DataFrame([summary_data])
             summary_df.to_excel(writer, sheet_name='汇总信息', index=False)
             
-            # 写入突变点数据
-            if 'change_point_data' in comparison_result and comparison_result['change_point_data']:
-                change_point_df = pd.DataFrame(comparison_result['change_point_data'])
-                change_point_df.to_excel(writer, sheet_name='突变点分析', index=False)
+            # 写入kernel duration ratio分析数据
+            if 'top_kernel_duration_ratios' in comparison_result and comparison_result['top_kernel_duration_ratios']:
+                kernel_data = []
+                for i, (idx, ratio, row) in enumerate(comparison_result['top_kernel_duration_ratios']):
+                    kernel_data.append({
+                        '排名': i + 1,
+                        '事件序列': idx + 1,
+                        '最快Card CPU操作名': row['cpu_op_name'],
+                        '最慢Card CPU操作名': row.get('slowest_cpu_op_name', 'N/A'),
+                        '最快Card操作形状': row['cpu_op_shape'],
+                        '最慢Card操作形状': row.get('slowest_cpu_op_shape', 'N/A'),
+                        '最快Card操作类型': row['cpu_op_dtype'],
+                        '最慢Card操作类型': row.get('slowest_cpu_op_dtype', 'N/A'),
+                        'Kernel Duration Ratio': ratio,
+                        '最快Card CPU开始时间(可读)': row['fastest_cpu_readable_timestamp'],
+                        '最快Card CPU开始时间(ts)': row.get('fastest_cpu_start_time', 'N/A'),
+                        '最慢Card CPU开始时间(可读)': row['slowest_cpu_readable_timestamp'],
+                        '最慢Card CPU开始时间(ts)': row.get('slowest_cpu_start_time', 'N/A'),
+                        '最快Card CPU持续时间': row['fastest_cpu_duration'],
+                        '最慢Card CPU持续时间': row['slowest_cpu_duration'],
+                        'CPU持续时间差异': row['cpu_duration_diff'],
+                        '最快Card Kernel持续时间': row['fastest_kernel_duration'],
+                        '最慢Card Kernel持续时间': row['slowest_kernel_duration'],
+                        'Kernel持续时间差异': row['kernel_duration_diff']
+                    })
+                kernel_df = pd.DataFrame(kernel_data)
+                kernel_df.to_excel(writer, sheet_name='Kernel Duration分析', index=False)
+            
+            # 写入CPU start time相邻差值分析数据
+            if 'top_cpu_start_time_differences' in comparison_result and comparison_result['top_cpu_start_time_differences']:
+                cpu_data = []
+                for i, diff_info in enumerate(comparison_result['top_cpu_start_time_differences']):
+                    prev_row = diff_info['prev_row']
+                    current_row = diff_info['current_row']
+                    cpu_data.append({
+                        '排名': i + 1,
+                        '事件对': f"{diff_info['index_pair'][0]+1}-{diff_info['index_pair'][1]+1}",
+                        '前一个最快Card操作名': prev_row['cpu_op_name'],
+                        '前一个最慢Card操作名': prev_row.get('slowest_cpu_op_name', 'N/A'),
+                        '前一个Ratio': diff_info['prev_ratio'],
+                        '前一个最快Card时间(可读)': prev_row['fastest_cpu_readable_timestamp'],
+                        '前一个最快Card时间(ts)': prev_row.get('fastest_cpu_start_time', 'N/A'),
+                        '前一个最慢Card时间(可读)': prev_row['slowest_cpu_readable_timestamp'],
+                        '前一个最慢Card时间(ts)': prev_row.get('slowest_cpu_start_time', 'N/A'),
+                        '当前最快Card操作名': current_row['cpu_op_name'],
+                        '当前最慢Card操作名': current_row.get('slowest_cpu_op_name', 'N/A'),
+                        '当前Ratio': diff_info['current_ratio'],
+                        '当前最快Card时间(可读)': current_row['fastest_cpu_readable_timestamp'],
+                        '当前最快Card时间(ts)': current_row.get('fastest_cpu_start_time', 'N/A'),
+                        '当前最慢Card时间(可读)': current_row['slowest_cpu_readable_timestamp'],
+                        '当前最慢Card时间(ts)': current_row.get('slowest_cpu_start_time', 'N/A'),
+                        '相邻差值': diff_info['difference'],
+                        '前一个CPU启动时间差异': prev_row['cpu_start_time_diff'],
+                        '当前CPU启动时间差异': current_row['cpu_start_time_diff']
+                    })
+                cpu_df = pd.DataFrame(cpu_data)
+                cpu_df.to_excel(writer, sheet_name='CPU Start Time分析', index=False)
         
         print(f"深度分析Excel文件已生成: {excel_file}")
         return excel_file
@@ -734,8 +785,11 @@ class CommunicationAnalyzer:
             row = {
                 'event_sequence': i + 1,
                 'cpu_op_name': fastest_cpu_event.name,
+                'slowest_cpu_op_name': slowest_cpu_event.name,
                 'cpu_op_shape': str(fastest_cpu_event.args.get('Input Dims', '') if fastest_cpu_event.args else ''),
+                'slowest_cpu_op_shape': str(slowest_cpu_event.args.get('Input Dims', '') if slowest_cpu_event.args else ''),
                 'cpu_op_dtype': str(fastest_cpu_event.args.get('Input type', '') if fastest_cpu_event.args else ''),
+                'slowest_cpu_op_dtype': str(slowest_cpu_event.args.get('Input type', '') if slowest_cpu_event.args else ''),
                 fastest_time_col: fastest_display_time,
                 slowest_time_col: slowest_display_time,
                 'cpu_start_time_diff': cpu_start_time_diff,
@@ -757,29 +811,49 @@ class CommunicationAnalyzer:
         
         print(f"成功比较了 {len(comparison_rows)} 个CPU events")
         
-        # 检测突变点
-        print("\n=== 检测突变点 ===")
-        cpu_start_time_change_points = self.detect_change_points(comparison_rows, 'cpu_start_time_diff_ratio', threshold=0.3)
-        kernel_duration_change_points = self.detect_change_points(comparison_rows, 'kernel_duration_diff_ratio', threshold=0.3)
+        # 分析kernel duration ratio - 找出前5个最大的
+        print("\n=== Kernel Duration Ratio 分析 ===")
+        top_kernel_duration_ratios = self.find_top_kernel_duration_ratios(comparison_rows, top_n=5)
+        print(f"找到 {len(top_kernel_duration_ratios)} 个最大的kernel duration ratio事件:")
+        for i, (idx, ratio, row) in enumerate(top_kernel_duration_ratios):
+            print(f"  {i+1}. 事件序列 {idx+1}:")
+            print(f"     最快Card CPU操作: {row['cpu_op_name']}")
+            print(f"     最慢Card CPU操作: {row.get('slowest_cpu_op_name', 'N/A')}")
+            print(f"     最快Card Timestamp: {row['fastest_cpu_readable_timestamp']} (ts: {row.get('fastest_cpu_start_time', 'N/A')})")
+            print(f"     最慢Card Timestamp: {row['slowest_cpu_readable_timestamp']} (ts: {row.get('slowest_cpu_start_time', 'N/A')})")
+            print(f"     Kernel Duration Ratio: {ratio:.4f}")
+            print(f"     最快Card操作形状: {row['cpu_op_shape']}, 类型: {row['cpu_op_dtype']}")
+            print(f"     最慢Card操作形状: {row.get('slowest_cpu_op_shape', 'N/A')}, 类型: {row.get('slowest_cpu_op_dtype', 'N/A')}")
+            print()
         
-        print(f"CPU启动时间差异突变点: {cpu_start_time_change_points}")
-        print(f"Kernel持续时间差异突变点: {kernel_duration_change_points}")
-        
-        # 打印合并的突变点信息
-        self._print_combined_change_points(comparison_rows, cpu_start_time_change_points, kernel_duration_change_points)
-        
-        # 合并所有突变点
-        all_change_points = sorted(list(set(cpu_start_time_change_points + kernel_duration_change_points)))
-        
-        # 提取突变点数据
-        change_point_data = self.extract_change_point_data(comparison_rows, all_change_points, context_size=3)
+        # 分析cpu start time相邻差值 - 找出前5对最大的
+        print("\n=== CPU Start Time 相邻差值分析 ===")
+        top_cpu_start_time_differences = self.find_top_cpu_start_time_differences(comparison_rows, top_n=5)
+        print(f"找到 {len(top_cpu_start_time_differences)} 对最大的CPU start time相邻差值:")
+        for i, diff_info in enumerate(top_cpu_start_time_differences):
+            prev_idx, current_idx = diff_info['index_pair']
+            prev_row = diff_info['prev_row']
+            current_row = diff_info['current_row']
+            print(f"  {i+1}. 事件对 ({prev_idx+1}, {current_idx+1}):")
+            print(f"     前一个事件:")
+            print(f"       最快Card CPU操作: {prev_row['cpu_op_name']}")
+            print(f"       最慢Card CPU操作: {prev_row.get('slowest_cpu_op_name', 'N/A')}")
+            print(f"       最快Card Timestamp: {prev_row['fastest_cpu_readable_timestamp']} (ts: {prev_row.get('fastest_cpu_start_time', 'N/A')})")
+            print(f"       最慢Card Timestamp: {prev_row['slowest_cpu_readable_timestamp']} (ts: {prev_row.get('slowest_cpu_start_time', 'N/A')})")
+            print(f"       Ratio: {diff_info['prev_ratio']:.4f}")
+            print(f"     当前事件:")
+            print(f"       最快Card CPU操作: {current_row['cpu_op_name']}")
+            print(f"       最慢Card CPU操作: {current_row.get('slowest_cpu_op_name', 'N/A')}")
+            print(f"       最快Card Timestamp: {current_row['fastest_cpu_readable_timestamp']} (ts: {current_row.get('fastest_cpu_start_time', 'N/A')})")
+            print(f"       最慢Card Timestamp: {current_row['slowest_cpu_readable_timestamp']} (ts: {current_row.get('slowest_cpu_start_time', 'N/A')})")
+            print(f"       Ratio: {diff_info['current_ratio']:.4f}")
+            print(f"     相邻差值: {diff_info['difference']:.4f}")
+            print()
         
         return {
             'comparison_rows': comparison_rows,
-            'cpu_start_time_change_points': cpu_start_time_change_points,
-            'kernel_duration_change_points': kernel_duration_change_points,
-            'all_change_points': all_change_points,
-            'change_point_data': change_point_data
+            'top_kernel_duration_ratios': top_kernel_duration_ratios,
+            'top_cpu_start_time_differences': top_cpu_start_time_differences
         }
     
     def _find_kernel_events_for_cpu_event(self, cpu_event, events_by_external_id):
@@ -879,6 +953,50 @@ class CommunicationAnalyzer:
                 change_points.append(len(ratios) - 1)
         
         return sorted(list(set(change_points)))
+    
+    def find_top_kernel_duration_ratios(self, comparison_rows, top_n=5):
+        """找出kernel duration ratio最大的前N个事件"""
+        if not comparison_rows:
+            return []
+        
+        # 提取kernel_duration_diff_ratio并添加索引
+        kernel_ratios_with_index = []
+        for i, row in enumerate(comparison_rows):
+            ratio = row.get('kernel_duration_diff_ratio', 0)
+            kernel_ratios_with_index.append((i, ratio, row))
+        
+        # 按ratio降序排序
+        kernel_ratios_with_index.sort(key=lambda x: x[1], reverse=True)
+        
+        # 返回前N个
+        return kernel_ratios_with_index[:top_n]
+    
+    def find_top_cpu_start_time_differences(self, comparison_rows, top_n=5):
+        """找出cpu start time相邻差值最大的前N对"""
+        if len(comparison_rows) < 2:
+            return []
+        
+        # 计算相邻行的cpu_start_time_diff_ratio差值
+        differences = []
+        for i in range(1, len(comparison_rows)):
+            current_ratio = comparison_rows[i].get('cpu_start_time_diff_ratio', 0)
+            prev_ratio = comparison_rows[i-1].get('cpu_start_time_diff_ratio', 0)
+            diff = abs(current_ratio - prev_ratio)
+            
+            differences.append({
+                'index_pair': (i-1, i),
+                'difference': diff,
+                'prev_ratio': prev_ratio,
+                'current_ratio': current_ratio,
+                'prev_row': comparison_rows[i-1],
+                'current_row': comparison_rows[i]
+            })
+        
+        # 按差值降序排序
+        differences.sort(key=lambda x: x['difference'], reverse=True)
+        
+        # 返回前N对
+        return differences[:top_n]
     
     def _print_combined_change_points(self, comparison_rows, cpu_start_time_change_points, kernel_duration_change_points):
         """打印合并的突变点信息，按照操作执行顺序排列"""
