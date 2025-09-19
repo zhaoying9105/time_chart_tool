@@ -373,6 +373,7 @@ class DataAggregator:
         标准化 call stack，优先保留包含 nn.Module 的有价值部分
         特殊处理：去掉 Runstep 模块及其之后的模块（面向 lg-torch 的特殊逻辑）
         如果没有 nn.Module，则保留原始 call stack
+        同时去掉内存地址信息（如 object at 0x7f6f0a70efc0）以确保相同逻辑的调用栈被识别为相同
         
         Args:
             call_stack: 原始 call stack
@@ -393,8 +394,15 @@ class DataAggregator:
                 nn_modules.append(module_name)
         
         if not nn_modules:
-            # 如果没有 nn.Module，保留原始 call stack
-            return call_stack
+            # 如果没有 nn.Module，保留原始 call stack，但去掉内存地址信息
+            normalized = []
+            for frame in call_stack:
+                # 去掉内存地址信息（如 object at 0x7f6f0a70efc0）
+                import re
+                # 匹配并去掉 "object at 0x..." 这样的内存地址信息
+                cleaned_frame = re.sub(r' object at 0x[0-9a-fA-F]+>', '>', frame)
+                normalized.append(cleaned_frame)
+            return normalized
         
         # 找到包含 Runstep 的模块
         runstep_idx = -1
@@ -409,4 +417,12 @@ class DataAggregator:
         else:
             normalized = nn_modules
         
-        return normalized
+        # 对结果也去掉内存地址信息
+        import re
+        cleaned_normalized = []
+        for frame in normalized:
+            # 去掉内存地址信息（如 object at 0x7f6f0a70efc0）
+            cleaned_frame = re.sub(r' object at 0x[0-9a-fA-F]+>', '>', frame)
+            cleaned_normalized.append(cleaned_frame)
+        
+        return cleaned_normalized
