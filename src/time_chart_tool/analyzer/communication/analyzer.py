@@ -725,12 +725,11 @@ class CommunicationAnalyzer:
         print(f"最快card找到 {len(fastest_cpu_events)} 个CPU events")
         print(f"最慢card找到 {len(slowest_cpu_events)} 个CPU events")
         
-        # 2. 检查CPU操作是否一致
-        cpu_ops_consistent = self._check_cpu_ops_consistency(fastest_cpu_events, slowest_cpu_events)
-        if not cpu_ops_consistent:
-            print("警告: 快卡和慢卡的CPU操作不完全一致，比较结果可能不准确")
-        else:
-            print("CPU操作一致性检查通过")
+        # 2. 使用LCS模糊对齐算法
+        print("\n=== 执行LCS模糊对齐 ===")
+        aligned_fastest, aligned_slowest, alignment_info = self.fuzzy_align_cpu_events(
+            fastest_cpu_events, slowest_cpu_events
+        )
         
         # 3. 检查kernel操作是否一致
         kernel_ops_consistent = self._check_kernel_ops_consistency(fastest_events_by_external_id, slowest_events_by_external_id)
@@ -739,12 +738,17 @@ class CommunicationAnalyzer:
         else:
             print("Kernel操作一致性检查通过")
         
-        # 4. 按照时间顺序进行配对比较
-        min_events_count = min(len(fastest_cpu_events), len(slowest_cpu_events))
+        # 4. 使用对齐后的事件进行配对比较
+        matched_events_count = len([info for info in alignment_info if info['match_type'] == 'exact_match'])
         
-        for i in range(min_events_count):
-            fastest_cpu_event = fastest_cpu_events[i]
-            slowest_cpu_event = slowest_cpu_events[i]
+        for i in range(len(aligned_fastest)):
+            fastest_cpu_event = aligned_fastest[i]
+            slowest_cpu_event = aligned_slowest[i]
+            alignment = alignment_info[i]
+            
+            # 跳过未匹配的事件
+            if fastest_cpu_event is None or slowest_cpu_event is None:
+                continue
             
             # 找到对应的kernel events
             fastest_kernel_events = self._find_kernel_events_for_cpu_event(fastest_cpu_event, fastest_events_by_external_id)
@@ -804,19 +808,43 @@ class CommunicationAnalyzer:
                 'fastest_card_idx': fastest_card_idx,
                 'slowest_card_idx': slowest_card_idx,
                 'fastest_cpu_readable_timestamp': fastest_cpu_event.readable_timestamp,
-                'slowest_cpu_readable_timestamp': slowest_cpu_event.readable_timestamp
+                'slowest_cpu_readable_timestamp': slowest_cpu_event.readable_timestamp,
+                # 对齐信息
+                'alignment_type': alignment['match_type'],
+                'alignment_fast_idx': alignment['fast_idx'],
+                'alignment_slow_idx': alignment['slow_idx']
             }
             
             comparison_rows.append(row)
         
         print(f"成功比较了 {len(comparison_rows)} 个CPU events")
         
+        # 对齐质量评估
+        print("\n=== 对齐质量评估 ===")
+        total_aligned = len(comparison_rows)
+        exact_count = sum(1 for row in comparison_rows if row['alignment_type'] == 'exact_match')
+        
+        print(f"总对齐事件数: {total_aligned}")
+        print(f"精确匹配: {exact_count} ({exact_count/total_aligned*100:.1f}%)")
+        
+        # 显示一些对齐示例
+        print("\n=== 对齐示例 ===")
+        matched_examples = [row for row in comparison_rows if row['alignment_type'] == 'exact_match'][:5]
+        for i, row in enumerate(matched_examples):
+            print(f"  {i+1}. 精确匹配: {row['cpu_op_name']} <-> {row['slowest_cpu_op_name']}")
+        
         # 分析kernel duration ratio - 找出前5个最大的
         print("\n=== Kernel Duration Ratio 分析 ===")
         top_kernel_duration_ratios = self.find_top_kernel_duration_ratios(comparison_rows, top_n=5)
         print(f"找到 {len(top_kernel_duration_ratios)} 个最大的kernel duration ratio事件:")
         for i, (idx, ratio, row) in enumerate(top_kernel_duration_ratios):
-            print(f"  {i+1}. 事件序列 {idx+1}:")
+            alignment_type_str = {
+                'exact_match': '精确匹配',
+                'unmatched_fast': '快卡未匹配',
+                'unmatched_slow': '慢卡未匹配'
+            }.get(row['alignment_type'], row['alignment_type'])
+            
+            print(f"  {i+1}. 事件序列 {idx+1} ({alignment_type_str}):")
             print(f"     最快Card CPU操作: {row['cpu_op_name']}")
             print(f"     最慢Card CPU操作: {row.get('slowest_cpu_op_name', 'N/A')}")
             print(f"     最快Card Timestamp: {row['fastest_cpu_readable_timestamp']} (ts: {row.get('fastest_cpu_start_time', 'N/A')})")
@@ -834,14 +862,27 @@ class CommunicationAnalyzer:
             prev_idx, current_idx = diff_info['index_pair']
             prev_row = diff_info['prev_row']
             current_row = diff_info['current_row']
+            
+            prev_alignment_str = {
+                'exact_match': '精确匹配',
+                'unmatched_fast': '快卡未匹配',
+                'unmatched_slow': '慢卡未匹配'
+            }.get(prev_row['alignment_type'], prev_row['alignment_type'])
+            
+            current_alignment_str = {
+                'exact_match': '精确匹配',
+                'unmatched_fast': '快卡未匹配',
+                'unmatched_slow': '慢卡未匹配'
+            }.get(current_row['alignment_type'], current_row['alignment_type'])
+            
             print(f"  {i+1}. 事件对 ({prev_idx+1}, {current_idx+1}):")
-            print(f"     前一个事件:")
+            print(f"     前一个事件 ({prev_alignment_str}):")
             print(f"       最快Card CPU操作: {prev_row['cpu_op_name']}")
             print(f"       最慢Card CPU操作: {prev_row.get('slowest_cpu_op_name', 'N/A')}")
             print(f"       最快Card Timestamp: {prev_row['fastest_cpu_readable_timestamp']} (ts: {prev_row.get('fastest_cpu_start_time', 'N/A')})")
             print(f"       最慢Card Timestamp: {prev_row['slowest_cpu_readable_timestamp']} (ts: {prev_row.get('slowest_cpu_start_time', 'N/A')})")
             print(f"       Ratio: {diff_info['prev_ratio']:.4f}")
-            print(f"     当前事件:")
+            print(f"     当前事件 ({current_alignment_str}):")
             print(f"       最快Card CPU操作: {current_row['cpu_op_name']}")
             print(f"       最慢Card CPU操作: {current_row.get('slowest_cpu_op_name', 'N/A')}")
             print(f"       最快Card Timestamp: {current_row['fastest_cpu_readable_timestamp']} (ts: {current_row.get('fastest_cpu_start_time', 'N/A')})")
@@ -997,6 +1038,135 @@ class CommunicationAnalyzer:
         
         # 返回前N对
         return differences[:top_n]
+    
+    def fuzzy_align_cpu_events(self, fastest_cpu_events, slowest_cpu_events):
+        """
+        基于LCS的模糊对齐CPU事件
+        完全基于操作名称进行匹配，忽略时间信息
+        
+        Args:
+            fastest_cpu_events: 最快卡的CPU事件列表
+            slowest_cpu_events: 最慢卡的CPU事件列表
+            
+        Returns:
+            tuple: (aligned_fastest, aligned_slowest, alignment_info)
+        """
+        if not fastest_cpu_events or not slowest_cpu_events:
+            return [], [], []
+        
+        print(f"开始LCS模糊对齐: 快卡{len(fastest_cpu_events)}个事件, 慢卡{len(slowest_cpu_events)}个事件")
+        
+        # 1. 构建操作名称序列
+        fast_names = [e.name for e in fastest_cpu_events]
+        slow_names = [e.name for e in slowest_cpu_events]
+        
+        # 2. 计算LCS矩阵
+        lcs_matrix = self._compute_lcs_matrix(fast_names, slow_names)
+        
+        # 3. 回溯LCS路径，构建对齐方案
+        alignment = self._backtrack_lcs(fast_names, slow_names, lcs_matrix)
+        
+        # 4. 构建最终对齐结果
+        aligned_fastest, aligned_slowest, alignment_info = self._build_aligned_events(
+            alignment, fastest_cpu_events, slowest_cpu_events
+        )
+        
+        # 5. 统计对齐质量
+        exact_matches = sum(1 for info in alignment_info if info['match_type'] == 'exact_match')
+        unmatched_fast = sum(1 for info in alignment_info if info['match_type'] == 'unmatched_fast')
+        unmatched_slow = sum(1 for info in alignment_info if info['match_type'] == 'unmatched_slow')
+        
+        print(f"LCS对齐完成: 精确匹配 {exact_matches} 个, 快卡未匹配 {unmatched_fast} 个, 慢卡未匹配 {unmatched_slow} 个")
+        print(f"匹配率: {exact_matches / len(alignment_info) * 100:.1f}%")
+        
+        return aligned_fastest, aligned_slowest, alignment_info
+    
+    def _compute_lcs_matrix(self, seq1, seq2):
+        """计算LCS矩阵"""
+        m, n = len(seq1), len(seq2)
+        dp = [[0] * (n + 1) for _ in range(m + 1)]
+        
+        for i in range(1, m + 1):
+            for j in range(1, n + 1):
+                if seq1[i-1] == seq2[j-1]:  # 操作名完全相等
+                    dp[i][j] = dp[i-1][j-1] + 1
+                else:
+                    dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+        
+        return dp
+    
+    def _backtrack_lcs(self, fast_names, slow_names, lcs_matrix):
+        """回溯LCS路径，构建对齐方案"""
+        alignment = []
+        i, j = len(fast_names), len(slow_names)
+        
+        while i > 0 and j > 0:
+            if fast_names[i-1] == slow_names[j-1]:
+                # 精确匹配
+                alignment.append((i-1, j-1, 'exact_match'))
+                i -= 1
+                j -= 1
+            elif lcs_matrix[i-1][j] > lcs_matrix[i][j-1]:
+                # 快卡事件未匹配
+                alignment.append((i-1, None, 'unmatched_fast'))
+                i -= 1
+            else:
+                # 慢卡事件未匹配
+                alignment.append((None, j-1, 'unmatched_slow'))
+                j -= 1
+        
+        # 处理剩余事件
+        while i > 0:
+            alignment.append((i-1, None, 'unmatched_fast'))
+            i -= 1
+        while j > 0:
+            alignment.append((None, j-1, 'unmatched_slow'))
+            j -= 1
+        
+        return alignment[::-1]  # 反转得到正确顺序
+    
+    def _build_aligned_events(self, alignment, fastest_events, slowest_events):
+        """构建对齐后的事件序列"""
+        aligned_fastest = []
+        aligned_slowest = []
+        alignment_info = []
+        
+        for fast_idx, slow_idx, match_type in alignment:
+            if fast_idx is not None and slow_idx is not None:
+                # 匹配成功
+                aligned_fastest.append(fastest_events[fast_idx])
+                aligned_slowest.append(slowest_events[slow_idx])
+                alignment_info.append({
+                    'match_type': 'exact_match',
+                    'fast_idx': fast_idx,
+                    'slow_idx': slow_idx,
+                    'fast_name': fastest_events[fast_idx].name,
+                    'slow_name': slowest_events[slow_idx].name
+                })
+            elif fast_idx is not None:
+                # 快卡事件未匹配
+                aligned_fastest.append(fastest_events[fast_idx])
+                aligned_slowest.append(None)
+                alignment_info.append({
+                    'match_type': 'unmatched_fast',
+                    'fast_idx': fast_idx,
+                    'slow_idx': None,
+                    'fast_name': fastest_events[fast_idx].name,
+                    'slow_name': None
+                })
+            else:
+                # 慢卡事件未匹配
+                aligned_fastest.append(None)
+                aligned_slowest.append(slowest_events[slow_idx])
+                alignment_info.append({
+                    'match_type': 'unmatched_slow',
+                    'fast_idx': None,
+                    'slow_idx': slow_idx,
+                    'fast_name': None,
+                    'slow_name': slowest_events[slow_idx].name
+                })
+        
+        return aligned_fastest, aligned_slowest, alignment_info
     
     def _print_combined_change_points(self, comparison_rows, cpu_start_time_change_points, kernel_duration_change_points):
         """打印合并的突变点信息，按照操作执行顺序排列"""
