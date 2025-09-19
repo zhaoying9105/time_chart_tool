@@ -8,8 +8,29 @@ import re
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+from datetime import datetime
 
 from ...parser import PyTorchProfilerParser
+
+
+def _readable_timestamp_to_microseconds(readable_timestamp: str) -> float:
+    """
+    将readable_timestamp转换为微秒时间戳
+    
+    Args:
+        readable_timestamp: 格式为 "YYYY-MM-DD HH:MM:SS.ffffff" 的时间字符串
+        
+    Returns:
+        float: 微秒时间戳
+    """
+    try:
+        # 解析时间字符串
+        dt = datetime.strptime(readable_timestamp, "%Y-%m-%d %H:%M:%S.%f")
+        # 转换为微秒时间戳
+        return dt.timestamp() * 1_000_000  # 转换为微秒
+    except Exception as e:
+        print(f"警告: 时间戳转换失败: {e}")
+        return 0.0
 
 
 class CommunicationAnalyzer:
@@ -91,7 +112,8 @@ class CommunicationAnalyzer:
         if step is not None and comm_idx is not None:
             deep_analysis_file = self._perform_deep_analysis(
                 comm_data, executor_folders, step, comm_idx, output_dir, 
-                kernel_prefix, prev_kernel_pattern, fastest_card_idx, slowest_card_idx
+                kernel_prefix, prev_kernel_pattern, fastest_card_idx, slowest_card_idx,
+                show_timestamp, show_readable_timestamp
             )
             if deep_analysis_file:
                 generated_files.append(deep_analysis_file)
@@ -100,7 +122,8 @@ class CommunicationAnalyzer:
     
     def _perform_deep_analysis(self, comm_data: Dict[int, Dict[int, List[float]]], executor_folders: List[str],
                               step: int, comm_idx: int, output_dir: str, kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL",
-                              prev_kernel_pattern: str = "TCDP_.*", fastest_card_idx: Optional[int] = None, slowest_card_idx: Optional[int] = None) -> Optional[Path]:
+                              prev_kernel_pattern: str = "TCDP_.*", fastest_card_idx: Optional[int] = None, slowest_card_idx: Optional[int] = None,
+                              show_timestamp: bool = False, show_readable_timestamp: bool = False) -> Optional[Path]:
         """
         执行深度分析，比较快卡和慢卡的详细差异
         
@@ -168,7 +191,8 @@ class CommunicationAnalyzer:
         # 5. 进行深度对比分析
         comparison_result = self._compare_card_performance(
             fastest_data, slowest_data, fastest_card[0], slowest_card[0], 
-            step, comm_idx, fastest_card[1], slowest_card[1], kernel_prefix, prev_kernel_pattern
+            step, comm_idx, fastest_card[1], slowest_card[1], kernel_prefix, prev_kernel_pattern,
+            show_timestamp, show_readable_timestamp
         )
         
         if not comparison_result:
@@ -203,7 +227,8 @@ class CommunicationAnalyzer:
     
     def _compare_card_performance(self, fastest_data, slowest_data, fastest_card_idx, slowest_card_idx,
                                  step, comm_idx, fastest_duration, slowest_duration,
-                                 kernel_prefix, prev_kernel_pattern):
+                                 kernel_prefix, prev_kernel_pattern, show_timestamp: bool = False, 
+                                 show_readable_timestamp: bool = False):
         """比较快卡和慢卡的性能差异"""
         print("开始比较快卡和慢卡的性能差异...")
         
@@ -283,7 +308,8 @@ class CommunicationAnalyzer:
         # 10. 按时间顺序比较CPU操作
         comparison_rows = self._compare_events_by_time_sequence(
             fastest_events_by_external_id, slowest_events_by_external_id,
-            fastest_card_idx, slowest_card_idx, fastest_comm_duration, slowest_comm_duration
+            fastest_card_idx, slowest_card_idx, fastest_comm_duration, slowest_comm_duration,
+            show_timestamp, show_readable_timestamp
         )
         
         return {
@@ -348,12 +374,182 @@ class CommunicationAnalyzer:
         print(f"深度分析Excel文件已生成: {excel_file}")
         return excel_file
     
-    def _check_communication_kernel_consistency(self, fastest_data, slowest_data, kernel_prefix, comm_idx):
-        """检查通信kernel一致性（简化版本）"""
+    def _find_all_communication_events(self, data: 'ProfilerData') -> List['ActivityEvent']:
+        """
+        找到所有TCDP_开头的通信kernel events，按结束时间排序
+        
+        Args:
+            data: ProfilerData对象
+            
+        Returns:
+            List[ActivityEvent]: 所有通信kernel events，按结束时间排序
+        """
+        comm_events = []
+        
+        for event in data.events:
+            if (event.cat == 'kernel' and 
+                event.name.startswith('TCDP_')):
+                # 检查是否在黑名单中
+                is_blacklisted = any(pattern in event.name for pattern in self.COMMUNICATION_BLACKLIST_PATTERNS)
+                if not is_blacklisted:
+                    comm_events.append(event)
+        
+        # 按结束时间排序（从早到晚）
+        comm_events.sort(key=lambda x: (x.ts + x.dur) if (x.ts is not None and x.dur is not None) else 0)
+        
+        return comm_events
+
+    def _check_communication_kernel_consistency(self, fastest_data: 'ProfilerData', slowest_data: 'ProfilerData',
+                                              kernel_prefix: str, comm_idx: int) -> bool:
+        """
+        检查快慢卡的所有通信kernel顺序和时间一致性
+        
+        Args:
+            fastest_data: 最快card的ProfilerData
+            slowest_data: 最慢card的ProfilerData
+            kernel_prefix: 通信kernel前缀（用于查找目标通信操作）
+            comm_idx: 通信操作索引
+            
+        Returns:
+            bool: 是否一致
+        """
         print("=== 检查通信kernel一致性 ===")
+        
+        # 1. 找到所有TCDP_开头的通信kernel events（用于检查顺序和同步性）
+        fastest_all_comm_events = self._find_all_communication_events(fastest_data)
+        slowest_all_comm_events = self._find_all_communication_events(slowest_data)
+        
+        # 2. 找到目标通信kernel events（用于确定分析范围）
+        fastest_target_comm_event = self._find_communication_event(fastest_data, comm_idx, kernel_prefix)
+        slowest_target_comm_event = self._find_communication_event(slowest_data, comm_idx, kernel_prefix)
+        
+        if not fastest_target_comm_event or not slowest_target_comm_event:
+            print("    错误: 无法找到目标通信kernel events")
+            return False
+        
+        if not fastest_all_comm_events or not slowest_all_comm_events:
+            print("    错误: 无法找到任何通信kernel events")
+            return False
+        
+        # 2. 时间戳标准化已在parser中完成
         print("    时间戳标准化已在parser中完成")
-        print("    ✓ 通信kernel一致性检查通过")
-        return True
+        
+        # 3. 打印通信事件的markdown表格
+        print("    通信事件对比表格:")
+        print("    | 序号 | 最快卡Kernel名称 | 最快卡开始时间 | 最快卡结束时间 | 最慢卡Kernel名称 | 最慢卡开始时间 | 最慢卡结束时间 | 名称一致 | 开始时间差(ms) | 结束时间差(ms) | 超过阈值 |")
+        print("    |------|----------------|-------------|-------------|----------------|-------------|-------------|----------|---------------|---------------|----------|")
+        
+        # 按顺序对比通信事件
+        max_events = max(len(fastest_all_comm_events), len(slowest_all_comm_events))
+        consistency_check_passed = True
+        
+        for i in range(max_events):
+            # 获取当前索引的事件
+            fastest_event = fastest_all_comm_events[i] if i < len(fastest_all_comm_events) else None
+            slowest_event = slowest_all_comm_events[i] if i < len(slowest_all_comm_events) else None
+            
+            # 获取kernel名称
+            fastest_name = fastest_event.name if fastest_event else "N/A"
+            slowest_name = slowest_event.name if slowest_event else "N/A"
+            
+            # 获取开始时间戳
+            if fastest_event and fastest_event.readable_timestamp:
+                fastest_start_ts = fastest_event.readable_timestamp
+            elif fastest_event:
+                fastest_start_ts = f"{fastest_event.ts:.2f}μs"
+            else:
+                fastest_start_ts = "N/A"
+            
+            if slowest_event and slowest_event.readable_timestamp:
+                slowest_start_ts = slowest_event.readable_timestamp
+            elif slowest_event:
+                slowest_start_ts = f"{slowest_event.ts:.2f}μs"
+            else:
+                slowest_start_ts = "N/A"
+            
+            # 计算结束时间戳
+            if fastest_event and fastest_event.ts is not None and fastest_event.dur is not None:
+                fastest_end_ts = fastest_event.ts + fastest_event.dur
+                if fastest_event.readable_timestamp:
+                    # 如果有可读时间戳，计算结束时间戳
+                    import datetime
+                    start_dt = datetime.datetime.strptime(fastest_event.readable_timestamp, "%Y-%m-%d %H:%M:%S.%f")
+                    end_dt = start_dt + datetime.timedelta(microseconds=fastest_event.dur)
+                    fastest_end_ts_str = end_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+                else:
+                    fastest_end_ts_str = f"{fastest_end_ts:.2f}μs"
+            else:
+                fastest_end_ts_str = "N/A"
+                fastest_end_ts = None
+            
+            if slowest_event and slowest_event.ts is not None and slowest_event.dur is not None:
+                slowest_end_ts = slowest_event.ts + slowest_event.dur
+                if slowest_event.readable_timestamp:
+                    # 如果有可读时间戳，计算结束时间戳
+                    import datetime
+                    start_dt = datetime.datetime.strptime(slowest_event.readable_timestamp, "%Y-%m-%d %H:%M:%S.%f")
+                    end_dt = start_dt + datetime.timedelta(microseconds=slowest_event.dur)
+                    slowest_end_ts_str = end_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+                else:
+                    slowest_end_ts_str = f"{slowest_end_ts:.2f}μs"
+            else:
+                slowest_end_ts_str = "N/A"
+                slowest_end_ts = None
+            
+            # 检查名称是否一致
+            name_consistent = "✓" if fastest_name == slowest_name else "✗"
+            
+            # 计算开始时间差（使用readable_timestamp）
+            start_time_diff = "N/A"
+            if fastest_event and slowest_event and fastest_event.readable_timestamp and slowest_event.readable_timestamp:
+                fastest_start_us = _readable_timestamp_to_microseconds(fastest_event.readable_timestamp)
+                slowest_start_us = _readable_timestamp_to_microseconds(slowest_event.readable_timestamp)
+                diff_ms = abs(fastest_start_us - slowest_start_us) / 1000.0  # 转换为毫秒
+                start_time_diff = f"{diff_ms:.3f}"
+            
+            # 计算结束时间差（使用readable_timestamp）
+            end_time_diff = "N/A"
+            threshold_exceeded = "N/A"
+            if fastest_event and slowest_event and fastest_event.readable_timestamp and slowest_event.readable_timestamp:
+                # 使用readable_timestamp计算结束时间
+                fastest_start_us = _readable_timestamp_to_microseconds(fastest_event.readable_timestamp)
+                slowest_start_us = _readable_timestamp_to_microseconds(slowest_event.readable_timestamp)
+                fastest_end_us = fastest_start_us + (fastest_event.dur or 0)
+                slowest_end_us = slowest_start_us + (slowest_event.dur or 0)
+                diff_ms = abs(fastest_end_us - slowest_end_us) / 1000.0  # 转换为毫秒
+                end_time_diff = f"{diff_ms:.3f}"
+                
+                # 检查是否超过5000us阈值
+                if diff_ms > 5.0:  # 5ms = 5000us
+                    threshold_exceeded = "✗"
+                    consistency_check_passed = False
+                else:
+                    threshold_exceeded = "✓"
+            
+            print(f"    | {i+1} | {fastest_name} | {fastest_start_ts} | {fastest_end_ts_str} | {slowest_name} | {slowest_start_ts} | {slowest_end_ts_str} | {name_consistent} | {start_time_diff} | {end_time_diff} | {threshold_exceeded} |")
+        
+        # 4. 检查kernel名称顺序一致性
+        fastest_kernel_names = [event.name for event in fastest_all_comm_events]
+        slowest_kernel_names = [event.name for event in slowest_all_comm_events]
+        
+        print(f"    最快卡通信kernel序列: {fastest_kernel_names}")
+        print(f"    最慢卡通信kernel序列: {slowest_kernel_names}")
+        
+        sequence_consistent = (fastest_kernel_names == slowest_kernel_names)
+        if not sequence_consistent:
+            print("    警告: 通信kernel名称序列不一致!")
+            print(f"    最快卡: {fastest_kernel_names}")
+            print(f"    最慢卡: {slowest_kernel_names}")
+        else:
+            print("    ✓ 通信kernel名称序列一致")
+        
+        # 5. 检查结果
+        if not consistency_check_passed:
+            print("    ✗ 通信kernel一致性检查失败: 存在超过5000us阈值的事件")
+            return False
+        else:
+            print("    ✓ 通信kernel一致性检查通过")
+            return True
     
     def _find_communication_event(self, data, comm_idx, kernel_prefix):
         """找到指定comm_idx的通信kernel操作event（简化版本）"""
@@ -503,7 +699,8 @@ class CommunicationAnalyzer:
         return merged_events
     
     def _compare_events_by_time_sequence(self, fastest_events_by_external_id, slowest_events_by_external_id,
-                                        fastest_card_idx, slowest_card_idx, fastest_duration, slowest_duration):
+                                        fastest_card_idx, slowest_card_idx, fastest_duration, slowest_duration,
+                                        show_timestamp: bool = False, show_readable_timestamp: bool = False):
         """按照时间顺序比较快卡和慢卡的events"""
         comparison_rows = []
         
@@ -548,8 +745,16 @@ class CommunicationAnalyzer:
             fastest_kernel_events = self._find_kernel_events_for_cpu_event(fastest_cpu_event, fastest_events_by_external_id)
             slowest_kernel_events = self._find_kernel_events_for_cpu_event(slowest_cpu_event, slowest_events_by_external_id)
             
-            # 计算时间差异
-            cpu_start_time_diff = slowest_cpu_event.ts - fastest_cpu_event.ts
+            # 计算时间差异 - 使用readable_timestamp
+            if fastest_cpu_event.readable_timestamp and slowest_cpu_event.readable_timestamp:
+                # 将readable_timestamp转换为微秒时间戳
+                fastest_start_us = _readable_timestamp_to_microseconds(fastest_cpu_event.readable_timestamp)
+                slowest_start_us = _readable_timestamp_to_microseconds(slowest_cpu_event.readable_timestamp)
+                cpu_start_time_diff = slowest_start_us - fastest_start_us
+            else:
+                # 回退到原来的ts计算方式
+                cpu_start_time_diff = slowest_cpu_event.ts - fastest_cpu_event.ts
+            
             cpu_duration_diff = (slowest_cpu_event.dur or 0) - (fastest_cpu_event.dur or 0)
             
             # 计算kernel时间差异
@@ -563,13 +768,27 @@ class CommunicationAnalyzer:
             kernel_duration_diff_ratio = kernel_duration_diff / all2all_duration_diff if all2all_duration_diff > 0 else 0
             
             # 构建行数据
+            # 根据show参数决定展示的时间格式和列名
+            if show_readable_timestamp and fastest_cpu_event.readable_timestamp and slowest_cpu_event.readable_timestamp:
+                # 使用readable_timestamp转换后的值
+                fastest_display_time = _readable_timestamp_to_microseconds(fastest_cpu_event.readable_timestamp)
+                slowest_display_time = _readable_timestamp_to_microseconds(slowest_cpu_event.readable_timestamp)
+                fastest_time_col = 'fastest_cpu_start_time_readable'
+                slowest_time_col = 'slowest_cpu_start_time_readable'
+            else:
+                # 使用原始ts值（适合chrome tracing显示）
+                fastest_display_time = fastest_cpu_event.ts
+                slowest_display_time = slowest_cpu_event.ts
+                fastest_time_col = 'fastest_cpu_start_time'
+                slowest_time_col = 'slowest_cpu_start_time'
+            
             row = {
                 'event_sequence': i + 1,
                 'cpu_op_name': fastest_cpu_event.name,
                 'cpu_op_shape': str(fastest_cpu_event.args.get('Input Dims', '') if fastest_cpu_event.args else ''),
                 'cpu_op_dtype': str(fastest_cpu_event.args.get('Input type', '') if fastest_cpu_event.args else ''),
-                'fastest_cpu_start_time': fastest_cpu_event.ts,
-                'slowest_cpu_start_time': slowest_cpu_event.ts,
+                fastest_time_col: fastest_display_time,
+                slowest_time_col: slowest_display_time,
                 'cpu_start_time_diff': cpu_start_time_diff,
                 'cpu_start_time_diff_ratio': cpu_start_time_diff_ratio,
                 'fastest_cpu_duration': fastest_cpu_event.dur or 0,
@@ -852,7 +1071,6 @@ class CommunicationAnalyzer:
         """
         # 匹配多种文件名模式
         patterns = [
-            # 模式2: card_idx_step.json (例如: 79_749.json)
             r'(\d+)_(\d+)\.json',
         ]
         
@@ -860,8 +1078,8 @@ class CommunicationAnalyzer:
             match = re.search(pattern, filename, re.IGNORECASE)
             if match:
                 if len(match.groups()) == 2:
-                    step = int(match.group(1))
-                    card_idx = int(match.group(2))
+                    card_idx = int(match.group(1))
+                    step = int(match.group(2))
                     return step, card_idx
                 elif len(match.groups()) == 1:
                     # 只有step信息，card_idx设为0
@@ -872,29 +1090,33 @@ class CommunicationAnalyzer:
     
     def _extract_communication_durations(self, json_file_path: str, kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL") -> List[float]:
         """
-        从JSON文件中提取通信kernel的持续时间
+        从JSON文件中提取指定通信kernel前缀的duration
         
         Args:
             json_file_path: JSON文件路径
-            kernel_prefix: 通信kernel前缀
+            kernel_prefix: 要检测的通信kernel前缀
             
         Returns:
-            List[float]: 持续时间列表
+            List[float]: duration列表，最多6个
         """
         try:
-            # 加载JSON文件
-            data = self.parser.load_json_file(json_file_path)
+            with open(json_file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
             
-            durations = []
-            for event in data.events:
-                if event.cat == 'kernel' and event.name.startswith(kernel_prefix):
-                    if event.dur is not None:
-                        durations.append(event.dur)
+            # 使用正则表达式匹配指定的通信kernel前缀
+            # 支持多种kernel前缀，包括TCDP_开头的各种通信操作
+            escaped_kernel_prefix = re.escape(kernel_prefix)
+            pattern = rf'"ph":\s*"X",\s*"cat":\s*"kernel",\s*"name":\s*"{escaped_kernel_prefix}[^"]*",\s*"pid":\s*\d+,\s*"tid":\s*\d+,\s*"ts":\s*[\d.]+,\s*"dur":\s*([\d.]+)'
+            
+            matches = re.findall(pattern, content, re.DOTALL)
+            
+            # 转换为浮点数，最多取6个
+            durations = [float(match) for match in matches[:6]]
             
             return durations
             
         except Exception as e:
-            print(f"警告: 解析文件 {json_file_path} 失败: {e}")
+            print(f"    读取JSON文件失败 {json_file_path}: {e}")
             return []
     
     def _generate_raw_data_excel(self, all2all_data: Dict[int, Dict[int, List[float]]], output_dir: str) -> Path:
