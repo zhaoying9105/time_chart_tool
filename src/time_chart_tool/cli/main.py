@@ -138,6 +138,18 @@ def parse_arguments():
                                 choices=['json', 'xlsx', 'json,xlsx'],
                                 help='输出格式 (默认: json,xlsx)')
     analysis_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
+    analysis_parser.add_argument('--include-op', type=str, default=None,
+                                help='包含的操作名称模式，逗号分隔的字符串列表，支持正则表达式或通配符，亦可为简单子串 (与 --exclude-op 互斥)')
+    analysis_parser.add_argument('--exclude-op', type=str, default=None,
+                                help='排除的操作名称模式，逗号分隔的字符串列表，支持正则表达式或通配符，亦可为简单子串 (与 --include-op 互斥)')
+    analysis_parser.add_argument('--include-kernel', type=str, default=None,
+                                help='包含的kernel名称模式，逗号分隔的字符串列表，支持正则表达式或通配符，亦可为简单子串 (与 --exclude-kernel 互斥)')
+    analysis_parser.add_argument('--exclude-kernel', type=str, default=None,
+                                help='排除的kernel名称模式，逗号分隔的字符串列表，支持正则表达式或通配符，亦可为简单子串 (与 --include-kernel 互斥)')
+    analysis_parser.add_argument('--max-files', type=int, default=None,
+                                help='最多使用的文件数量，用于随机采样确保分析效率 (默认: 不限制)')
+    analysis_parser.add_argument('--random-seed', type=int, default=42,
+                                help='随机采样的种子，确保结果可重现 (默认: 42)')
     
     # comm 命令 - 分析通信性能
     comm_parser = subparsers.add_parser('comm', help='分析分布式训练中的通信性能')

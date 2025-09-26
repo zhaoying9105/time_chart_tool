@@ -17,6 +17,66 @@ class DataPostProcessor:
     def __init__(self):
         pass
     
+    def _process_triton_names(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
+                             kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]]) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
+        """
+        处理triton开头的op和kernel名称，去除suffix部分
+        
+        triton名称格式: triton_{kernel_category}_{fused_name}_{suffix}
+        其中suffix是递增的数字后缀，用于区分不同的kernel实例
+        
+        Args:
+            cpu_events_by_external_id: CPU events 按 external_id 分组
+            kernel_events_by_external_id: Kernel events 按 external_id 分组
+            
+        Returns:
+            Tuple: 处理后的 CPU events 和 Kernel events
+        """
+        print("处理triton名称，去除suffix...")
+        
+        # 处理CPU events中的triton名称
+        for external_id, cpu_events in cpu_events_by_external_id.items():
+            for cpu_event in cpu_events:
+                if cpu_event.name.startswith('triton_'):
+                    cpu_event.name = self._remove_triton_suffix(cpu_event.name)
+        
+        # 处理Kernel events中的triton名称
+        for external_id, kernel_events in kernel_events_by_external_id.items():
+            for kernel_event in kernel_events:
+                if kernel_event.name.startswith('triton_'):
+                    kernel_event.name = self._remove_triton_suffix(kernel_event.name)
+        
+        return cpu_events_by_external_id, kernel_events_by_external_id
+    
+    def _remove_triton_suffix(self, name: str) -> str:
+        """
+        去除triton名称中的suffix部分
+        
+        Args:
+            name: 原始名称
+            
+        Returns:
+            str: 去除suffix后的名称
+        """
+        if not name.startswith('triton_'):
+            return name
+        
+        # 按'_'分割名称
+        parts = name.split('_')
+        
+        # triton名称格式: triton_{kernel_category}_{fused_name}_{suffix}
+        # 需要至少4个部分: triton, category, fused_name, suffix
+        if len(parts) < 4:
+            return name
+        
+        # 检查最后一部分是否为数字（suffix）
+        last_part = parts[-1]
+        if last_part.isdigit():
+            # 去除最后的suffix部分
+            return '_'.join(parts[:-1])
+        
+        return name
+    
     def stage1_data_postprocessing(self, data: ProfilerData, 
                                  include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
                                  include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
@@ -59,6 +119,11 @@ class DataPostProcessor:
         kernel_events_by_external_id = {eid: kernel_events_by_external_id[eid] for eid in valid_external_ids}
 
         print(f"找到 {len(cpu_events_by_external_id)} 个同时有 cpu_op 和 kernel 的 external_id")
+        
+        # 处理triton名称，去除suffix
+        cpu_events_by_external_id, kernel_events_by_external_id = self._process_triton_names(
+            cpu_events_by_external_id, kernel_events_by_external_id
+        )
         
         # 根据过滤模式过滤事件
         if include_op_patterns or exclude_op_patterns or include_kernel_patterns or exclude_kernel_patterns:

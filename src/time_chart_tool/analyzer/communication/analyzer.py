@@ -321,7 +321,7 @@ class CommunicationAnalyzer:
         comparison_rows = self._compare_events_by_time_sequence(
             fastest_events_by_external_id, slowest_events_by_external_id,
             fastest_card_idx, slowest_card_idx, fastest_comm_duration, slowest_comm_duration,
-            show_timestamp, show_readable_timestamp
+            fastest_data, slowest_data, show_timestamp, show_readable_timestamp
         )
         
         return {
@@ -705,6 +705,7 @@ class CommunicationAnalyzer:
     
     def _compare_events_by_time_sequence(self, fastest_events_by_external_id, slowest_events_by_external_id,
                                         fastest_card_idx, slowest_card_idx, fastest_duration, slowest_duration,
+                                        fastest_data=None, slowest_data=None,
                                         show_timestamp: bool = False, show_readable_timestamp: bool = False):
         """按照时间顺序比较快卡和慢卡的events"""
         comparison_rows = []
@@ -856,7 +857,9 @@ class CommunicationAnalyzer:
         
         # 分析cpu start time相邻差值 - 找出前5对最大的
         print("\n=== CPU Start Time 相邻差值分析 ===")
-        top_cpu_start_time_differences = self.find_top_cpu_start_time_differences(comparison_rows, top_n=5)
+        top_cpu_start_time_differences = self.find_top_cpu_start_time_differences(
+            comparison_rows, aligned_fastest, aligned_slowest, top_n=5
+        )
         print(f"找到 {len(top_cpu_start_time_differences)} 对最大的CPU start time相邻差值:")
         for i, diff_info in enumerate(top_cpu_start_time_differences):
             prev_idx, current_idx = diff_info['index_pair']
@@ -889,6 +892,29 @@ class CommunicationAnalyzer:
             print(f"       最慢Card Timestamp: {current_row['slowest_cpu_readable_timestamp']} (ts: {current_row.get('slowest_cpu_start_time', 'N/A')})")
             print(f"       Ratio: {diff_info['current_ratio']:.4f}")
             print(f"     相邻差值: {diff_info['difference']:.4f}")
+            
+            # 显示两个CPU操作之间的中间事件
+            if (fastest_data and slowest_data and 
+                prev_row['alignment_type'] == 'exact_match' and current_row['alignment_type'] == 'exact_match' and
+                diff_info.get('prev_fastest_event') and diff_info.get('current_fastest_event') and
+                diff_info.get('prev_slowest_event') and diff_info.get('current_slowest_event')):
+                
+                print(f"    === 中间事件分析 ===")
+                
+                # 使用保留的事件对象
+                prev_fastest_cpu = diff_info['prev_fastest_event']
+                current_fastest_cpu = diff_info['current_fastest_event']
+                prev_slowest_cpu = diff_info['prev_slowest_event']
+                current_slowest_cpu = diff_info['current_slowest_event']
+                
+                self._print_events_between_cpu_ops(
+                    fastest_data, slowest_data, 
+                    prev_fastest_cpu, current_fastest_cpu,
+                    prev_slowest_cpu, current_slowest_cpu
+                )
+            else:
+                print("      跳过中间事件分析（非精确匹配或缺少事件对象）")
+            
             print()
         
         return {
@@ -1012,7 +1038,7 @@ class CommunicationAnalyzer:
         # 返回前N个
         return kernel_ratios_with_index[:top_n]
     
-    def find_top_cpu_start_time_differences(self, comparison_rows, top_n=5):
+    def find_top_cpu_start_time_differences(self, comparison_rows, aligned_fastest=None, aligned_slowest=None, top_n=5):
         """找出cpu start time相邻差值最大的前N对"""
         if len(comparison_rows) < 2:
             return []
@@ -1024,13 +1050,38 @@ class CommunicationAnalyzer:
             prev_ratio = comparison_rows[i-1].get('cpu_start_time_diff_ratio', 0)
             diff = abs(current_ratio - prev_ratio)
             
+            # 获取对应的事件对象
+            prev_fastest_event = None
+            current_fastest_event = None
+            prev_slowest_event = None
+            current_slowest_event = None
+            
+            if aligned_fastest and aligned_slowest:
+                # 从comparison_rows中获取alignment信息
+                prev_alignment_fast_idx = comparison_rows[i-1].get('alignment_fast_idx')
+                current_alignment_fast_idx = comparison_rows[i].get('alignment_fast_idx')
+                prev_alignment_slow_idx = comparison_rows[i-1].get('alignment_slow_idx')
+                current_alignment_slow_idx = comparison_rows[i].get('alignment_slow_idx')
+                
+                if (prev_alignment_fast_idx is not None and current_alignment_fast_idx is not None and
+                    prev_alignment_slow_idx is not None and current_alignment_slow_idx is not None):
+                    prev_fastest_event = aligned_fastest[prev_alignment_fast_idx] if prev_alignment_fast_idx < len(aligned_fastest) else None
+                    current_fastest_event = aligned_fastest[current_alignment_fast_idx] if current_alignment_fast_idx < len(aligned_fastest) else None
+                    prev_slowest_event = aligned_slowest[prev_alignment_slow_idx] if prev_alignment_slow_idx < len(aligned_slowest) else None
+                    current_slowest_event = aligned_slowest[current_alignment_slow_idx] if current_alignment_slow_idx < len(aligned_slowest) else None
+            
             differences.append({
                 'index_pair': (i-1, i),
                 'difference': diff,
                 'prev_ratio': prev_ratio,
                 'current_ratio': current_ratio,
                 'prev_row': comparison_rows[i-1],
-                'current_row': comparison_rows[i]
+                'current_row': comparison_rows[i],
+                # 添加事件对象
+                'prev_fastest_event': prev_fastest_event,
+                'current_fastest_event': current_fastest_event,
+                'prev_slowest_event': prev_slowest_event,
+                'current_slowest_event': current_slowest_event
             })
         
         # 按差值降序排序
@@ -1167,6 +1218,124 @@ class CommunicationAnalyzer:
                 })
         
         return aligned_fastest, aligned_slowest, alignment_info
+    
+    def _extract_events_between_cpu_ops(self, data, prev_cpu_event, current_cpu_event):
+        """
+        提取两个CPU操作之间的所有事件
+        
+        Args:
+            data: ProfilerData对象
+            prev_cpu_event: 前一个CPU操作事件
+            current_cpu_event: 当前CPU操作事件
+            
+        Returns:
+            dict: 按进程ID和线程ID组织的事件 {pid: {tid: [events]}}
+        """
+        if not prev_cpu_event or not current_cpu_event:
+            return {}
+        
+        # 计算时间窗口
+        # 前一个CPU操作的结束时间
+        prev_end_time = prev_cpu_event.ts + prev_cpu_event.dur
+        # 当前CPU操作的开始时间
+        current_start_time = current_cpu_event.ts
+        
+        print(f"    提取事件时间窗口: {prev_end_time:.2f} - {current_start_time:.2f} (窗口大小: {current_start_time - prev_end_time:.2f}μs)")
+        
+        # 提取时间窗口内的所有事件
+        events_in_window = []
+        # 需要过滤掉的事件类型
+        filtered_cats = {'mtia_ccp_events', 'ac2g', 'flow', 'gpu_user_annotation'}
+        
+        for event in data.events:
+            # 断言检查事件基本字段
+            assert event.ts is not None, f"event.ts is None for event: {event}"
+            
+            # 过滤掉特定类型的事件
+            if event.cat in filtered_cats:
+                continue
+            
+            event_start = event.ts
+            event_end = event.ts + (event.dur if event.dur is not None else 0)
+            
+            # 检查事件是否与时间窗口有交集
+            # 事件开始时间在窗口内，或者事件结束时间在窗口内，或者事件完全包含窗口
+            if (event_start < current_start_time and event_end > prev_end_time):
+                events_in_window.append(event)
+        
+        # 按进程ID和线程ID组织事件，过滤掉PID或TID不是整数的事件
+        events_by_pid_tid = {}
+        for event in events_in_window:
+            pid = getattr(event, 'pid', 0)
+            tid = getattr(event, 'tid', 0)
+            
+            # 检查PID和TID是否为整数
+            try:
+                pid = int(pid) if pid is not None else 0
+                tid = int(tid) if tid is not None else 0
+            except (ValueError, TypeError):
+                # 如果转换失败，跳过这个事件
+                continue
+            
+            if pid not in events_by_pid_tid:
+                events_by_pid_tid[pid] = {}
+            if tid not in events_by_pid_tid[pid]:
+                events_by_pid_tid[pid][tid] = []
+            
+            events_by_pid_tid[pid][tid].append(event)
+        
+        # 对每个线程内的事件按时间排序
+        for pid in events_by_pid_tid:
+            for tid in events_by_pid_tid[pid]:
+                events_by_pid_tid[pid][tid].sort(key=lambda x: x.ts)
+        
+        return events_by_pid_tid
+    
+    def _print_events_between_cpu_ops(self, fastest_data, slowest_data, prev_fastest_cpu, current_fastest_cpu, 
+                                     prev_slowest_cpu, current_slowest_cpu):
+        """
+        打印两个CPU操作之间的事件信息
+        """
+        print(f"    === 快卡事件 (PID: {getattr(prev_fastest_cpu, 'pid', 'N/A')}) ===")
+        fastest_events = self._extract_events_between_cpu_ops(fastest_data, prev_fastest_cpu, current_fastest_cpu)
+        self._print_events_by_pid_tid(fastest_events, "快卡")
+        
+        print(f"    === 慢卡事件 (PID: {getattr(prev_slowest_cpu, 'pid', 'N/A')}) ===")
+        slowest_events = self._extract_events_between_cpu_ops(slowest_data, prev_slowest_cpu, current_slowest_cpu)
+        self._print_events_by_pid_tid(slowest_events, "慢卡")
+    
+    def _print_events_by_pid_tid(self, events_by_pid_tid, card_name):
+        """
+        按进程ID和线程ID打印事件
+        """
+        if not events_by_pid_tid:
+            print(f"      {card_name}: 无事件")
+            return
+        
+        for pid in sorted(events_by_pid_tid.keys()):
+            for tid in sorted(events_by_pid_tid[pid].keys()):
+                events = events_by_pid_tid[pid][tid]
+                if not events:
+                    continue
+                
+                print(f"      {card_name} PID={pid}, TID={tid} ({len(events)} 个事件):")
+                
+                for i, event in enumerate(events): 
+                    # 断言检查关键字段
+                    assert event.cat is not None, f"event.cat is None for event: {event}"
+                    assert event.name is not None, f"event.name is None for event: {event}"
+                    assert event.ts is not None, f"event.ts is None for event: {event}"
+                    
+                    # 安全处理duration
+                    event_dur = event.dur if event.dur is not None else 0
+                    event_end = event.ts + event_dur
+                    
+                    print(f"        {i+1:2d}. {event.cat:8s} | {event.name:30s} | {event.ts:12.2f} - {event_end:12.2f} | {event_dur:8.2f}μs")
+                
+                # if len(events) > 10:
+                #     print(f"        ... 还有 {len(events) - 10} 个事件")
+                print()
+    
     
     def _print_combined_change_points(self, comparison_rows, cpu_start_time_change_points, kernel_duration_change_points):
         """打印合并的突变点信息，按照操作执行顺序排列"""

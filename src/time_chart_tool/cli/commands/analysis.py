@@ -6,7 +6,8 @@ import time
 from pathlib import Path
 from typing import List
 
-from ..validators import validate_aggregation_fields, parse_show_options, validate_file
+from ..validators import validate_aggregation_fields, parse_show_options, validate_file, \
+    validate_filter_options, parse_filter_patterns
 from ..file_utils import parse_file_paths
 from ...analyzer import Analyzer
 
@@ -27,6 +28,9 @@ class AnalysisCommand:
         print(f"打印markdown表格: {args.print_markdown}")
         print(f"输出格式: {args.output_format}")
         print(f"输出目录: {args.output_dir}")
+        if hasattr(args, 'max_files') and args.max_files:
+            print(f"最大文件数: {args.max_files}")
+            print(f"随机种子: {getattr(args, 'random_seed', 42)}")
         print()
         
         # 验证聚合字段
@@ -44,6 +48,29 @@ class AnalysisCommand:
         except ValueError as e:
             print(f"错误: 显示选项解析失败 - {e}")
             return 1
+
+        # 验证过滤选项（与 compare 保持一致）
+        try:
+            validate_filter_options(args.include_op, args.exclude_op, args.include_kernel, args.exclude_kernel)
+            print("过滤选项验证通过")
+        except ValueError as e:
+            print(f"错误: 过滤选项验证失败 - {e}")
+            return 1
+
+        # 解析过滤模式
+        include_op_patterns = parse_filter_patterns(args.include_op) if getattr(args, 'include_op', None) else None
+        exclude_op_patterns = parse_filter_patterns(args.exclude_op) if getattr(args, 'exclude_op', None) else None
+        include_kernel_patterns = parse_filter_patterns(args.include_kernel) if getattr(args, 'include_kernel', None) else None
+        exclude_kernel_patterns = parse_filter_patterns(args.exclude_kernel) if getattr(args, 'exclude_kernel', None) else None
+        
+        if include_op_patterns:
+            print(f"包含操作模式: {include_op_patterns}")
+        if exclude_op_patterns:
+            print(f"排除操作模式: {exclude_op_patterns}")
+        if include_kernel_patterns:
+            print(f"包含kernel模式: {include_kernel_patterns}")
+        if exclude_kernel_patterns:
+            print(f"排除kernel模式: {exclude_kernel_patterns}")
         
         # 检查聚合字段和显示选项是否重复
         show_fields = set()
@@ -62,6 +89,15 @@ class AnalysisCommand:
             if not file_paths:
                 print(f"错误: 没有找到匹配的文件: {args.file}")
                 return 1
+            
+            # 应用文件数量限制
+            if hasattr(args, 'max_files') and args.max_files and len(file_paths) > args.max_files:
+                import random
+                random_seed = getattr(args, 'random_seed', 42)
+                random.seed(random_seed)
+                file_paths = random.sample(file_paths, args.max_files)
+                print(f"随机采样 {args.max_files} 个文件 (种子: {random_seed})")
+            
             print(f"找到 {len(file_paths)} 个文件:")
             for i, file_path in enumerate(file_paths[:5]):  # 只显示前5个
                 print(f"  {i+1}. {file_path}")
@@ -89,9 +125,14 @@ class AnalysisCommand:
                 show_timestamp=show_options['timestamp'],
                 show_readable_timestamp=show_options['readable_timestamp'],
                 show_kernel_timestamp=show_options['kernel_timestamp'],
+                show_name=show_options['name'],
                 output_dir=str(output_dir),
                 label=args.label,
                 print_markdown=args.print_markdown,
+                include_op_patterns=include_op_patterns,
+                exclude_op_patterns=exclude_op_patterns,
+                include_kernel_patterns=include_kernel_patterns,
+                exclude_kernel_patterns=exclude_kernel_patterns,
             )
             
             total_time = time.time() - start_time

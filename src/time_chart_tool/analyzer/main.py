@@ -120,7 +120,9 @@ class Analyzer:
                                      show_kernel_names: bool = False, show_kernel_duration: bool = False,
                                      show_timestamp: bool = False, show_readable_timestamp: bool = False,
                                      show_kernel_timestamp: bool = False, show_name: bool = False,
-                                     output_dir: str = ".", label: str = None, print_markdown: bool = False) -> List[Path]:
+                                     output_dir: str = ".", label: str = None, print_markdown: bool = False,
+                                     include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
+                                     include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None) -> List[Path]:
         """
         分析多个文件（使用glob模式）
         
@@ -145,7 +147,11 @@ class Analyzer:
         print(f"=== 分析多个文件: {len(file_paths)} 个文件 ===")
         
         # 并行处理文件
-        aggregated_data_list = self._process_files_parallel(file_paths, aggregation_spec, mp.cpu_count())
+        aggregated_data_list = self._process_files_parallel(
+            file_paths, aggregation_spec, mp.cpu_count(),
+            include_op_patterns, exclude_op_patterns,
+            include_kernel_patterns, exclude_kernel_patterns
+        )
         
         # 合并相同标签的文件
         merged_data = self._merge_same_label_files(aggregated_data_list, aggregation_spec)
@@ -171,6 +177,10 @@ class Analyzer:
             aggregation_spec=aggregation_spec,
             label=label,
             print_markdown=print_markdown,
+            include_op_patterns=include_op_patterns,
+            exclude_op_patterns=exclude_op_patterns,
+            include_kernel_patterns=include_kernel_patterns,
+            exclude_kernel_patterns=exclude_kernel_patterns,
             per_rank_stats=per_rank_stats
         )
         

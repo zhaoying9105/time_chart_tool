@@ -330,8 +330,17 @@ class DataPresenter:
             sorted_rows = sorted(rows, key=lambda x: x.get('kernel_duration_ratio', 0), reverse=True)
             self._print_markdown_table(sorted_rows, f"{label} 分析结果" if label else "单文件分析结果")
         
-        # 生成文件，使用label信息命名
-        base_name = f"{label}_analysis" if label else "single_file_analysis"
+        # 生成文件，使用label、aggregation和show参数信息命名
+        base_name = self._generate_base_name(
+            aggregation_spec=aggregation_spec,
+            show_dtype=show_dtype,
+            show_shape=show_shape,
+            show_kernel_names=show_kernel_names,
+            show_kernel_duration=show_kernel_duration,
+            show_timestamp=show_timestamp,
+            show_name=show_name,
+            file_labels=[label] if label else None
+        )
         return self._generate_output_files(rows, output_dir, base_name)
     
     def _present_multiple_files(self, data: Dict[str, Any], 
