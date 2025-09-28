@@ -10,6 +10,7 @@ import logging
 from datetime import datetime
 
 from .models import ActivityEvent, ProfilerData
+from .call_stack_builder import CallStackBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,8 @@ class PyTorchProfilerParser:
     
     def __init__(self):
         self.data: Optional[ProfilerData] = None
+        self.call_stack_builder = CallStackBuilder()
+        self._call_stack_trees: Optional[Dict[Tuple[int, int], Any]] = None
     
     def load_json_file(self, file_path: Union[str, Path]) -> ProfilerData:
         """
@@ -501,6 +504,79 @@ class PyTorchProfilerParser:
         
         print(f"唯一的 call stack 数量: {len(unique_call_stacks)}")
         return unique_call_stacks
+    
+    def build_call_stack_trees(self) -> Dict[Tuple[int, int], Any]:
+        """
+        构建调用栈树
+        
+        Returns:
+            Dict[Tuple[int, int], Any]: 按(pid, tid)分组的调用栈树
+        """
+        if not self.data:
+            logger.warning("未加载数据，请先调用 load_json_file()")
+            return {}
+        
+        logger.info("开始构建调用栈树...")
+        self._call_stack_trees = self.call_stack_builder.build_call_stacks(self.data.events)
+        
+        # 为每个事件设置调用栈信息
+        for (pid, tid), tree_root in self._call_stack_trees.items():
+            events_in_group = self.data.get_events_by_process(pid)
+            events_in_group = [e for e in events_in_group if e.tid == tid]
+            
+            for event in events_in_group:
+                call_stack = self.call_stack_builder.get_call_stack_for_event(event, self._call_stack_trees)
+                if call_stack:
+                    event.set_call_stack_from_tree(call_stack)
+        
+        logger.info(f"调用栈树构建完成，共 {len(self._call_stack_trees)} 个树")
+        return self._call_stack_trees
+    
+    def get_call_stack_trees(self) -> Optional[Dict[Tuple[int, int], Any]]:
+        """获取调用栈树"""
+        return self._call_stack_trees
+    
+    def print_call_stack_statistics(self) -> None:
+        """打印调用栈统计信息"""
+        if not self._call_stack_trees:
+            print("调用栈树未构建，请先调用 build_call_stack_trees()")
+            return
+        
+        stats = self.call_stack_builder.get_tree_statistics(self._call_stack_trees)
+        
+        print("=== 调用栈树统计信息 ===")
+        print(f"总树数: {stats['total_trees']}")
+        print(f"总节点数: {stats['total_nodes']}")
+        print(f"最大深度: {stats['max_depth']}")
+        print(f"平均深度: {stats['avg_depth']:.2f}")
+        
+        print("\n各树详细信息:")
+        for tree_info in stats['tree_sizes']:
+            print(f"  进程 {tree_info['pid']} 线程 {tree_info['tid']}: "
+                  f"节点数 {tree_info['size']}, 深度 {tree_info['depth']}")
+        print()
+    
+    def print_call_stack_tree(self, pid: int, tid: int, max_depth: int = 10) -> None:
+        """
+        打印指定进程和线程的调用栈树
+        
+        Args:
+            pid: 进程ID
+            tid: 线程ID
+            max_depth: 最大打印深度
+        """
+        if not self._call_stack_trees:
+            print("调用栈树未构建，请先调用 build_call_stack_trees()")
+            return
+        
+        tree_root = self._call_stack_trees.get((pid, tid))
+        if not tree_root:
+            print(f"未找到进程 {pid} 线程 {tid} 的调用栈树")
+            return
+        
+        print(f"=== 进程 {pid} 线程 {tid} 的调用栈树 ===")
+        self.call_stack_builder.print_call_stack_tree(tree_root, max_depth)
+        print()
 
     def print_events_summary(self, events: List[ActivityEvent], title: str = "事件摘要") -> None:
         """

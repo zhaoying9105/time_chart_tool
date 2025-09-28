@@ -15,13 +15,15 @@ class DataAggregator:
     def __init__(self):
         pass
     
-    def _generate_aggregation_key(self, cpu_event: ActivityEvent, aggregation_fields: List[str]) -> Union[str, tuple]:
+    def _generate_aggregation_key(self, cpu_event: ActivityEvent, aggregation_fields: List[str], 
+                                 call_stack_source: str = 'args') -> Union[str, tuple]:
         """
         根据指定的字段生成聚合键
         
         Args:
             cpu_event: CPU事件
             aggregation_fields: 聚合字段列表，支持: call_stack, name, shape, dtype
+            call_stack_source: 调用栈来源，'args' 或 'tree'
             
         Returns:
             Union[str, tuple]: 聚合键
@@ -30,8 +32,14 @@ class DataAggregator:
         
         for field in aggregation_fields:
             if field == 'call_stack':
-                if cpu_event.call_stack is not None:
-                    normalized_call_stack = self._normalize_call_stack(cpu_event.call_stack)
+                call_stack = None
+                if call_stack_source == 'args':
+                    call_stack = cpu_event.call_stack_from_args
+                elif call_stack_source == 'tree':
+                    call_stack = cpu_event.call_stack_from_tree
+                
+                if call_stack is not None:
+                    normalized_call_stack = self._normalize_call_stack(call_stack)
                     if normalized_call_stack:
                         key_parts.append(tuple(normalized_call_stack))
                     else:
@@ -98,7 +106,7 @@ class DataAggregator:
     
     def stage2_data_aggregation(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
                                kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
-                               aggregation_spec: str = 'name') -> Dict[Union[str, tuple], AggregatedData]:
+                               aggregation_spec: str = 'name', call_stack_source: str = 'args') -> Dict[Union[str, tuple], AggregatedData]:
         """
         Stage 2: 数据聚合
         支持灵活的字段组合聚合：
@@ -109,6 +117,7 @@ class DataAggregator:
             cpu_events_by_external_id: external_id -> cpu_events 映射
             kernel_events_by_external_id: external_id -> kernel_events 映射
             aggregation_spec: 聚合字段组合字符串
+            call_stack_source: 调用栈来源，'args' 或 'tree'
             
         Returns:
             Dict[Union[str, tuple], AggregatedData]: 聚合后的数据
@@ -120,7 +129,7 @@ class DataAggregator:
         
         if 'call_stack' in aggregation_fields:
             # 包含调用栈的聚合需要特殊处理，因为需要合并相似的调用栈
-            return self._aggregate_with_call_stack(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_fields)
+            return self._aggregate_with_call_stack(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_fields, call_stack_source)
         
         if 'op_index' in aggregation_fields:
             # 包含op_index的聚合需要特殊处理，按时间顺序排列
@@ -135,7 +144,7 @@ class DataAggregator:
             
             for cpu_event in cpu_events:
                 try:
-                    key = self._generate_aggregation_key(cpu_event, aggregation_fields)
+                    key = self._generate_aggregation_key(cpu_event, aggregation_fields, call_stack_source)
                     aggregated_data[key].cpu_events.append(cpu_event)
                     aggregated_data[key].kernel_events.extend(kernel_events)
                     aggregated_data[key].key = key
@@ -236,7 +245,7 @@ class DataAggregator:
     
     def _aggregate_with_call_stack(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
                                   kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
-                                  aggregation_fields: List[str]) -> Dict[Union[str, tuple], AggregatedData]:
+                                  aggregation_fields: List[str], call_stack_source: str = 'args') -> Dict[Union[str, tuple], AggregatedData]:
         """
         处理包含调用栈的聚合，实现 startswith 合并逻辑
         
@@ -244,6 +253,7 @@ class DataAggregator:
             cpu_events_by_external_id: external_id -> cpu_events 映射
             kernel_events_by_external_id: external_id -> kernel_events 映射
             aggregation_fields: 聚合字段列表
+            call_stack_source: 调用栈来源，'args' 或 'tree'
             
         Returns:
             Dict[Union[str, tuple], AggregatedData]: 聚合后的数据
@@ -255,11 +265,18 @@ class DataAggregator:
             kernel_events = kernel_events_by_external_id.get(external_id, [])
             
             for cpu_event in cpu_events:
-                if cpu_event.call_stack is None:
+                # 检查是否有调用栈信息
+                call_stack = None
+                if call_stack_source == 'args':
+                    call_stack = cpu_event.call_stack_from_args
+                elif call_stack_source == 'tree':
+                    call_stack = cpu_event.call_stack_from_tree
+                
+                if call_stack is None:
                     continue  # 跳过没有 call stack 的事件
                 
                 try:
-                    new_key = self._generate_aggregation_key(cpu_event, aggregation_fields)
+                    new_key = self._generate_aggregation_key(cpu_event, aggregation_fields, call_stack_source)
                     
                     # 检查是否已有相似的调用栈（使用startswith判断）
                     existing_key = None

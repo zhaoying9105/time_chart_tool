@@ -37,9 +37,9 @@ class Analyzer:
     
     # ==================== Stage 2: 数据聚合 ====================
     
-    def stage2_data_aggregation(self, cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec: str = 'name'):
+    def stage2_data_aggregation(self, cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec: str = 'name', call_stack_source: str = 'args'):
         """Stage 2: 数据聚合"""
-        return self.aggregator.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec)
+        return self.aggregator.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec, call_stack_source)
     
     # ==================== Stage 3: 数据比较 ====================
     
@@ -60,7 +60,8 @@ class Analyzer:
                            show_kernel_names: bool = False, show_kernel_duration: bool = False,
                            show_timestamp: bool = False, show_readable_timestamp: bool = False,
                            show_kernel_timestamp: bool = False, show_name: bool = False,
-                           output_dir: str = ".", label: str = None, print_markdown: bool = False) -> List[Path]:
+                           output_dir: str = ".", label: str = None, print_markdown: bool = False,
+                           call_stack_source: str = 'args') -> List[Path]:
         """
         分析单个文件
         
@@ -78,6 +79,7 @@ class Analyzer:
             output_dir: 输出目录
             label: 文件标签
             print_markdown: 是否打印markdown表格
+            call_stack_source: 调用栈来源，'args' 或 'tree'
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -87,11 +89,16 @@ class Analyzer:
         # 加载数据
         data = self.parser.load_json_file(file_path)
         
+        # 如果需要使用调用栈树，先构建调用栈树
+        if call_stack_source == 'tree':
+            print("构建调用栈树...")
+            self.parser.build_call_stack_trees()
+        
         # Stage 1: 数据后处理
         cpu_events_by_external_id, kernel_events_by_external_id = self.stage1_data_postprocessing(data)
         
         # Stage 2: 数据聚合
-        aggregated_data = self.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec)
+        aggregated_data = self.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec, call_stack_source)
         
         # Stage 3: 数据比较
         comparison_result = self.stage3_comparison(single_file_data=aggregated_data, aggregation_spec=aggregation_spec)
@@ -122,7 +129,8 @@ class Analyzer:
                                      show_kernel_timestamp: bool = False, show_name: bool = False,
                                      output_dir: str = ".", label: str = None, print_markdown: bool = False,
                                      include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
-                                     include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None) -> List[Path]:
+                                     include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None,
+                                     call_stack_source: str = 'args') -> List[Path]:
         """
         分析多个文件（使用glob模式）
         
@@ -140,6 +148,7 @@ class Analyzer:
             output_dir: 输出目录
             label: 文件标签
             print_markdown: 是否打印markdown表格
+            call_stack_source: 调用栈来源，'args' 或 'tree'
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -195,7 +204,8 @@ class Analyzer:
                               compare_dtype: bool = False, compare_shape: bool = False, compare_name: bool = False,
                               print_markdown: bool = False, max_workers: int = None,
                               include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
-                              include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None) -> List[Path]:
+                              include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None,
+                              call_stack_source: str = 'args') -> List[Path]:
         """
         分析多个文件并对比
         
@@ -221,6 +231,7 @@ class Analyzer:
             exclude_op_patterns: 排除的操作名称模式列表
             include_kernel_patterns: 包含的kernel名称模式列表
             exclude_kernel_patterns: 排除的kernel名称模式列表
+            call_stack_source: 调用栈来源，'args' 或 'tree'
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -235,7 +246,7 @@ class Analyzer:
             # 并行处理文件
             aggregated_data_list = self._process_files_parallel(file_paths, aggregation_spec, max_workers or mp.cpu_count(), 
                                                               include_op_patterns, exclude_op_patterns,
-                                                              include_kernel_patterns, exclude_kernel_patterns)
+                                                              include_kernel_patterns, exclude_kernel_patterns, call_stack_source)
             
             # 合并相同标签的文件
             merged_data = self._merge_same_label_files(aggregated_data_list, aggregation_spec)
@@ -319,7 +330,8 @@ class Analyzer:
     
     def _process_files_parallel(self, file_paths: List[str], aggregation_spec: str, max_workers: int, 
                               include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
-                              include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None) -> List[Dict[Union[str, tuple], AggregatedData]]:
+                              include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None,
+                              call_stack_source: str = 'args') -> List[Dict[Union[str, tuple], AggregatedData]]:
         """
         并行处理文件
         
@@ -331,6 +343,7 @@ class Analyzer:
             exclude_op_patterns: 排除的操作名称模式列表
             include_kernel_patterns: 包含的kernel名称模式列表
             exclude_kernel_patterns: 排除的kernel名称模式列表
+            call_stack_source: 调用栈来源，'args' 或 'tree'
             
         Returns:
             List[Dict[Union[str, tuple], AggregatedData]]: 每个文件的聚合数据列表
@@ -343,7 +356,7 @@ class Analyzer:
             # 提交任务
             future_to_file = {
                 executor.submit(process_single_file_parallel, file_path, aggregation_spec,
-                              include_op_patterns, exclude_op_patterns, include_kernel_patterns, exclude_kernel_patterns): file_path
+                              include_op_patterns, exclude_op_patterns, include_kernel_patterns, exclude_kernel_patterns, call_stack_source): file_path
                 for file_path in file_paths
             }
             

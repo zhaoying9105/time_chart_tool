@@ -150,6 +150,11 @@ def parse_arguments():
                                 help='最多使用的文件数量，用于随机采样确保分析效率 (默认: 不限制)')
     analysis_parser.add_argument('--random-seed', type=int, default=42,
                                 help='随机采样的种子，确保结果可重现 (默认: 42)')
+    analysis_parser.add_argument('--call-stack-source', default='tree', choices=['args', 'tree'],
+                                help='调用栈来源选择:\n'
+                                     '  args: 从JSON的args字段中获取Call stack (默认)\n'
+                                     '  tree: 使用基于扫描线和线段树的算法生成调用栈\n'
+                                     '(默认: args)')
     
     # comm 命令 - 分析通信性能
     comm_parser = subparsers.add_parser('comm', help='分析分布式训练中的通信性能')
@@ -234,6 +239,11 @@ def parse_arguments():
                                help='包含的kernel名称模式，逗号分隔的字符串列表，支持正则表达式 (与 --exclude-kernel 互斥)')
     compare_parser.add_argument('--exclude-kernel', type=str, default=None,
                                help='排除的kernel名称模式，逗号分隔的字符串列表，支持正则表达式 (与 --include-kernel 互斥)')
+    compare_parser.add_argument('--call-stack-source', default='tree', choices=['args', 'tree'],
+                               help='调用栈来源选择:\n'
+                                    '  args: 从JSON的args字段中获取Call stack (默认)\n'
+                                    '  tree: 使用基于扫描线和线段树的算法生成调用栈\n'
+                                    '(默认: args)')
     
     return parser.parse_args()
 

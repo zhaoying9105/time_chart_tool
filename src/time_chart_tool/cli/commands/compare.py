@@ -33,6 +33,8 @@ class CompareCommand:
         print(f"排除操作模式: {args.exclude_op if args.exclude_op else '无'}")
         print(f"包含kernel模式: {args.include_kernel if args.include_kernel else '无'}")
         print(f"排除kernel模式: {args.exclude_kernel if args.exclude_kernel else '无'}")
+        if hasattr(args, 'call_stack_source'):
+            print(f"调用栈来源: {args.call_stack_source}")
         print()
         
         # 验证聚合字段

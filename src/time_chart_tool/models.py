@@ -73,6 +73,22 @@ class ActivityEvent:
         return [frame.strip() for frame in call_stack_str.split(';') if frame.strip()]
     
     @property
+    def call_stack_from_args(self) -> Optional[List[str]]:
+        """从args中获取call stack信息（原始方式）"""
+        return self.call_stack
+    
+    def set_call_stack_from_tree(self, call_stack: List[str]):
+        """设置从调用栈树生成的call stack信息"""
+        if not hasattr(self, '_call_stack_from_tree'):
+            self._call_stack_from_tree = None
+        self._call_stack_from_tree = call_stack
+    
+    @property
+    def call_stack_from_tree(self) -> Optional[List[str]]:
+        """获取从调用栈树生成的call stack信息"""
+        return getattr(self, '_call_stack_from_tree', None)
+    
+    @property
     def is_kernel(self) -> bool:
         """判断是否为 kernel 事件"""
         return self.cat == 'kernel' or 'kernel' in self.name.lower()

@@ -9,7 +9,8 @@ from .data_structures import AggregatedData
 
 def process_single_file_parallel(file_path: str, aggregation_spec: str,
                                 include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
-                                include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None) -> Tuple[str, Dict[Union[str, tuple], AggregatedData]]:
+                                include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None,
+                                call_stack_source: str = 'args') -> Tuple[str, Dict[Union[str, tuple], AggregatedData]]:
     """
     并行处理单个文件的函数
     
@@ -20,6 +21,7 @@ def process_single_file_parallel(file_path: str, aggregation_spec: str,
         exclude_op_patterns: 排除的操作名称模式列表
         include_kernel_patterns: 包含的kernel名称模式列表
         exclude_kernel_patterns: 排除的kernel名称模式列表
+        call_stack_source: 调用栈来源，'args' 或 'tree'
         
     Returns:
         Tuple[str, Dict]: (文件路径, 聚合后的数据)
@@ -30,6 +32,10 @@ def process_single_file_parallel(file_path: str, aggregation_spec: str,
         
         # 加载数据
         data = parser.load_json_file(file_path)
+        
+        # 如果需要使用调用栈树，先构建调用栈树
+        if call_stack_source == 'tree':
+            parser.build_call_stack_trees()
         
         # 创建分析器实例
         from ..main import Analyzer
@@ -43,7 +49,7 @@ def process_single_file_parallel(file_path: str, aggregation_spec: str,
         )
         
         # Stage 2: 数据聚合
-        aggregated_data = analyzer.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec)
+        aggregated_data = analyzer.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec, call_stack_source)
         
         return file_path, aggregated_data
         

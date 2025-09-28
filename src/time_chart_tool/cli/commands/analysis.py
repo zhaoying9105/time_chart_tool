@@ -31,6 +31,8 @@ class AnalysisCommand:
         if hasattr(args, 'max_files') and args.max_files:
             print(f"最大文件数: {args.max_files}")
             print(f"随机种子: {getattr(args, 'random_seed', 42)}")
+        if hasattr(args, 'call_stack_source'):
+            print(f"调用栈来源: {args.call_stack_source}")
         print()
         
         # 验证聚合字段
@@ -133,6 +135,7 @@ class AnalysisCommand:
                 exclude_op_patterns=exclude_op_patterns,
                 include_kernel_patterns=include_kernel_patterns,
                 exclude_kernel_patterns=exclude_kernel_patterns,
+                call_stack_source=getattr(args, 'call_stack_source', 'args'),
             )
             
             total_time = time.time() - start_time
