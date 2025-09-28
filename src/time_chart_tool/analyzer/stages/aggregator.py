@@ -32,11 +32,7 @@ class DataAggregator:
         
         for field in aggregation_fields:
             if field == 'call_stack':
-                call_stack = None
-                if call_stack_source == 'args':
-                    call_stack = cpu_event.call_stack_from_args
-                elif call_stack_source == 'tree':
-                    call_stack = cpu_event.call_stack_from_tree
+                call_stack = cpu_event.get_call_stack(call_stack_source)
                 
                 if call_stack is not None:
                     normalized_call_stack = self._normalize_call_stack(call_stack)
@@ -266,11 +262,7 @@ class DataAggregator:
             
             for cpu_event in cpu_events:
                 # 检查是否有调用栈信息
-                call_stack = None
-                if call_stack_source == 'args':
-                    call_stack = cpu_event.call_stack_from_args
-                elif call_stack_source == 'tree':
-                    call_stack = cpu_event.call_stack_from_tree
+                call_stack = cpu_event.get_call_stack(call_stack_source)
                 
                 if call_stack is None:
                     continue  # 跳过没有 call stack 的事件

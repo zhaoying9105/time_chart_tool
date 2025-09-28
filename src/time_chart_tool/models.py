@@ -88,6 +88,23 @@ class ActivityEvent:
         """获取从调用栈树生成的call stack信息"""
         return getattr(self, '_call_stack_from_tree', None)
     
+    def get_call_stack(self, source: str = 'args') -> Optional[List[str]]:
+        """
+        统一的调用栈获取接口
+        
+        Args:
+            source: 调用栈来源，'args' 或 'tree'
+            
+        Returns:
+            Optional[List[str]]: 调用栈列表，如果不存在则返回None
+        """
+        if source == 'args':
+            return self.call_stack_from_args
+        elif source == 'tree':
+            return self.call_stack_from_tree
+        else:
+            raise ValueError(f"不支持的调用栈来源: {source}，支持的值: 'args', 'tree'")
+    
     @property
     def is_kernel(self) -> bool:
         """判断是否为 kernel 事件"""
