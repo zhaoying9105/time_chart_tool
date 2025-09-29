@@ -208,6 +208,10 @@ class CommunicationAnalyzer:
         fastest_parser = PyTorchProfilerParser()
         slowest_parser = PyTorchProfilerParser()
         
+        # 保存为实例变量，供后续调用栈分析使用
+        self.fastest_parser = fastest_parser
+        self.slowest_parser = slowest_parser
+        
         fastest_data = fastest_parser.load_json_file(fastest_json_file)
         slowest_data = slowest_parser.load_json_file(slowest_json_file)
         
@@ -228,10 +232,17 @@ class CommunicationAnalyzer:
             return None
         
         # 6. 生成深度分析Excel文件
-        excel_file = self._generate_deep_analysis_excel(comparison_result, step, comm_idx, output_dir)
+        excel_result = self._generate_deep_analysis_excel(comparison_result, step, comm_idx, output_dir)
         
         # 7. 添加可视化文件到返回结果
-        generated_files = [excel_file]
+        if isinstance(excel_result, tuple):
+            # 返回了两个文件（主文件 + CPU Start Time分析文件）
+            excel_file, cpu_excel_file = excel_result
+            generated_files = [excel_file, cpu_excel_file]
+        else:
+            # 只返回了一个文件
+            generated_files = [excel_result]
+            
         if 'visualization_files' in comparison_result:
             generated_files.extend(comparison_result['visualization_files'])
         
@@ -457,6 +468,65 @@ class CommunicationAnalyzer:
                 cpu_df.to_excel(writer, sheet_name='CPU Start Time分析', index=False)
         
         print(f"深度分析Excel文件已生成: {excel_file}")
+        
+        # 生成单独的CPU Start Time相邻差值分析Excel文件
+        if 'top_cpu_start_time_differences' in comparison_result and comparison_result['top_cpu_start_time_differences']:
+            cpu_excel_file = output_path / f"cpu_start_time_differences_step_{step}_idx_{comm_idx}.xlsx"
+            
+            with pd.ExcelWriter(cpu_excel_file, engine='openpyxl') as writer:
+                # 写入CPU start time相邻差值分析数据
+                cpu_data = []
+                for i, diff_info in enumerate(comparison_result['top_cpu_start_time_differences']):
+                    prev_row = diff_info['prev_row']
+                    current_row = diff_info['current_row']
+                    
+                    # 获取调用栈信息
+                    prev_fastest_call_stack = []
+                    prev_slowest_call_stack = []
+                    current_fastest_call_stack = []
+                    current_slowest_call_stack = []
+                    
+                    if diff_info.get('prev_fastest_event'):
+                        prev_fastest_call_stack = diff_info['prev_fastest_event'].get_call_stack('tree') or []
+                    if diff_info.get('prev_slowest_event'):
+                        prev_slowest_call_stack = diff_info['prev_slowest_event'].get_call_stack('tree') or []
+                    if diff_info.get('current_fastest_event'):
+                        current_fastest_call_stack = diff_info['current_fastest_event'].get_call_stack('tree') or []
+                    if diff_info.get('current_slowest_event'):
+                        current_slowest_call_stack = diff_info['current_slowest_event'].get_call_stack('tree') or []
+                    
+                    # 计算最大调用栈长度
+                    max_stack_len = max(len(prev_fastest_call_stack), len(prev_slowest_call_stack), 
+                                      len(current_fastest_call_stack), len(current_slowest_call_stack))
+                    
+                    # 为每一行添加调用栈信息
+                    for j in range(max_stack_len):
+                        cpu_data.append({
+                            '排名': i + 1 if j == 0 else '',
+                            '事件对': f"{diff_info['index_pair'][0]+1}-{diff_info['index_pair'][1]+1}" if j == 0 else '',
+                            '相邻差值': diff_info['difference'] if j == 0 else '',
+                            '前一个最快Card操作名': prev_row['cpu_op_name'] if j == 0 else '',
+                            '前一个最慢Card操作名': prev_row.get('slowest_cpu_op_name', 'N/A') if j == 0 else '',
+                            '前一个Ratio': diff_info['prev_ratio'] if j == 0 else '',
+                            '前一个最快Card时间(可读)': prev_row['fastest_cpu_readable_timestamp'] if j == 0 else '',
+                            '前一个最慢Card时间(可读)': prev_row['slowest_cpu_readable_timestamp'] if j == 0 else '',
+                            '当前最快Card操作名': current_row['cpu_op_name'] if j == 0 else '',
+                            '当前最慢Card操作名': current_row.get('slowest_cpu_op_name', 'N/A') if j == 0 else '',
+                            '当前Ratio': diff_info['current_ratio'] if j == 0 else '',
+                            '当前最快Card时间(可读)': current_row['fastest_cpu_readable_timestamp'] if j == 0 else '',
+                            '当前最慢Card时间(可读)': current_row['slowest_cpu_readable_timestamp'] if j == 0 else '',
+                            '前一个最快Card调用栈': prev_fastest_call_stack[j] if j < len(prev_fastest_call_stack) else '',
+                            '前一个最慢Card调用栈': prev_slowest_call_stack[j] if j < len(prev_slowest_call_stack) else '',
+                            '当前最快Card调用栈': current_fastest_call_stack[j] if j < len(current_fastest_call_stack) else '',
+                            '当前最慢Card调用栈': current_slowest_call_stack[j] if j < len(current_slowest_call_stack) else ''
+                        })
+                
+                cpu_df = pd.DataFrame(cpu_data)
+                cpu_df.to_excel(writer, sheet_name='CPU Start Time相邻差值分析', index=False)
+            
+            print(f"CPU Start Time相邻差值分析Excel文件已生成: {cpu_excel_file}")
+            return excel_file, str(cpu_excel_file)
+        
         return excel_file
     
     def _find_all_communication_events(self, data: 'ProfilerData') -> List['ActivityEvent']:
@@ -910,99 +980,100 @@ class CommunicationAnalyzer:
             }.get(current_row['alignment_type'], current_row['alignment_type'])
             
             print(f"  {i+1}. 事件对 ({prev_idx+1}, {current_idx+1}):")
-            print(f"     前一个事件 ({prev_alignment_str}):")
-            print(f"       最快Card CPU操作: {prev_row['cpu_op_name']}")
-            print(f"       最慢Card CPU操作: {prev_row.get('slowest_cpu_op_name', 'N/A')}")
-            print(f"       最快Card Timestamp: {prev_row['fastest_cpu_readable_timestamp']} (ts: {prev_row.get('fastest_cpu_start_time', 'N/A')})")
-            print(f"       最慢Card Timestamp: {prev_row['slowest_cpu_readable_timestamp']} (ts: {prev_row.get('slowest_cpu_start_time', 'N/A')})")
-            print(f"       Ratio: {diff_info['prev_ratio']:.4f}")
-            
-            # 验证事件名称是否匹配
-            if diff_info.get('prev_fastest_event') and diff_info.get('prev_slowest_event'):
-                prev_fastest_name = diff_info['prev_fastest_event'].name
-                prev_slowest_name = diff_info['prev_slowest_event'].name
-                if prev_fastest_name != prev_slowest_name:
-                    print(f"       [警告] 事件名称不匹配: 最快Card='{prev_fastest_name}', 最慢Card='{prev_slowest_name}'")
-                else:
-                    print(f"       [验证] 事件名称匹配: '{prev_fastest_name}'")
-            
-            # 打印前一个事件的调用栈 (from tree)
-            if diff_info.get('prev_fastest_event'):
-                prev_fastest_event = diff_info['prev_fastest_event']
-                prev_fastest_call_stack = prev_fastest_event.get_call_stack('tree')
-                if prev_fastest_call_stack:
-                    print(f"       最快Card调用栈 (from tree):")
-                    for frame in prev_fastest_call_stack:
-                        print(f"         {frame}")
-                    # 验证调用栈最后一项是否与事件名称匹配
-                    if prev_fastest_call_stack and prev_fastest_call_stack[-1] != prev_fastest_event.name:
-                        print(f"         [警告] 调用栈最后一项 '{prev_fastest_call_stack[-1]}' 与事件名称 '{prev_fastest_event.name}' 不匹配")
-                else:
-                    # 调试信息：显示事件的基本信息
-                    print(f"       最快Card调用栈 (from tree): 无")
-                    print(f"         事件信息: name={prev_fastest_event.name}, dur={prev_fastest_event.dur}, pid={prev_fastest_event.pid}, tid={prev_fastest_event.tid}")
-            
-            if diff_info.get('prev_slowest_event'):
-                prev_slowest_event = diff_info['prev_slowest_event']
-                prev_slowest_call_stack = prev_slowest_event.get_call_stack('tree')
-                if prev_slowest_call_stack:
-                    print(f"       最慢Card调用栈 (from tree):")
-                    for frame in prev_slowest_call_stack:
-                        print(f"         {frame}")
-                    # 验证调用栈最后一项是否与事件名称匹配
-                    if prev_slowest_call_stack and prev_slowest_call_stack[-1] != prev_slowest_event.name:
-                        print(f"         [警告] 调用栈最后一项 '{prev_slowest_call_stack[-1]}' 与事件名称 '{prev_slowest_event.name}' 不匹配")
-                else:
-                    print(f"       最慢Card调用栈 (from tree): 无")
-                    print(f"         事件信息: name={prev_slowest_event.name}, dur={prev_slowest_event.dur}, pid={prev_slowest_event.pid}, tid={prev_slowest_event.tid}")
-            
-            print(f"     当前事件 ({current_alignment_str}):")
-            print(f"       最快Card CPU操作: {current_row['cpu_op_name']}")
-            print(f"       最慢Card CPU操作: {current_row.get('slowest_cpu_op_name', 'N/A')}")
-            print(f"       最快Card Timestamp: {current_row['fastest_cpu_readable_timestamp']} (ts: {current_row.get('fastest_cpu_start_time', 'N/A')})")
-            print(f"       最慢Card Timestamp: {current_row['slowest_cpu_readable_timestamp']} (ts: {current_row.get('slowest_cpu_start_time', 'N/A')})")
-            print(f"       Ratio: {diff_info['current_ratio']:.4f}")
-            
-            # 验证事件名称是否匹配
-            if diff_info.get('current_fastest_event') and diff_info.get('current_slowest_event'):
-                current_fastest_name = diff_info['current_fastest_event'].name
-                current_slowest_name = diff_info['current_slowest_event'].name
-                if current_fastest_name != current_slowest_name:
-                    print(f"       [警告] 事件名称不匹配: 最快Card='{current_fastest_name}', 最慢Card='{current_slowest_name}'")
-                else:
-                    print(f"       [验证] 事件名称匹配: '{current_fastest_name}'")
-            
-            # 打印当前事件的调用栈 (from tree)
-            if diff_info.get('current_fastest_event'):
-                current_fastest_event = diff_info['current_fastest_event']
-                current_fastest_call_stack = current_fastest_event.get_call_stack('tree')
-                if current_fastest_call_stack:
-                    print(f"       最快Card调用栈 (from tree):")
-                    for frame in current_fastest_call_stack:
-                        print(f"         {frame}")
-                    # 验证调用栈最后一项是否与事件名称匹配
-                    if current_fastest_call_stack and current_fastest_call_stack[-1] != current_fastest_event.name:
-                        print(f"         [警告] 调用栈最后一项 '{current_fastest_call_stack[-1]}' 与事件名称 '{current_fastest_event.name}' 不匹配")
-                else:
-                    # 调试信息：显示事件的基本信息
-                    print(f"       最快Card调用栈 (from tree): 无")
-                    print(f"         事件信息: name={current_fastest_event.name}, dur={current_fastest_event.dur}, pid={current_fastest_event.pid}, tid={current_fastest_event.tid}")
-            
-            if diff_info.get('current_slowest_event'):
-                current_slowest_event = diff_info['current_slowest_event']
-                current_slowest_call_stack = current_slowest_event.get_call_stack('tree')
-                if current_slowest_call_stack:
-                    print(f"       最慢Card调用栈 (from tree):")
-                    for frame in current_slowest_call_stack:
-                        print(f"         {frame}")
-                    # 验证调用栈最后一项是否与事件名称匹配
-                    if current_slowest_call_stack and current_slowest_call_stack[-1] != current_slowest_event.name:
-                        print(f"         [警告] 调用栈最后一项 '{current_slowest_call_stack[-1]}' 与事件名称 '{current_slowest_event.name}' 不匹配")
-                else:
-                    print(f"       最慢Card调用栈 (from tree): 无")
-                    print(f"         事件信息: name={current_slowest_event.name}, dur={current_slowest_event.dur}, pid={current_slowest_event.pid}, tid={current_slowest_event.tid}")
-            
             print(f"     相邻差值: {diff_info['difference']:.4f}")
+            print()
+            
+            # 四列竖排格式 - 扩展宽度以容纳长调用栈
+            col_width = 50  # 每列宽度从30扩展到50
+            total_width = col_width * 4 + 9  # 4列 + 3个分隔符(3个|) + 6个空格
+            
+            print("     " + "="*total_width)
+            print("     " + f"{'最快Card前一个事件':<{col_width}} | {'最慢Card前一个事件':<{col_width}} | {'最快Card当前事件':<{col_width}} | {'最慢Card当前事件':<{col_width}}")
+            print("     " + "="*total_width)
+            
+            # 第一行：事件名称
+            prev_fastest_name = prev_row['cpu_op_name']
+            prev_slowest_name = prev_row.get('slowest_cpu_op_name', 'N/A')
+            current_fastest_name = current_row['cpu_op_name']
+            current_slowest_name = current_row.get('slowest_cpu_op_name', 'N/A')
+            
+            print("     " + f"{prev_fastest_name:<{col_width}} | {prev_slowest_name:<{col_width}} | {current_fastest_name:<{col_width}} | {current_slowest_name:<{col_width}}")
+            
+            # 第二行：对齐类型
+            print("     " + f"{prev_alignment_str:<{col_width}} | {prev_alignment_str:<{col_width}} | {current_alignment_str:<{col_width}} | {current_alignment_str:<{col_width}}")
+            
+            # 第三行：时间戳
+            prev_fastest_ts = prev_row['fastest_cpu_readable_timestamp']
+            prev_slowest_ts = prev_row['slowest_cpu_readable_timestamp']
+            current_fastest_ts = current_row['fastest_cpu_readable_timestamp']
+            current_slowest_ts = current_row['slowest_cpu_readable_timestamp']
+            
+            print("     " + f"{prev_fastest_ts:<{col_width}} | {prev_slowest_ts:<{col_width}} | {current_fastest_ts:<{col_width}} | {current_slowest_ts:<{col_width}}")
+            
+            # 第四行：Ratio
+            print("     " + f"Ratio: {diff_info['prev_ratio']:.4f}{'':<{col_width-12}} | {'':<{col_width}} | Ratio: {diff_info['current_ratio']:.4f}{'':<{col_width-12}} | {'':<{col_width}}")
+            
+            # 第五行：事件名称匹配验证
+            prev_name_match = "✅ 匹配" if prev_fastest_name == prev_slowest_name else f"❌ 不匹配"
+            current_name_match = "✅ 匹配" if current_fastest_name == current_slowest_name else f"❌ 不匹配"
+            
+            print("     " + f"{prev_name_match:<{col_width}} | {'':<{col_width}} | {current_name_match:<{col_width}} | {'':<{col_width}}")
+            
+            # 调用栈信息
+            print("     " + "-"*total_width)
+            print("     " + f"{'调用栈 (from tree)':<{col_width}} | {'调用栈 (from tree)':<{col_width}} | {'调用栈 (from tree)':<{col_width}} | {'调用栈 (from tree)':<{col_width}}")
+            print("     " + "-"*total_width)
+            
+            # 获取调用栈信息
+            prev_fastest_call_stack = []
+            prev_slowest_call_stack = []
+            current_fastest_call_stack = []
+            current_slowest_call_stack = []
+            
+            if diff_info.get('prev_fastest_event'):
+                prev_fastest_call_stack = diff_info['prev_fastest_event'].get_call_stack('tree') or []
+            if diff_info.get('prev_slowest_event'):
+                prev_slowest_call_stack = diff_info['prev_slowest_event'].get_call_stack('tree') or []
+            if diff_info.get('current_fastest_event'):
+                current_fastest_call_stack = diff_info['current_fastest_event'].get_call_stack('tree') or []
+            if diff_info.get('current_slowest_event'):
+                current_slowest_call_stack = diff_info['current_slowest_event'].get_call_stack('tree') or []
+            
+            # 计算最大调用栈长度
+            max_stack_len = max(len(prev_fastest_call_stack), len(prev_slowest_call_stack), 
+                              len(current_fastest_call_stack), len(current_slowest_call_stack))
+            
+            if max_stack_len == 0:
+                print("     " + f"{'无调用栈':<{col_width}} | {'无调用栈':<{col_width}} | {'无调用栈':<{col_width}} | {'无调用栈':<{col_width}}")
+            else:
+                for j in range(max_stack_len):
+                    prev_fastest_frame = prev_fastest_call_stack[j] if j < len(prev_fastest_call_stack) else ""
+                    prev_slowest_frame = prev_slowest_call_stack[j] if j < len(prev_slowest_call_stack) else ""
+                    current_fastest_frame = current_fastest_call_stack[j] if j < len(current_fastest_call_stack) else ""
+                    current_slowest_frame = current_slowest_call_stack[j] if j < len(current_slowest_call_stack) else ""
+                    
+                    print("     " + f"{prev_fastest_frame:<{col_width}} | {prev_slowest_frame:<{col_width}} | {current_fastest_frame:<{col_width}} | {current_slowest_frame:<{col_width}}")
+            
+            print("     " + "="*total_width)
+            
+            # 打印两个事件之间的调用栈分析（只有当两个事件都不是None时才分析）
+            prev_fastest = diff_info.get('prev_fastest_event')
+            current_fastest = diff_info.get('current_fastest_event')
+            prev_slowest = diff_info.get('prev_slowest_event')
+            current_slowest = diff_info.get('current_slowest_event')
+            
+            if prev_fastest and current_fastest:
+                self._print_events_between_call_stacks(
+                    prev_fastest_event=prev_fastest,
+                    current_fastest_event=current_fastest,
+                    prev_slowest_event=prev_slowest,
+                    current_slowest_event=current_slowest,
+                    fastest_parser=self.fastest_parser,
+                    slowest_parser=self.slowest_parser
+                )
+            else:
+                print("[信息] 跳过调用栈分析：存在None事件")
+            
             print()
         
         return {
@@ -1158,10 +1229,20 @@ class CommunicationAnalyzer:
                     if prev_idx < len(aligned_fastest) and prev_idx < len(aligned_slowest):
                         prev_fastest_event = aligned_fastest[prev_idx]
                         prev_slowest_event = aligned_slowest[prev_idx]
+                        
+                        # 检查是否为None事件
+                        if prev_fastest_event is None:
+                            print(f"[调试] prev_fastest_event is None at index {prev_idx}")
+                            continue
                     
                     if current_idx < len(aligned_fastest) and current_idx < len(aligned_slowest):
                         current_fastest_event = aligned_fastest[current_idx]
                         current_slowest_event = aligned_slowest[current_idx]
+                        
+                        # 检查是否为None事件
+                        if current_fastest_event is None:
+                            print(f"[调试] current_fastest_event is None at index {current_idx}")
+                            continue
             
             # 检查事件名称一致性
             if prev_fastest_event and prev_slowest_event:
@@ -1395,13 +1476,13 @@ class CommunicationAnalyzer:
                 else:
                     aligned_fastest.append(fast_event)
                     aligned_slowest.append(slow_event)
-                    alignment_info.append({
-                        'match_type': 'exact_match',
-                        'fast_idx': fast_idx,
-                        'slow_idx': slow_idx,
+                alignment_info.append({
+                    'match_type': 'exact_match',
+                    'fast_idx': fast_idx,
+                    'slow_idx': slow_idx,
                         'fast_name': fast_event.name,
                         'slow_name': slow_event.name
-                    })
+                })
             elif fast_idx is not None:
                 # 快卡事件未匹配
                 aligned_fastest.append(fastest_events[fast_idx])
@@ -2221,4 +2302,218 @@ class CommunicationAnalyzer:
                         'Std_Duration_us': (sum((x - mean_dur)**2 for x in durations) / len(durations))**0.5
                     })
         return card_stats
+    
+    def _print_events_between_call_stacks(self, prev_fastest_event, current_fastest_event, 
+                                          prev_slowest_event=None, current_slowest_event=None,
+                                          fastest_parser=None, slowest_parser=None):
+        """
+        打印两个事件之间的调用栈树分析，使用时间窗口过滤
+        
+        Args:
+            prev_fastest_event: 前一个最快卡事件对象
+            current_fastest_event: 当前最快卡事件对象
+            prev_slowest_event: 前一个最慢卡事件对象
+            current_slowest_event: 当前最慢卡事件对象
+            fastest_parser: 最快卡的parser对象
+            slowest_parser: 最慢卡的parser对象
+        """
+        if not prev_fastest_event or not current_fastest_event:
+            print("    事件之间调用栈分析：无法获取事件对象")
+            return
+        
+        print("    事件之间调用栈分析:")
+        print("    " + "=" * 80)
+        
+        # 为最快卡分析两个事件之间的调用栈关系
+        print(f"    最快Card ({prev_fastest_event.name} → {current_fastest_event.name}) 的调用栈关系:")
+        self._print_time_window_call_stack_tree(
+            prev_event=prev_fastest_event, 
+            current_event=current_fastest_event, 
+            parser=fastest_parser, 
+            card_name="最快Card"
+        )
+        
+        # 如果提供了最慢卡事件，也进行分析
+        if prev_slowest_event and current_slowest_event and slowest_parser:
+            print(f"\n    最慢Card ({prev_slowest_event.name} → {current_slowest_event.name}) 的调用栈关系:")
+            self._print_time_window_call_stack_tree(
+                prev_event=prev_slowest_event, 
+                current_event=current_slowest_event, 
+                parser=slowest_parser, 
+                card_name="最慢Card"
+            )
+        
+        print("    " + "=" * 80)
+    
+    def _print_time_window_call_stack_tree(self, prev_event, current_event, parser, card_name):
+        """
+        打印时间窗口内的调用栈树
+        
+        Args:
+            prev_event: 前一个事件对象
+            current_event: 当前事件对象  
+            parser: PyTorchProfilerParser 对象
+            card_name: Card名称标识
+        """
+        if not parser:
+            print(f"      {card_name}: 无法获取parser对象")
+            return
+        
+        # 获取调用栈树
+        call_stack_trees = parser.get_call_stack_trees()
+        if not call_stack_trees:
+            print(f"      {card_name}: 未找到调用栈树")
+            return
+        
+        # 找到前一个和当前事件对应的节点
+        prev_event_id = f"{prev_event.name}:{prev_event.ts}:{prev_event.dur}:{prev_event.pid}:{prev_event.tid}"
+        current_event_id = f"{current_event.name}:{current_event.ts}:{current_event.dur}:{current_event.pid}:{current_event.tid}"
+        
+        prev_node = parser.call_stack_builder.event_to_node_map.get(prev_event_id)
+        current_node = parser.call_stack_builder.event_to_node_map.get(current_event_id)
+        
+        if not prev_node:
+            # 添加调试信息
+            print(f"      {card_name}: 未找到前一个事件 '{prev_event.name}' 的节点")
+            print(f"        调试信息 - 查询的event_id: {prev_event_id}")
+            print(f"        调试信息 - 前事件属性: ts={prev_event.ts}, dur={prev_event.dur}, pid={prev_event.pid}, tid={prev_event.tid}")
+            print(f"        调试信息 - event_to_node_map大小: {len(parser.call_stack_builder.event_to_node_map)}")
+            
+            # 检查event_to_node_map中的前几个条目
+            print(f"        event_to_node_map中的前几个条目:")
+            for i, (key, value) in enumerate(list(parser.call_stack_builder.event_to_node_map.items())[:3]):
+                print(f"          {i+1}. {key}")
+            
+            return
+        
+        if not current_node:
+            print(f"      {card_name}: 未找到当前事件 '{current_event.name}' 的节点")
+            return
+        
+        print(f"      {card_name}: 找到事件节点")
+        print(f"        前一个事件: {prev_event.name} (ts={prev_event.ts:.6f}, dur={prev_event.dur:.6f})")
+        print(f"        当前事件: {current_event.name} (ts={current_event.ts:.6f}, dur={current_event.dur:.6f})")
+        
+        # 定义时间窗口：从前一个事件开始到当前事件结束
+        time_start = prev_event.ts
+        time_end = current_event.ts + current_event.dur
+        
+        print(f"        时间窗口: [{time_start:.6f}, {time_end:.6f}]")
+        
+        # 收集时间窗口内的事件
+        window_events = []
+        
+        # 获取前一个事件所属的(pid, tid)组
+        pid_tid_key = (prev_event.pid, prev_event.tid)
+        root_node = call_stack_trees.get(pid_tid_key)
+        
+        if root_node:
+            window_events = self._collect_events_in_time_window(
+                root_node, time_start, time_end, 
+                prev_node.event_id, current_node.event_id
+            )
+        
+        print(f"        时间窗口内事件数: {len(window_events)}")
+        
+        if window_events:
+            print(f"        时间窗口内事件列表:")
+            for i, event in enumerate(window_events):
+                duration_ms = event.dur / 1000 if event.dur else 0
+                is_prev = (event.name == prev_event.name and event.ts == prev_event.ts)
+                is_curr = (event.name == current_event.name and event.ts == current_event.ts)
+                
+                marker = " [START]" if is_prev else " [END]" if is_curr else ""
+                print(f"          {i+1:2d}. {event.name}{marker} (ts={event.ts:.6f}, dur={duration_ms:.3f}ms)")
+            
+            # 重新构建调用栈树并打印
+            print(f"        时间窗口调用栈树:")
+            self._build_and_print_time_window_tree(
+                window_events, prev_event, current_event, card_name
+            )
+        else:
+            print(f"        时间窗口内无其他事件")
+    
+    def _collect_events_in_time_window(self, root_node, time_start, time_end, prev_event_id, current_event_id):
+        """收集时间窗口内的所有事件"""
+        events = []
+        event_ids = set()
+        
+        def traverse_node(node):
+            event = node.event
+            
+            # 检查事件是否在时间窗口内
+            event_start = event.ts
+            event_end = event.ts + event.dur
+            
+            # 事件与时间窗口有重叠就包含（支持重叠检查）
+            if (event_end > time_start and event_start < time_end):
+                event_id = node.event_id
+                
+                # 避免重复添加相同事件
+                if event_id not in event_ids:
+                    events.append(event)
+                    event_ids.add(event_id)
+            
+            # 递归遍历子节点
+            for child in node.children:
+                traverse_node(child)
+        
+        traverse_node(root_node)
+        
+        # 按时间戳排序
+        events.sort(key=lambda e: e.ts)
+        return events
+    
+    def _build_and_print_time_window_tree(self, events, prev_event, current_event, card_name):
+        """为时间窗口内的事件重建调用栈树并打印"""
+        if not events:
+            return
+        
+        # 使用build_call_stacks_subtree方法重建调用栈树，保留原始映射
+        builder = self.fastest_parser.call_stack_builder if card_name == "最快Card" else self.slowest_parser.call_stack_builder
+        time_window_trees = builder.build_call_stacks_subtree(events, preserve_mapping=True)
+        
+        # 找到对应的(pid, tid)组的树
+        pid_tid_key = (prev_event.pid, prev_event.tid)
+        tree_root = time_window_trees.get(pid_tid_key)
+        
+        if tree_root:
+            print(f"        ===== 调用栈树结构 =====")
+            self._print_time_window_tree_recursive(
+                tree_root, prev_event, current_event, depth=0, prefix=""
+            )
+        else:
+            print(f"        {card_name}: 未能重建调用栈树")
+    
+    def _print_time_window_tree_recursive(self, node, prev_event, current_event, depth=0, prefix=""):
+        """递归打印时间窗口调用栈树"""
+        if depth > 20:  # 限制深度避免过深
+            return
+        
+        event = node.event
+        duration_ms = event.dur / 1000 if event.dur else 0
+        
+        # 标记起始和结束事件
+        is_prev = (event.name == prev_event.name and event.ts == prev_event.ts)
+        is_curr = (event.name == current_event.name and event.ts == current_event.ts)
+        
+        markers = []
+        if is_prev:
+            markers.append(" [START]")
+        if is_curr:
+            markers.append(" [END]")
+        
+        marker_str = "".join(markers)
+        
+        print(f"        {prefix}{event.name}{marker_str} (ts={event.ts:.6f}, dur={duration_ms:.3f}ms)")
+        
+        # 按开始时间排序子节点，便于跟踪时序
+        sorted_children = sorted(node.children, key=lambda n: n.event.ts)
+        
+        for i, child in enumerate(sorted_children):
+            is_last = i == len(sorted_children) - 1
+            child_prefix = prefix + ("└── " if is_last else "├── ")
+            self._print_time_window_tree_recursive(
+                child, prev_event, current_event, depth + 1, child_prefix
+            )
     

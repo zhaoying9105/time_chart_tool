@@ -207,6 +207,55 @@ class CallStackBuilder:
         self.logger.info(f"成功构建 {len(call_stack_trees)} 个调用栈树，映射了 {len(self.event_to_node_map)} 个事件")
         return call_stack_trees
     
+    def build_call_stacks_subtree(self, events: List[ActivityEvent], preserve_mapping: bool = True) -> Dict[Tuple[int, int], CallStackNode]:
+        """
+        为指定事件构建调用栈子树，可选择是否保留现有事件映射
+        
+        Args:
+            events: 事件列表
+            preserve_mapping: 是否保留现有的event_to_node_map（默认True）
+            
+        Returns:
+            Dict[Tuple[int, int], CallStackNode]: 按(pid, tid)分组的调用栈树根节点
+        """
+        # 保存原始映射（如果需要保留）
+        original_mapping = {}
+        if preserve_mapping:
+            original_mapping = self.event_to_node_map.copy()
+        
+        # 清空事件映射
+        self.event_to_node_map.clear()
+        
+        # 1. 按pid和tid分组事件
+        events_by_pid_tid = self._group_events_by_pid_tid(events)
+        
+        # 2. 为每个(pid, tid)组构建调用栈树
+        call_stack_trees = {}
+        
+        for (pid, tid), group_events in events_by_pid_tid.items():
+            self.logger.info(f"为进程 {pid} 线程 {tid} 构建子树，事件数: {len(group_events)}")
+            
+            # 过滤掉没有duration的事件
+            valid_events = [e for e in group_events if e.dur is not None and e.dur > 0]
+            
+            if not valid_events:
+                self.logger.warning(f"进程 {pid} 线程 {tid} 没有有效的事件")
+                continue
+            
+            # 构建调用栈树
+            root = self._build_call_stack_tree(valid_events)
+            if root:
+                call_stack_trees[(pid, tid)] = root
+                # 构建事件到节点的映射
+                self._build_event_mapping(root)
+        
+        # 如果保留原始映射，则合并映射
+        if preserve_mapping:
+            self.event_to_node_map.update(original_mapping)
+        
+        self.logger.info(f"成功构建 {len(call_stack_trees)} 个子调用栈树")
+        return call_stack_trees
+    
     def _group_events_by_pid_tid(self, events: List[ActivityEvent]) -> Dict[Tuple[int, int], List[ActivityEvent]]:
         """
         按pid和tid分组事件，过滤掉没有pid/tid的事件
