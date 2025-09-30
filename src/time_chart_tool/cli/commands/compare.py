@@ -174,7 +174,9 @@ class CompareCommand:
                 include_op_patterns=include_op_patterns,
                 exclude_op_patterns=exclude_op_patterns,
                 include_kernel_patterns=include_kernel_patterns,
-                exclude_kernel_patterns=exclude_kernel_patterns
+                exclude_kernel_patterns=exclude_kernel_patterns,
+                call_stack_source=args.call_stack_source,
+                not_show_fwd_bwd_type=getattr(args, 'not_show_fwd_bwd_type', False),
             )
             
             total_time = time.time() - start_time

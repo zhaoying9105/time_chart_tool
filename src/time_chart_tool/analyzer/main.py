@@ -37,7 +37,7 @@ class Analyzer:
     
     # ==================== Stage 2: 数据聚合 ====================
     
-    def stage2_data_aggregation(self, cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec: str = 'name', call_stack_source: str = 'args'):
+    def stage2_data_aggregation(self, cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec: str = 'name', call_stack_source: str = 'tree'):
         """Stage 2: 数据聚合"""
         return self.aggregator.stage2_data_aggregation(cpu_events_by_external_id, kernel_events_by_external_id, aggregation_spec, call_stack_source)
     
@@ -61,7 +61,7 @@ class Analyzer:
                            show_timestamp: bool = False, show_readable_timestamp: bool = False,
                            show_kernel_timestamp: bool = False, show_name: bool = False,
                            output_dir: str = ".", label: str = None, print_markdown: bool = False,
-                           call_stack_source: str = 'args') -> List[Path]:
+                           call_stack_source: str = 'tree', not_show_fwd_bwd_type: bool = False) -> List[Path]:
         """
         分析单个文件
         
@@ -80,6 +80,7 @@ class Analyzer:
             label: 文件标签
             print_markdown: 是否打印markdown表格
             call_stack_source: 调用栈来源，'args' 或 'tree'
+            not_show_fwd_bwd_type: 是否不显示fwd_bwd_type列
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -117,7 +118,8 @@ class Analyzer:
             show_name=show_name,
             aggregation_spec=aggregation_spec,
             label=label,
-            print_markdown=print_markdown
+            print_markdown=print_markdown,
+            not_show_fwd_bwd_type=not_show_fwd_bwd_type
         )
         
         return generated_files
@@ -130,7 +132,7 @@ class Analyzer:
                                      output_dir: str = ".", label: str = None, print_markdown: bool = False,
                                      include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
                                      include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None,
-                                     call_stack_source: str = 'args') -> List[Path]:
+                                     call_stack_source: str = 'tree', not_show_fwd_bwd_type: bool = False) -> List[Path]:
         """
         分析多个文件（使用glob模式）
         
@@ -149,6 +151,7 @@ class Analyzer:
             label: 文件标签
             print_markdown: 是否打印markdown表格
             call_stack_source: 调用栈来源，'args' 或 'tree'
+            not_show_fwd_bwd_type: 是否不显示fwd_bwd_type列
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -190,7 +193,8 @@ class Analyzer:
             exclude_op_patterns=exclude_op_patterns,
             include_kernel_patterns=include_kernel_patterns,
             exclude_kernel_patterns=exclude_kernel_patterns,
-            per_rank_stats=per_rank_stats
+            per_rank_stats=per_rank_stats,
+            not_show_fwd_bwd_type=not_show_fwd_bwd_type
         )
         
         return generated_files
@@ -205,7 +209,7 @@ class Analyzer:
                               print_markdown: bool = False, max_workers: int = None,
                               include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
                               include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None,
-                              call_stack_source: str = 'args') -> List[Path]:
+                              call_stack_source: str = 'tree', not_show_fwd_bwd_type: bool = False) -> List[Path]:
         """
         分析多个文件并对比
         
@@ -232,6 +236,7 @@ class Analyzer:
             include_kernel_patterns: 包含的kernel名称模式列表
             exclude_kernel_patterns: 排除的kernel名称模式列表
             call_stack_source: 调用栈来源，'args' 或 'tree'
+            not_show_fwd_bwd_type: 是否不显示fwd_bwd_type列
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -279,7 +284,8 @@ class Analyzer:
             include_op_patterns=include_op_patterns,
             exclude_op_patterns=exclude_op_patterns,
             include_kernel_patterns=include_kernel_patterns,
-            exclude_kernel_patterns=exclude_kernel_patterns
+            exclude_kernel_patterns=exclude_kernel_patterns,
+            not_show_fwd_bwd_type=not_show_fwd_bwd_type
         )
         
         return generated_files
@@ -331,7 +337,7 @@ class Analyzer:
     def _process_files_parallel(self, file_paths: List[str], aggregation_spec: str, max_workers: int, 
                               include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
                               include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None,
-                              call_stack_source: str = 'args') -> List[Dict[Union[str, tuple], AggregatedData]]:
+                              call_stack_source: str = 'tree') -> List[Dict[Union[str, tuple], AggregatedData]]:
         """
         并行处理文件
         
@@ -344,6 +350,7 @@ class Analyzer:
             include_kernel_patterns: 包含的kernel名称模式列表
             exclude_kernel_patterns: 排除的kernel名称模式列表
             call_stack_source: 调用栈来源，'args' 或 'tree'
+            not_show_fwd_bwd_type: 是否不显示fwd_bwd_type列
             
         Returns:
             List[Dict[Union[str, tuple], AggregatedData]]: 每个文件的聚合数据列表

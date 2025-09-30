@@ -2274,32 +2274,31 @@ class CommunicationAnalyzer:
             pd.DataFrame(card_stats).to_excel(writer, sheet_name='Card_Statistics', index=False)
     
     def _calculate_step_statistics(self, all2all_data):
-        """计算step级别统计信息"""
+        """计算step级别统计信息 - 每个duration单独统计"""
         step_stats = []
         for step, card_data in all2all_data.items():
-            all_durations = [d for durations in card_data.values() for d in durations]
-            if all_durations:
-                mean_dur = sum(all_durations) / len(all_durations)
-                step_stats.append({
-                    'Step': step, 'Total_Cards': len(card_data), 'Total_Comm_Ops': len(all_durations),
-                    'Min_Duration_us': min(all_durations), 'Max_Duration_us': max(all_durations),
-                    'Mean_Duration_us': mean_dur,
-                    'Std_Duration_us': (sum((x - mean_dur)**2 for x in all_durations) / len(all_durations))**0.5
-                })
+            # 为每个duration创建单独的统计条目
+            for card_idx, durations in card_data.items():
+                for duration_idx, duration in enumerate(durations):
+                    step_stats.append({
+                        "Step": step,
+                        "Card_Index": card_idx,
+                        "Comm_Op_Index": duration_idx,
+                        "Duration_us": duration
+                    })
         return step_stats
-    
+
     def _calculate_card_statistics(self, all2all_data):
-        """计算card级别统计信息"""
+        """计算card级别统计信息 - 每个duration单独统计"""
         card_stats = []
         for step, card_data in all2all_data.items():
             for card_idx, durations in card_data.items():
-                if durations:
-                    mean_dur = sum(durations) / len(durations)
+                for duration_idx, duration in enumerate(durations):
                     card_stats.append({
-                        'Step': step, 'Card_Index': card_idx, 'Comm_Ops_Count': len(durations),
-                        'Min_Duration_us': min(durations), 'Max_Duration_us': max(durations),
-                        'Mean_Duration_us': mean_dur,
-                        'Std_Duration_us': (sum((x - mean_dur)**2 for x in durations) / len(durations))**0.5
+                        "Step": step,
+                        "Card_Index": card_idx,
+                        "Comm_Op_Index": duration_idx,
+                        "Duration_us": duration
                     })
         return card_stats
     

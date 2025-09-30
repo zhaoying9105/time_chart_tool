@@ -38,7 +38,8 @@ class DataPresenter:
                            include_op_patterns: Optional[List[str]] = None,
                            exclude_op_patterns: Optional[List[str]] = None,
                            include_kernel_patterns: Optional[List[str]] = None,
-                           exclude_kernel_patterns: Optional[List[str]] = None) -> List[Path]:
+                           exclude_kernel_patterns: Optional[List[str]] = None,
+                           not_show_fwd_bwd_type: Optional[bool] = False) -> List[Path]:
         """
         Stage 4: 数据展示
         生成各种格式的输出文件
@@ -67,6 +68,7 @@ class DataPresenter:
             exclude_op_patterns: 排除的操作名称模式列表
             include_kernel_patterns: 包含的kernel名称模式列表
             exclude_kernel_patterns: 排除的kernel名称模式列表
+            not_show_fwd_bwd_type: 是否不显示fwd_bwd_type列
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -92,7 +94,8 @@ class DataPresenter:
                 aggregation_spec=aggregation_spec,
                 print_markdown=print_markdown,
                 per_rank_stats=per_rank_stats,
-                label=label
+                label=label,
+                not_show_fwd_bwd_type=not_show_fwd_bwd_type
             )
             generated_files.extend(files)
         else:
@@ -118,7 +121,8 @@ class DataPresenter:
                 include_op_patterns=include_op_patterns,
                 exclude_op_patterns=exclude_op_patterns,
                 include_kernel_patterns=include_kernel_patterns,
-                exclude_kernel_patterns=exclude_kernel_patterns
+                exclude_kernel_patterns=exclude_kernel_patterns,
+                not_show_fwd_bwd_type=not_show_fwd_bwd_type
             )
             generated_files.extend(files)
         
@@ -138,7 +142,8 @@ class DataPresenter:
                            aggregation_spec: str = 'name',
                            label: Optional[str] = None,
                            print_markdown: bool = False,
-                           per_rank_stats: Optional[Dict[str, Dict[str, int]]] = None) -> List[Path]:
+                           per_rank_stats: Optional[Dict[str, Dict[str, int]]] = None,
+                           not_show_fwd_bwd_type: bool = False) -> List[Path]:
         """
         展示单文件数据
         
@@ -322,6 +327,23 @@ class DataPresenter:
                     if show_kernel_timestamp:
                         row['kernel_timestamps'] = ''
             
+            # 添加fwd_bwd_type列（如果不显示的话，默认显示）
+            if not not_show_fwd_bwd_type:
+                # 收集fwd_bwd_type信息
+                fwd_bwd_types = set()
+                for cpu_event in aggregated_data.cpu_events:
+                    fwd_bwd_type = getattr(cpu_event, 'fwd_bwd_type', 'none')
+                    fwd_bwd_types.add(fwd_bwd_type)
+                
+                if fwd_bwd_types:
+                    # 如果只有一个类型，直接显示；如果有多个，显示所有类型
+                    if len(fwd_bwd_types) == 1:
+                        row['fwd_bwd_type'] = list(fwd_bwd_types)[0]
+                    else:
+                        row['fwd_bwd_type'] = ','.join(sorted(fwd_bwd_types))
+                else:
+                    row['fwd_bwd_type'] = 'none'
+            
             rows.append(row)
         
         # 如果启用markdown打印，在stdout中打印表格
@@ -362,7 +384,8 @@ class DataPresenter:
                               include_op_patterns: List[str] = None,
                               exclude_op_patterns: List[str] = None,
                               include_kernel_patterns: List[str] = None,
-                              exclude_kernel_patterns: List[str] = None) -> List[Path]:
+                              exclude_kernel_patterns: List[str] = None,
+                              not_show_fwd_bwd_type: bool = False) -> List[Path]:
         """
         展示多文件数据
         
@@ -594,6 +617,25 @@ class DataPresenter:
                             else:
                                 degradation = (ratio - 1) * 100
                                 row[f'{label2}_vs_{label1}_performance_improvement'] = f"-{degradation:.1f}%"
+            
+            # 添加fwd_bwd_type列（如果不显示的话，默认显示）
+            if not not_show_fwd_bwd_type:
+                # 收集所有文件中fwd_bwd_type信息
+                all_fwd_bwd_types = set()
+                for label, file_data in entry.items():
+                    cpu_events = file_data.cpu_events
+                    for cpu_event in cpu_events:
+                        fwd_bwd_type = getattr(cpu_event, 'fwd_bwd_type', 'none')
+                        all_fwd_bwd_types.add(fwd_bwd_type)
+                
+                if all_fwd_bwd_types:
+                    # 如果所有文件都有相同的类型，直接显示；如果有不同的，显示所有类型
+                    if len(all_fwd_bwd_types) == 1:
+                        row['fwd_bwd_type'] = list(all_fwd_bwd_types)[0]
+                    else:
+                        row['fwd_bwd_type'] = ','.join(sorted(all_fwd_bwd_types))
+                else:
+                    row['fwd_bwd_type'] = 'none'
             
             rows.append(row)
         

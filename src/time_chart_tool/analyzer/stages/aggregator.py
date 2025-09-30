@@ -16,7 +16,7 @@ class DataAggregator:
         pass
     
     def _generate_aggregation_key(self, cpu_event: ActivityEvent, aggregation_fields: List[str], 
-                                 call_stack_source: str = 'args') -> Union[str, tuple]:
+                                 call_stack_source: str = 'tree') -> Union[str, tuple]:
         """
         根据指定的字段生成聚合键
         
@@ -102,7 +102,7 @@ class DataAggregator:
     
     def stage2_data_aggregation(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
                                kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
-                               aggregation_spec: str = 'name', call_stack_source: str = 'args') -> Dict[Union[str, tuple], AggregatedData]:
+                               aggregation_spec: str = 'name', call_stack_source: str = 'tree') -> Dict[Union[str, tuple], AggregatedData]:
         """
         Stage 2: 数据聚合
         支持灵活的字段组合聚合：
@@ -149,6 +149,21 @@ class DataAggregator:
                     continue
         
         print(f"聚合后得到 {len(aggregated_data)} 个不同的键")
+        
+        # 调试：统计跳过的事件数量
+        total_events = sum(len(cpu_events_by_external_id[ext_id]) for ext_id in cpu_events_by_external_id)
+        valid_events = 0
+        skipped_events = 0
+        for external_id in cpu_events_by_external_id:
+            cpu_events = cpu_events_by_external_id[external_id]
+            for cpu_event in cpu_events:
+                call_stack = cpu_event.get_call_stack(call_stack_source)
+                if call_stack is None:
+                    skipped_events += 1
+                else:
+                    valid_events += 1
+        
+        print(f"DEBUG: 总事件数={total_events}, 有效事件数={valid_events}, 跳过事件数={skipped_events}")
         
         return dict(aggregated_data)
     
@@ -241,7 +256,7 @@ class DataAggregator:
     
     def _aggregate_with_call_stack(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
                                   kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
-                                  aggregation_fields: List[str], call_stack_source: str = 'args') -> Dict[Union[str, tuple], AggregatedData]:
+                                  aggregation_fields: List[str], call_stack_source: str = 'tree') -> Dict[Union[str, tuple], AggregatedData]:
         """
         处理包含调用栈的聚合，实现 startswith 合并逻辑
         
@@ -263,6 +278,16 @@ class DataAggregator:
             for cpu_event in cpu_events:
                 # 检查是否有调用栈信息
                 call_stack = cpu_event.get_call_stack(call_stack_source)
+                
+                # 调试输出：显示前几个事件的处理情况
+                if len(aggregated_data) < 3:  # 只为前几个事件打印调试信息
+                    call_stack_args = cpu_event.get_call_stack('args')
+                    call_stack_tree = cpu_event.get_call_stack('tree')
+                    print(f"DEBUG: 事件 {cpu_event.name}, external_id={cpu_event.external_id}")
+                    print(f"  call_stack_source={call_stack_source}")
+                    print(f"  call_stack(from args)={call_stack_args}")
+                    print(f"  call_stack(from tree)={call_stack_tree}")
+                    print(f"  current call_stack={call_stack}")
                 
                 if call_stack is None:
                     continue  # 跳过没有 call stack 的事件
