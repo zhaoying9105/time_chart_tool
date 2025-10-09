@@ -492,43 +492,13 @@ class DataPostProcessor:
     
     def _normalize_call_stack(self, call_stack: List[str]) -> List[str]:
         """
-        标准化 call stack，优先保留包含 nn.Module 的有价值部分
-        特殊处理：去掉 Runstep 模块及其之后的模块（面向 lg-torch 的特殊逻辑）
-        如果没有 nn.Module，则保留原始 call stack
+        标准化 call stack，使用公共工具函数
         
         Args:
             call_stack: 原始 call stack
             
         Returns:
-            List[str]: 标准化后的 call stack，优先包含模型相关的层级，去掉 'nn.Module: ' 前缀
-                      如果没有 nn.Module，则返回原始 call stack
+            List[str]: 标准化后的 call stack
         """
-        if not call_stack:
-            return call_stack
-        
-        # 过滤出所有的 nn.Module
-        nn_modules = []
-        for frame in call_stack:
-            if 'nn.Module:' in frame:
-                # 去掉 'nn.Module: ' 前缀
-                module_name = frame.replace('nn.Module: ', '')
-                nn_modules.append(module_name)
-        
-        if not nn_modules:
-            # 如果没有 nn.Module，保留原始 call stack
-            return call_stack
-        
-        # 找到包含 Runstep 的模块
-        runstep_idx = -1
-        for i, module_name in enumerate(nn_modules):
-            if 'Runstep' in module_name:
-                runstep_idx = i
-                break
-        
-        # 如果找到 Runstep，去掉它及其之后的模块
-        if runstep_idx != -1:
-            normalized = nn_modules[:runstep_idx]
-        else:
-            normalized = nn_modules
-        
-        return normalized
+        from ..utils import normalize_call_stack
+        return normalize_call_stack(call_stack)

@@ -233,7 +233,11 @@ class DataPresenter:
                     elif field == 'shape':
                         row['input_dims'] = str(key_parts[i])
                     elif field == 'call_stack':
-                        call_stack_str = ' -> '.join(key_parts[i]) if isinstance(key_parts[i], tuple) else str(key_parts[i])
+                        call_stack_str = str(key_parts[i])
+                        # print(f"DEBUG _present_single_file: 处理call_stack字段")
+                        # print(f"DEBUG _present_single_file: key_parts[{i}]类型={type(key_parts[i])}")
+                        # print(f"DEBUG _present_single_file: key_parts[{i}]内容={key_parts[i]}")
+                        # print(f"DEBUG _present_single_file: 生成的call_stack_str={call_stack_str}")
                         row['call_stack'] = call_stack_str
                     elif field == 'dtype':
                         row['input_type'] = str(key_parts[i])
@@ -466,7 +470,7 @@ class DataPresenter:
                     elif field == 'shape':
                         row['input_dims'] = str(key_parts[i])
                     elif field == 'call_stack':
-                        call_stack_str = ' -> '.join(key_parts[i]) if isinstance(key_parts[i], tuple) else str(key_parts[i])
+                        call_stack_str = str(key_parts[i])
                         row['call_stack'] = call_stack_str
                     elif field == 'dtype':
                         row['input_type'] = str(key_parts[i])

@@ -78,10 +78,11 @@ class ActivityEvent:
         return self.call_stack
     
     def set_call_stack_from_tree(self, call_stack: List[str]):
-        """设置从调用栈树生成的call stack信息"""
+        """设置从调用栈树生成的call stack信息（反向存储）"""
         if not hasattr(self, '_call_stack_from_tree'):
             self._call_stack_from_tree = None
-        self._call_stack_from_tree = call_stack
+        # 反向存储 call_stack
+        self._call_stack_from_tree = list(reversed(call_stack)) if call_stack is not None else None
     
     @property
     def call_stack_from_tree(self) -> Optional[List[str]]:

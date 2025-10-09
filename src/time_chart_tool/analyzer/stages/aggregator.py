@@ -7,6 +7,7 @@ from typing import Dict, List, Union
 
 from ...models import ActivityEvent
 from ..utils.data_structures import AggregatedData
+from ..utils.call_stack_utils import CallStackWrapper
 
 
 class DataAggregator:
@@ -36,8 +37,8 @@ class DataAggregator:
                 
                 if call_stack is not None:
                     normalized_call_stack = self._normalize_call_stack(call_stack)
-                    if normalized_call_stack:
-                        key_parts.append(tuple(normalized_call_stack))
+                    if normalized_call_stack.call_stack:
+                        key_parts.append(normalized_call_stack)
                     else:
                         key_parts.append(None)
                 else:
@@ -280,14 +281,18 @@ class DataAggregator:
                 call_stack = cpu_event.get_call_stack(call_stack_source)
                 
                 # 调试输出：显示前几个事件的处理情况
-                if len(aggregated_data) < 3:  # 只为前几个事件打印调试信息
+                if len(aggregated_data) < 5:  # 增加调试事件数量
                     call_stack_args = cpu_event.get_call_stack('args')
                     call_stack_tree = cpu_event.get_call_stack('tree')
-                    print(f"DEBUG: 事件 {cpu_event.name}, external_id={cpu_event.external_id}")
-                    print(f"  call_stack_source={call_stack_source}")
-                    print(f"  call_stack(from args)={call_stack_args}")
-                    print(f"  call_stack(from tree)={call_stack_tree}")
-                    print(f"  current call_stack={call_stack}")
+                    # print(f"DEBUG _aggregate_with_call_stack: 事件 {cpu_event.name}, external_id={cpu_event.external_id}")
+                    # print(f"DEBUG _aggregate_with_call_stack: call_stack_source={call_stack_source}")
+                    # print(f"DEBUG _aggregate_with_call_stack: call_stack(from args)长度={len(call_stack_args) if call_stack_args else 0}")
+                    # print(f"DEBUG _aggregate_with_call_stack: call_stack(from tree)长度={len(call_stack_tree) if call_stack_tree else 0}")
+                    # print(f"DEBUG _aggregate_with_call_stack: current call_stack长度={len(call_stack) if call_stack else 0}")
+                    # if call_stack:
+                    #     print(f"DEBUG _aggregate_with_call_stack: current call_stack内容:")
+                    #     for i, frame in enumerate(call_stack):
+                    #         print(f"  [{i}] {frame}")
                 
                 if call_stack is None:
                     continue  # 跳过没有 call stack 的事件
@@ -359,8 +364,8 @@ class DataAggregator:
                 return False
             
             # 将调用栈转换为字符串进行比较
-            call_stack1_str = ' -> '.join(call_stack1) if isinstance(call_stack1, tuple) else str(call_stack1)
-            call_stack2_str = ' -> '.join(call_stack2) if isinstance(call_stack2, tuple) else str(call_stack2)
+            call_stack1_str = str(call_stack1)
+            call_stack2_str = str(call_stack2)
             
             return (call_stack1_str.startswith(call_stack2_str) or 
                     call_stack2_str.startswith(call_stack1_str))
@@ -395,8 +400,9 @@ class DataAggregator:
             new_call_stack = new_key[call_stack_idx]
             existing_call_stack = existing_key[call_stack_idx]
             
-            new_len = len(new_call_stack) if isinstance(new_call_stack, tuple) else 1
-            existing_len = len(existing_call_stack) if isinstance(existing_call_stack, tuple) else 1
+            # 获取调用栈长度
+            new_len = len(new_call_stack.call_stack)
+            existing_len = len(existing_call_stack.call_stack)
             
             return new_len > existing_len
         
@@ -404,59 +410,13 @@ class DataAggregator:
     
     def _normalize_call_stack(self, call_stack: List[str]) -> List[str]:
         """
-        标准化 call stack，优先保留包含 nn.Module 的有价值部分
-        特殊处理：去掉 Runstep 模块及其之后的模块（面向 lg-torch 的特殊逻辑）
-        如果没有 nn.Module，则保留原始 call stack
-        同时去掉内存地址信息（如 object at 0x7f6f0a70efc0）以确保相同逻辑的调用栈被识别为相同
+        标准化 call stack，使用公共工具函数
         
         Args:
             call_stack: 原始 call stack
             
         Returns:
-            List[str]: 标准化后的 call stack，优先包含模型相关的层级，去掉 'nn.Module: ' 前缀
-                      如果没有 nn.Module，则返回原始 call stack
+            List[str]: 标准化后的 call stack
         """
-        if not call_stack:
-            return call_stack
-        
-        # 过滤出所有的 nn.Module
-        nn_modules = []
-        for frame in call_stack:
-            if 'nn.Module:' in frame:
-                # 去掉 'nn.Module: ' 前缀
-                module_name = frame.replace('nn.Module: ', '')
-                nn_modules.append(module_name)
-        
-        if not nn_modules:
-            # 如果没有 nn.Module，保留原始 call stack，但去掉内存地址信息
-            normalized = []
-            for frame in call_stack:
-                # 去掉内存地址信息（如 object at 0x7f6f0a70efc0）
-                import re
-                # 匹配并去掉 "object at 0x..." 这样的内存地址信息
-                cleaned_frame = re.sub(r' object at 0x[0-9a-fA-F]+>', '>', frame)
-                normalized.append(cleaned_frame)
-            return normalized
-        
-        # 找到包含 Runstep 的模块
-        runstep_idx = -1
-        for i, module_name in enumerate(nn_modules):
-            if 'Runstep' in module_name:
-                runstep_idx = i
-                break
-        
-        # 如果找到 Runstep，去掉它及其之后的模块
-        if runstep_idx != -1:
-            normalized = nn_modules[:runstep_idx]
-        else:
-            normalized = nn_modules
-        
-        # 对结果也去掉内存地址信息
-        import re
-        cleaned_normalized = []
-        for frame in normalized:
-            # 去掉内存地址信息（如 object at 0x7f6f0a70efc0）
-            cleaned_frame = re.sub(r' object at 0x[0-9a-fA-F]+>', '>', frame)
-            cleaned_normalized.append(cleaned_frame)
-        
-        return cleaned_normalized
+        from ..utils import normalize_call_stack
+        return normalize_call_stack(call_stack)
