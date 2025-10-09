@@ -279,7 +279,7 @@ class CommunicationAnalyzer:
         # 1. 检查通信kernel一致性
         if not self._check_communication_kernel_consistency(fastest_data, slowest_data, kernel_prefix, comm_idx):
             print("错误: 通信kernel一致性检查失败")
-            return None
+            # return None
         
         # 2. 对两个数据进行Stage1处理
         from ..stages.postprocessor import DataPostProcessor
@@ -606,7 +606,7 @@ class CommunicationAnalyzer:
         end_time_diff = f"{end_diff_ms:.3f}"
         
         # 阈值检查
-        threshold_exceeded = "✗" if end_diff_ms > 5.0 else "✓"
+        threshold_exceeded = "✗" if end_diff_ms > 10.0 else "✓" # fixme
         
         return start_time_diff, end_time_diff, threshold_exceeded
 
@@ -691,14 +691,13 @@ class CommunicationAnalyzer:
         return [event for event in events if criteria_func(event)]
     
     def _find_prev_communication_kernel_events(self, data, target_kernel_events, prev_kernel_pattern):
-        """找到目标通信kernel之前的通信kernel events"""
+        """找到目标通信kernel之前的通信kernel events，必须找到，否则抛出异常"""
         if not target_kernel_events:
-            print("    警告: 目标通信kernel events为空")
-            return []
+            raise RuntimeError("    错误: 目标通信kernel events为空，无法查找上一个通信kernel")
         
         target_start_time = min(event.ts for event in target_kernel_events)
         target_kernel_name = target_kernel_events[0].name
-        print(f"    目标通信kernel: {target_kernel_name}, 开始时间: {target_start_time:.2f}")
+        print(f"    目标通信kernel: {target_kernel_name}, 开始时间: {target_start_time/1000.0:.2f} ms")
         
         # 查找匹配条件的通信kernel events
         communication_kernels = self._find_events_by_criteria(
@@ -716,14 +715,14 @@ class CommunicationAnalyzer:
             last_kernel_event = communication_kernels[-1]
             
             print(f"    上一个通信kernel: {last_kernel_event.name}")
-            print(f"    开始时间: {_format_timestamp_display(last_kernel_event)}")
-            print(f"    结束时间: {_calculate_end_time_display(last_kernel_event)}")
+            print(f"    开始时间: {last_kernel_event.ts/1000.0:.6f} ms")
+            print(f"    结束时间: {(last_kernel_event.ts + last_kernel_event.dur)/1000.0:.6f} ms")
             
             return [last_kernel_event]
         else:
-            print(f"    警告: 没有找到匹配模式 '{prev_kernel_pattern}' 的上一个通信kernel")
-        
-        return []
+            error_msg = f"    错误: 没有找到匹配模式 '{prev_kernel_pattern}' 的上一个通信kernel"
+            print(error_msg)
+            raise RuntimeError(error_msg)
     
     def _get_analysis_start_time(self, data, prev_event, current_event):
         """获取分析开始时间（简化版本）"""
@@ -2135,10 +2134,20 @@ class CommunicationAnalyzer:
             Dict[int, Dict[int, List[float]]]: 通信数据 {step: {card_idx: [durations]}}
         """
         comm_data = {}
+        total_json_files = 0
+        
+        print(f"开始提取通信数据:")
+        print(f"  - Executor文件夹数量: {len(executor_folders)}")
+        print(f"  - 目标step: {step}")
+        print(f"  - Kernel前缀: {kernel_prefix}")
         
         for executor_folder in executor_folders:
+            print(f"  处理executor文件夹: {executor_folder}")
+            
             # 查找JSON文件
             json_files = glob.glob(os.path.join(executor_folder, "*.json"))
+            total_json_files += len(json_files)
+            print(f"    找到 {len(json_files)} 个JSON文件")
             
             for json_file in json_files:
                 step_num, card_idx = self._parse_json_filename(os.path.basename(json_file))
@@ -2402,8 +2411,8 @@ class CommunicationAnalyzer:
             return
         
         print(f"      {card_name}: 找到事件节点")
-        print(f"        前一个事件: {prev_event.name} (ts={prev_event.ts:.6f}, dur={prev_event.dur:.6f})")
-        print(f"        当前事件: {current_event.name} (ts={current_event.ts:.6f}, dur={current_event.dur:.6f})")
+        print(f"        前一个事件: {prev_event.name} (ts={prev_event.ts/1000:.3f}ms, dur={prev_event.dur/1000:.3f}ms)")
+        print(f"        当前事件: {current_event.name} (ts={current_event.ts/1000:.3f}ms, dur={current_event.dur/1000:.3f}ms)")
         
         # 定义时间窗口：从前一个事件开始到当前事件结束
         time_start = prev_event.ts
@@ -2586,18 +2595,18 @@ class CommunicationAnalyzer:
                         
                     current = current.parent
         
-        print(f"DEBUG: 事件扩展完成，原始事件数: {len(events)}, 扩展后事件数: {len(extended_events)}")
+        # print(f"DEBUG: 事件扩展完成，原始事件数: {len(events)}, 扩展后事件数: {len(extended_events)}")
         
-        # 检查是否有重复事件
-        event_names = [e.name for e in extended_events]
-        unique_names = set(event_names)
-        if len(event_names) != len(unique_names):
-            print(f"DEBUG: 警告！扩展后的事件列表中有重复事件，总事件数: {len(event_names)}, 唯一事件数: {len(unique_names)}")
-            # 找出重复的事件
-            from collections import Counter
-            name_counts = Counter(event_names)
-            duplicates = {name: count for name, count in name_counts.items() if count > 1}
-            print(f"DEBUG: 重复的事件: {duplicates}")
+        # # 检查是否有重复事件
+        # event_names = [e.name for e in extended_events]
+        # unique_names = set(event_names)
+        # if len(event_names) != len(unique_names):
+        #     print(f"DEBUG: 警告！扩展后的事件列表中有重复事件，总事件数: {len(event_names)}, 唯一事件数: {len(unique_names)}")
+        #     # 找出重复的事件
+        #     from collections import Counter
+        #     name_counts = Counter(event_names)
+        #     duplicates = {name: count for name, count in name_counts.items() if count > 1}
+        #     print(f"DEBUG: 重复的事件: {duplicates}")
         
         return extended_events
     

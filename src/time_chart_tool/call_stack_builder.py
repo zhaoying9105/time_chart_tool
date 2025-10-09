@@ -45,7 +45,38 @@ class CallStackNode:
     
     def _create_event_id(self, event: ActivityEvent) -> str:
         """创建事件的唯一标识符"""
-        return f"{event.name}:{event.ts}:{event.dur}:{event.pid}:{event.tid}"
+        # 对triton事件应用相同的名称处理逻辑，确保与postprocessor保持一致
+        processed_name = self._remove_triton_suffix(event.name)
+        return f"{processed_name}:{event.ts}:{event.dur}:{event.pid}:{event.tid}"
+    
+    def _remove_triton_suffix(self, name: str) -> str:
+        """
+        去除triton名称中的suffix部分，与postprocessor保持一致
+        
+        Args:
+            name: 原始名称
+            
+        Returns:
+            str: 去除suffix后的名称
+        """
+        if not name.startswith('triton_'):
+            return name
+        
+        # 按'_'分割名称
+        parts = name.split('_')
+        
+        # triton名称格式: triton_{kernel_category}_{fused_name}_{suffix}
+        # 需要至少4个部分: triton, category, fused_name, suffix
+        if len(parts) < 4:
+            return name
+        
+        # 检查最后一部分是否为数字（suffix）
+        last_part = parts[-1]
+        if last_part.isdigit():
+            # 去除最后的suffix部分
+            return '_'.join(parts[:-1])
+        
+        return name
     
     def add_child(self, child: 'CallStackNode'):
         """添加子节点"""
@@ -167,6 +198,49 @@ class CallStackBuilder:
         self.logger = logger
         # 事件到节点的映射，用于快速查找
         self.event_to_node_map: Dict[str, CallStackNode] = {}
+    
+    def _create_event_id_for_lookup(self, event: ActivityEvent) -> str:
+        """
+        创建事件ID用于查找，与CallStackNode保持一致
+        
+        Args:
+            event: ActivityEvent对象
+            
+        Returns:
+            str: 事件ID
+        """
+        # 对triton事件应用相同的名称处理逻辑
+        processed_name = self._remove_triton_suffix(event.name)
+        return f"{processed_name}:{event.ts}:{event.dur}:{event.pid}:{event.tid}"
+    
+    def _remove_triton_suffix(self, name: str) -> str:
+        """
+        去除triton名称中的suffix部分，与postprocessor保持一致
+        
+        Args:
+            name: 原始名称
+            
+        Returns:
+            str: 去除suffix后的名称
+        """
+        if not name.startswith('triton_'):
+            return name
+        
+        # 按'_'分割名称
+        parts = name.split('_')
+        
+        # triton名称格式: triton_{kernel_category}_{fused_name}_{suffix}
+        # 需要至少4个部分: triton, category, fused_name, suffix
+        if len(parts) < 4:
+            return name
+        
+        # 检查最后一部分是否为数字（suffix）
+        last_part = parts[-1]
+        if last_part.isdigit():
+            # 去除最后的suffix部分
+            return '_'.join(parts[:-1])
+        
+        return name
     
     def build_call_stacks(self, events: List[ActivityEvent]) -> Dict[Tuple[int, int], CallStackNode]:
         """
@@ -339,6 +413,16 @@ class CallStackBuilder:
         # 2. 按开始时间排序（稳定排序）
         intervals.sort(key=lambda x: (x.start, x.index))
         
+        # 检查是否有重复事件
+        # event_names = [interval.event.name for interval in intervals]
+        # unique_names = set(event_names)
+        # if len(event_names) != len(unique_names):
+        #     print(f"DEBUG: _build_call_stack_tree - 警告！事件列表中有重复事件，总事件数: {len(event_names)}, 唯一事件数: {len(unique_names)}")
+        #     from collections import Counter
+        #     name_counts = Counter(event_names)
+        #     duplicates = {name: count for name, count in name_counts.items() if count > 1}
+        #     print(f"DEBUG: _build_call_stack_tree - 重复的事件: {duplicates}")
+        
         # 3. 构建线段树
         segment_tree = SegmentTree(intervals)
         
@@ -463,8 +547,8 @@ class CallStackBuilder:
         Returns:
             Optional[List[str]]: 调用栈路径，如果找不到返回None
         """
-        # 创建事件标识符
-        event_id = f"{event.name}:{event.ts}:{event.dur}:{event.pid}:{event.tid}"
+        # 创建事件标识符，使用统一的事件ID生成逻辑
+        event_id = self._create_event_id_for_lookup(event)
         
         # 直接从映射中查找节点
         target_node = self.event_to_node_map.get(event_id)
@@ -484,8 +568,8 @@ class CallStackBuilder:
         Returns:
             Optional[CallStackNode]: 找到的节点，如果找不到返回None
         """
-        # 创建事件标识符
-        event_id = f"{target_event.name}:{target_event.ts}:{target_event.dur}:{target_event.pid}:{target_event.tid}"
+        # 创建事件标识符，使用与_call_stack_for_event相同的处理逻辑
+        event_id = self._create_event_id_for_lookup(target_event)
         
         # 直接从映射中查找
         return self.event_to_node_map.get(event_id)
