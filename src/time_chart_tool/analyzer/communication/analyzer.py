@@ -984,7 +984,7 @@ class CommunicationAnalyzer:
             print()
             
             # 四列竖排格式 - 扩展宽度以容纳长调用栈
-            col_width = 50  # 每列宽度从30扩展到50
+            col_width = 120  # 每列宽度从30扩展到50
             total_width = col_width * 4 + 9  # 4列 + 3个分隔符(3个|) + 6个空格
             
             print("     " + "="*total_width)
@@ -2376,8 +2376,9 @@ class CommunicationAnalyzer:
             return
         
         # 找到前一个和当前事件对应的节点
-        prev_event_id = f"{prev_event.name}:{prev_event.ts}:{prev_event.dur}:{prev_event.pid}:{prev_event.tid}"
-        current_event_id = f"{current_event.name}:{current_event.ts}:{current_event.dur}:{current_event.pid}:{current_event.tid}"
+        # 使用与call_stack_builder相同的triton名称处理逻辑
+        prev_event_id = self._create_event_id_for_lookup(prev_event)
+        current_event_id = self._create_event_id_for_lookup(current_event)
         
         prev_node = parser.call_stack_builder.event_to_node_map.get(prev_event_id)
         current_node = parser.call_stack_builder.event_to_node_map.get(current_event_id)
@@ -2456,7 +2457,7 @@ class CommunicationAnalyzer:
             event_end = event.ts + event.dur
             
             # 事件与时间窗口有重叠就包含（支持重叠检查）
-            if (event_end > time_start and event_start < time_end):
+            if (event_end >= time_start and event_start <= time_end):
                 event_id = node.event_id
                 
                 # 避免重复添加相同事件
@@ -2481,7 +2482,11 @@ class CommunicationAnalyzer:
         
         # 使用build_call_stacks_subtree方法重建调用栈树，保留原始映射
         builder = self.fastest_parser.call_stack_builder if card_name == "最快Card" else self.slowest_parser.call_stack_builder
-        time_window_trees = builder.build_call_stacks_subtree(events, preserve_mapping=True)
+        
+        # 扩展事件列表，包含所有相关父节点
+        extended_events = self._extend_events_with_parents(events, builder)
+        
+        time_window_trees = builder.build_call_stacks_subtree(extended_events, preserve_mapping=True)
         
         # 找到对应的(pid, tid)组的树
         pid_tid_key = (prev_event.pid, prev_event.tid)
@@ -2497,8 +2502,8 @@ class CommunicationAnalyzer:
     
     def _print_time_window_tree_recursive(self, node, prev_event, current_event, depth=0, prefix=""):
         """递归打印时间窗口调用栈树"""
-        if depth > 20:  # 限制深度避免过深
-            return
+        # if depth > 20:  # 限制深度避免过深
+        #     return
         
         event = node.event
         duration_ms = event.dur / 1000 if event.dur else 0
@@ -2526,4 +2531,102 @@ class CommunicationAnalyzer:
             self._print_time_window_tree_recursive(
                 child, prev_event, current_event, depth + 1, child_prefix
             )
+    
+    def _create_event_id_for_lookup(self, event) -> str:
+        """
+        创建事件ID用于查找，与call_stack_builder保持一致
+        
+        Args:
+            event: ActivityEvent对象
+            
+        Returns:
+            str: 事件ID
+        """
+        # 对triton事件应用相同的名称处理逻辑
+        processed_name = self._remove_triton_suffix(event.name)
+        return f"{processed_name}:{event.ts}:{event.dur}:{event.pid}:{event.tid}"
+    
+    def _extend_events_with_parents(self, events, builder):
+        """
+        扩展事件列表，包含所有相关父节点
+        
+        Args:
+            events: 原始事件列表
+            builder: CallStackBuilder实例
+            
+        Returns:
+            List[ActivityEvent]: 扩展后的事件列表
+        """
+        extended_events = []
+        added_event_ids = set()
+        
+        # 首先添加所有原始事件到去重集合中
+        for event in events:
+            event_id = builder._create_event_id_for_lookup(event)
+            if event_id not in added_event_ids:
+                extended_events.append(event)
+                added_event_ids.add(event_id)
+        
+        # 为每个事件添加其父节点
+        for event in events:
+            event_id = builder._create_event_id_for_lookup(event)
+            node = builder.event_to_node_map.get(event_id)
+            
+            if node:
+                # 向上遍历父节点链
+                current = node.parent
+                while current and current.parent:  # 排除根节点
+                    parent_event = current.event
+                    parent_event_id = builder._create_event_id_for_lookup(parent_event)
+                    
+                    # 如果父节点还没有被添加
+                    if parent_event_id not in added_event_ids:
+                        extended_events.append(parent_event)
+                        added_event_ids.add(parent_event_id)
+                        
+                    current = current.parent
+        
+        print(f"DEBUG: 事件扩展完成，原始事件数: {len(events)}, 扩展后事件数: {len(extended_events)}")
+        
+        # 检查是否有重复事件
+        event_names = [e.name for e in extended_events]
+        unique_names = set(event_names)
+        if len(event_names) != len(unique_names):
+            print(f"DEBUG: 警告！扩展后的事件列表中有重复事件，总事件数: {len(event_names)}, 唯一事件数: {len(unique_names)}")
+            # 找出重复的事件
+            from collections import Counter
+            name_counts = Counter(event_names)
+            duplicates = {name: count for name, count in name_counts.items() if count > 1}
+            print(f"DEBUG: 重复的事件: {duplicates}")
+        
+        return extended_events
+    
+    def _remove_triton_suffix(self, name: str) -> str:
+        """
+        去除triton名称中的suffix部分，与postprocessor和call_stack_builder保持一致
+        
+        Args:
+            name: 原始名称
+            
+        Returns:
+            str: 去除suffix后的名称
+        """
+        if not name.startswith('triton_'):
+            return name
+        
+        # 按'_'分割名称
+        parts = name.split('_')
+        
+        # triton名称格式: triton_{kernel_category}_{fused_name}_{suffix}
+        # 需要至少4个部分: triton, category, fused_name, suffix
+        if len(parts) < 4:
+            return name
+        
+        # 检查最后一部分是否为数字（suffix）
+        last_part = parts[-1]
+        if last_part.isdigit():
+            # 去除最后的suffix部分
+            return '_'.join(parts[:-1])
+        
+        return name
     
