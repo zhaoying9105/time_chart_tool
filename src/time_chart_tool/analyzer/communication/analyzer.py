@@ -2268,39 +2268,50 @@ class CommunicationAnalyzer:
         if step_stats:
             pd.DataFrame(step_stats).to_excel(writer, sheet_name='Step_Statistics', index=False)
         
-        # Card统计
-        card_stats = self._calculate_card_statistics(all2all_data)
-        if card_stats:
-            pd.DataFrame(card_stats).to_excel(writer, sheet_name='Card_Statistics', index=False)
     
     def _calculate_step_statistics(self, all2all_data):
-        """计算step级别统计信息 - 每个duration单独统计"""
+        """计算step级别统计信息 - 对每个step和Comm_Op_Index统计最快最慢card"""
         step_stats = []
+        
         for step, card_data in all2all_data.items():
-            # 为每个duration创建单独的统计条目
+            # 按Comm_Op_Index分组统计
+            comm_op_groups = {}
+            
+            # 收集所有card的duration数据
             for card_idx, durations in card_data.items():
                 for duration_idx, duration in enumerate(durations):
-                    step_stats.append({
-                        "Step": step,
-                        "Card_Index": card_idx,
-                        "Comm_Op_Index": duration_idx,
-                        "Duration_us": duration
+                    if duration_idx not in comm_op_groups:
+                        comm_op_groups[duration_idx] = []
+                    comm_op_groups[duration_idx].append({
+                        'card_idx': card_idx,
+                        'duration': duration
                     })
+            
+            # 对每个Comm_Op_Index计算统计信息
+            for comm_op_idx, card_durations in comm_op_groups.items():
+                if not card_durations:
+                    continue
+                
+                # 找到最快和最慢的card
+                fastest_card = min(card_durations, key=lambda x: x['duration'])
+                slowest_card = max(card_durations, key=lambda x: x['duration'])
+                
+                # 计算倍数
+                ratio = slowest_card['duration'] / fastest_card['duration'] if fastest_card['duration'] > 0 else float('inf')
+                
+                step_stats.append({
+                    "Step": step,
+                    "Comm_Op_Index": comm_op_idx,
+                    "Fastest_Card_Index": fastest_card['card_idx'],
+                    "Fastest_Duration_us": fastest_card['duration'],
+                    "Slowest_Card_Index": slowest_card['card_idx'],
+                    "Slowest_Duration_us": slowest_card['duration'],
+                    "Duration_Ratio": ratio,
+                    "Total_Cards": len(card_durations)
+                })
+        
         return step_stats
 
-    def _calculate_card_statistics(self, all2all_data):
-        """计算card级别统计信息 - 每个duration单独统计"""
-        card_stats = []
-        for step, card_data in all2all_data.items():
-            for card_idx, durations in card_data.items():
-                for duration_idx, duration in enumerate(durations):
-                    card_stats.append({
-                        "Step": step,
-                        "Card_Index": card_idx,
-                        "Comm_Op_Index": duration_idx,
-                        "Duration_us": duration
-                    })
-        return card_stats
     
     def _print_events_between_call_stacks(self, prev_fastest_event, current_fastest_event, 
                                           prev_slowest_event=None, current_slowest_event=None,
