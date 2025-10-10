@@ -124,8 +124,26 @@ class CommunicationAnalyzer:
         stats_file = self._generate_statistics_excel(comm_data, output_dir)
         generated_files.append(stats_file)
         
-        # 深度分析（如果指定了step和comm_idx）
-        if step is not None and comm_idx is not None:
+        # 深度分析（如果指定了step）
+        if step is not None:
+            # 如果没有指定comm_idx，自动选择Duration_Ratio最大的comm_idx
+            if comm_idx is None:
+                step_stats = self._calculate_step_statistics(comm_data)
+                # 筛选出指定step的统计信息
+                step_specific_stats = [stat for stat in step_stats if stat["Step"] == step]
+                
+                if not step_specific_stats:
+                    print(f"错误: 没有找到step {step} 的统计信息")
+                    return generated_files
+                
+                # 找到Duration_Ratio最大的comm_idx
+                max_ratio_stat = max(step_specific_stats, key=lambda x: x["Duration_Ratio"])
+                comm_idx = max_ratio_stat["Comm_Op_Index"]
+                
+                print(f"自动选择comm_idx: {comm_idx} (Duration_Ratio: {max_ratio_stat['Duration_Ratio']:.2f})")
+                print(f"  最快卡: {max_ratio_stat['Fastest_Card_Index']} ({max_ratio_stat['Fastest_Duration_us']:.2f}μs)")
+                print(f"  最慢卡: {max_ratio_stat['Slowest_Card_Index']} ({max_ratio_stat['Slowest_Duration_us']:.2f}μs)")
+            
             deep_analysis_files = self._perform_deep_analysis(
                 comm_data, executor_folders, step, comm_idx, output_dir, 
                 kernel_prefix, prev_kernel_pattern, fastest_card_idx, slowest_card_idx,
