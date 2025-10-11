@@ -998,6 +998,33 @@ class CommunicationAnalyzer:
             
             print(f"  {i+1}. 事件对 ({prev_idx+1}, {current_idx+1}):")
             print(f"     相邻差值: {diff_info['difference']:.4f}")
+            
+            # 添加时间差分析信息
+            timing_analysis = diff_info.get('timing_analysis', {})
+            if timing_analysis:
+                print(f"     时间差分析:")
+                
+                # 快卡分析
+                fastest_card = timing_analysis.get('fastest_card', {})
+                if fastest_card.get('event_pair_ts_diff') is not None:
+                    print(f"       快卡事件对ts差值: {fastest_card['event_pair_ts_diff']:.4f}")
+                if fastest_card.get('end_to_start_gap') is not None:
+                    print(f"       快卡end到start间隔: {fastest_card['end_to_start_gap']:.4f}")
+                
+                # 慢卡分析
+                slowest_card = timing_analysis.get('slowest_card', {})
+                if slowest_card.get('event_pair_ts_diff') is not None:
+                    print(f"       慢卡事件对ts差值: {slowest_card['event_pair_ts_diff']:.4f}")
+                if slowest_card.get('end_to_start_gap') is not None:
+                    print(f"       慢卡end到start间隔: {slowest_card['end_to_start_gap']:.4f}")
+                
+                # 快慢卡差距分析
+                fast_slow_diff = timing_analysis.get('fast_slow_diff', {})
+                if fast_slow_diff.get('event_pair_ts_diff') is not None:
+                    print(f"       快慢卡ts差值差距: {fast_slow_diff['event_pair_ts_diff']:.4f}")
+                if fast_slow_diff.get('end_to_start_gap') is not None:
+                    print(f"       快慢卡间隔差距: {fast_slow_diff['end_to_start_gap']:.4f}")
+            
             print()
             
             # 四列竖排格式 - 扩展宽度以容纳长调用栈
@@ -1270,6 +1297,12 @@ class CommunicationAnalyzer:
                 if current_fastest_event.name != current_slowest_event.name:
                     print(f"[警告] find_top_cpu_start_time_differences: 当前事件名称不匹配: '{current_fastest_event.name}' vs '{current_slowest_event.name}'")
             
+            # 计算时间差分析
+            timing_analysis = self._calculate_timing_analysis(
+                prev_fastest_event, current_fastest_event,
+                prev_slowest_event, current_slowest_event
+            )
+            
             differences.append({
                 'index_pair': (i-1, i),
                 'difference': diff,
@@ -1281,7 +1314,9 @@ class CommunicationAnalyzer:
                 'prev_fastest_event': prev_fastest_event,
                 'current_fastest_event': current_fastest_event,
                 'prev_slowest_event': prev_slowest_event,
-                'current_slowest_event': current_slowest_event
+                'current_slowest_event': current_slowest_event,
+                # 添加时间差分析
+                'timing_analysis': timing_analysis
             })
         
         # 按差值降序排序
@@ -1289,6 +1324,63 @@ class CommunicationAnalyzer:
         
         # 返回前N对
         return differences[:top_n]
+    
+    def _calculate_timing_analysis(self, prev_fastest_event, current_fastest_event, 
+                                 prev_slowest_event, current_slowest_event):
+        """计算快卡和慢卡事件对的时间差分析"""
+        analysis = {
+            'fastest_card': {
+                'event_pair_ts_diff': None,  # 快卡事件对ts之间的差值
+                'end_to_start_gap': None     # 前一个event的end到后一个事件的ts的差距
+            },
+            'slowest_card': {
+                'event_pair_ts_diff': None,  # 慢卡事件对ts之间的差值
+                'end_to_start_gap': None     # 前一个event的end到后一个事件的ts的差距
+            },
+            'fast_slow_diff': {
+                'event_pair_ts_diff': None,  # 快慢卡事件对ts差值的差距
+                'end_to_start_gap': None     # 快慢卡end_to_start_gap的差距
+            }
+        }
+        
+        # 计算快卡的时间差
+        if prev_fastest_event and current_fastest_event:
+            # 快卡事件对ts之间的差值
+            fastest_ts_diff = current_fastest_event.ts - prev_fastest_event.ts
+            analysis['fastest_card']['event_pair_ts_diff'] = fastest_ts_diff
+            
+            # 快卡前一个event的end到后一个事件的ts的差距
+            prev_end_time = prev_fastest_event.ts + prev_fastest_event.dur
+            fastest_end_to_start_gap = current_fastest_event.ts - prev_end_time
+            analysis['fastest_card']['end_to_start_gap'] = fastest_end_to_start_gap
+        
+        # 计算慢卡的时间差
+        if prev_slowest_event and current_slowest_event:
+            # 慢卡事件对ts之间的差值
+            slowest_ts_diff = current_slowest_event.ts - prev_slowest_event.ts
+            analysis['slowest_card']['event_pair_ts_diff'] = slowest_ts_diff
+            
+            # 慢卡前一个event的end到后一个事件的ts的差距
+            prev_end_time = prev_slowest_event.ts + prev_slowest_event.dur
+            slowest_end_to_start_gap = current_slowest_event.ts - prev_end_time
+            analysis['slowest_card']['end_to_start_gap'] = slowest_end_to_start_gap
+        
+        # 计算快慢卡的差距
+        if (analysis['fastest_card']['event_pair_ts_diff'] is not None and 
+            analysis['slowest_card']['event_pair_ts_diff'] is not None):
+            analysis['fast_slow_diff']['event_pair_ts_diff'] = (
+                analysis['fastest_card']['event_pair_ts_diff'] - 
+                analysis['slowest_card']['event_pair_ts_diff']
+            )
+        
+        if (analysis['fastest_card']['end_to_start_gap'] is not None and 
+            analysis['slowest_card']['end_to_start_gap'] is not None):
+            analysis['fast_slow_diff']['end_to_start_gap'] = (
+                analysis['fastest_card']['end_to_start_gap'] - 
+                analysis['slowest_card']['end_to_start_gap']
+            )
+        
+        return analysis
     
     def fuzzy_align_cpu_events(self, fastest_cpu_events, slowest_cpu_events):
         """
@@ -2454,14 +2546,14 @@ class CommunicationAnalyzer:
         print(f"        时间窗口内事件数: {len(window_events)}")
         
         if window_events:
-            print(f"        时间窗口内事件列表:")
-            for i, event in enumerate(window_events):
-                duration_ms = event.dur / 1000 if event.dur else 0
-                is_prev = (event.name == prev_event.name and event.ts == prev_event.ts)
-                is_curr = (event.name == current_event.name and event.ts == current_event.ts)
+            # print(f"        时间窗口内事件列表:")
+            # for i, event in enumerate(window_events):
+            #     duration_ms = event.dur / 1000 if event.dur else 0
+            #     is_prev = (event.name == prev_event.name and event.ts == prev_event.ts)
+            #     is_curr = (event.name == current_event.name and event.ts == current_event.ts)
                 
-                marker = " [START]" if is_prev else " [END]" if is_curr else ""
-                print(f"          {i+1:2d}. {event.name}{marker} (ts={event.ts:.6f}, dur={duration_ms:.3f}ms)")
+            #     marker = " [START]" if is_prev else " [END]" if is_curr else ""
+            #     print(f"          {i+1:2d}. {event.name}{marker} (ts={event.ts:.6f}, dur={duration_ms:.3f}ms)")
             
             # 重新构建调用栈树并打印
             print(f"        时间窗口调用栈树:")
@@ -2515,19 +2607,88 @@ class CommunicationAnalyzer:
         
         time_window_trees = builder.build_call_stacks_subtree(extended_events, preserve_mapping=True)
         
-        # 找到对应的(pid, tid)组的树
-        pid_tid_key = (prev_event.pid, prev_event.tid)
-        tree_root = time_window_trees.get(pid_tid_key)
-        
-        if tree_root:
-            print(f"        ===== 调用栈树结构 =====")
-            self._print_time_window_tree_recursive(
-                tree_root, prev_event, current_event, depth=0, prefix=""
-            )
-        else:
+        if not time_window_trees:
             print(f"        {card_name}: 未能重建调用栈树")
+            return
+        
+        # 分析时间间隔，找到最大间隔的事件对（只分析原始事件，不包含扩展的父节点）
+        max_gap_events = self._find_max_time_gap_events(events, prev_event, current_event)
+        
+        # 打印最大时间间隔信息
+        if max_gap_events:
+            first_event, second_event = max_gap_events
+            gap_ms = (second_event.ts - first_event.ts) / 1000
+            print(f"        ===== 最大时间间隔分析 =====")
+            print(f"        最大时间间隔: {gap_ms:.3f}ms")
+            print(f"        事件对:")
+            first_dur_ms = first_event.dur / 1000 if first_event.dur else 0
+            second_dur_ms = second_event.dur / 1000 if second_event.dur else 0
+            print(f"          {first_event.name} (ts={first_event.ts:.6f}, dur={first_dur_ms:.3f}ms, pid={first_event.pid}, tid={first_event.tid})")
+            print(f"          ↓ 间隔 {gap_ms:.3f}ms")
+            print(f"          {second_event.name} (ts={second_event.ts:.6f}, dur={second_dur_ms:.3f}ms, pid={second_event.pid}, tid={second_event.tid})")
+            print()
+        
+        print(f"        ===== 调用栈树结构 =====")
+        
+        # 获取prev_event所在的pid & tid，优先显示
+        main_pid_tid = (prev_event.pid, prev_event.tid)
+        
+        # 首先打印主要的pid & tid（prev_event所在的）
+        if main_pid_tid in time_window_trees:
+            print(f"        【主要进程/线程】 PID: {main_pid_tid[0]}, TID: {main_pid_tid[1]}")
+            self._print_time_window_tree_recursive(
+                time_window_trees[main_pid_tid], prev_event, current_event, max_gap_events, depth=0, prefix=""
+            )
+            print()  # 添加空行分隔
+        
+        # 然后打印其他相关的pid & tid
+        other_pid_tids = [(pid, tid) for (pid, tid) in time_window_trees.keys() if (pid, tid) != main_pid_tid]
+        if other_pid_tids:
+            print(f"        【其他相关进程/线程】")
+            for pid, tid in other_pid_tids:
+                print(f"        PID: {pid}, TID: {tid}")
+                self._print_time_window_tree_recursive(
+                    time_window_trees[(pid, tid)], prev_event, current_event, max_gap_events, depth=0, prefix=""
+                )
+                print()  # 添加空行分隔
     
-    def _print_time_window_tree_recursive(self, node, prev_event, current_event, depth=0, prefix=""):
+    def _find_max_time_gap_events(self, events, prev_event, current_event):
+        """找到时间间隔最大的连续事件对（只分析指定时间窗口内的原始事件）"""
+        if len(events) < 2:
+            return None
+        
+        # 确定时间窗口边界
+        time_start = min(prev_event.ts, current_event.ts)
+        time_end = max(prev_event.ts, current_event.ts)
+        
+        # 过滤出时间窗口内的事件（只比较ts，不考虑dur）
+        filtered_events = []
+        for event in events:
+            if time_start <= event.ts <= time_end:
+                filtered_events.append(event)
+        
+        if len(filtered_events) < 2:
+            return None
+        
+        # 按时间戳排序过滤后的事件
+        sorted_events = sorted(filtered_events, key=lambda e: e.ts)
+        
+        # 计算连续事件的时间间隔
+        max_gap_ms = 0
+        max_gap_pair = None
+        
+        for i in range(len(sorted_events) - 1):
+            current_event_obj = sorted_events[i]
+            next_event_obj = sorted_events[i + 1]
+            gap_ms = (next_event_obj.ts - current_event_obj.ts) / 1000  # 转换为毫秒
+            
+            if gap_ms > max_gap_ms:
+                max_gap_ms = gap_ms
+                max_gap_pair = (current_event_obj, next_event_obj)
+        
+        return max_gap_pair
+    
+    def _print_time_window_tree_recursive(self, node, prev_event, current_event, max_gap_events, depth=0, prefix=""):
         """递归打印时间窗口调用栈树"""
         # if depth > 20:  # 限制深度避免过深
         #     return
@@ -2539,15 +2700,29 @@ class CommunicationAnalyzer:
         is_prev = (event.name == prev_event.name and event.ts == prev_event.ts)
         is_curr = (event.name == current_event.name and event.ts == current_event.ts)
         
+        # 标记最大时间间隔的事件对
+        is_max_gap_first = False
+        is_max_gap_second = False
+        if max_gap_events:
+            first_event, second_event = max_gap_events
+            is_max_gap_first = (event.name == first_event.name and event.ts == first_event.ts and 
+                               event.pid == first_event.pid and event.tid == first_event.tid)
+            is_max_gap_second = (event.name == second_event.name and event.ts == second_event.ts and 
+                                event.pid == second_event.pid and event.tid == second_event.tid)
+        
         markers = []
         if is_prev:
             markers.append(" [START]")
         if is_curr:
             markers.append(" [END]")
+        if is_max_gap_first:
+            markers.append(" [MAX_GAP_FIRST]")
+        if is_max_gap_second:
+            markers.append(" [MAX_GAP_SECOND]")
         
         marker_str = "".join(markers)
         
-        print(f"        {prefix}{event.name}{marker_str} (ts={event.ts:.6f}, dur={duration_ms:.3f}ms)")
+        print(f"        {prefix}{event.name}{marker_str} (ts={event.ts:.6f}, dur={duration_ms:.3f}ms, pid={event.pid}, tid={event.tid})")
         
         # 按开始时间排序子节点，便于跟踪时序
         sorted_children = sorted(node.children, key=lambda n: n.event.ts)
@@ -2556,7 +2731,7 @@ class CommunicationAnalyzer:
             is_last = i == len(sorted_children) - 1
             child_prefix = prefix + ("└── " if is_last else "├── ")
             self._print_time_window_tree_recursive(
-                child, prev_event, current_event, depth + 1, child_prefix
+                child, prev_event, current_event, max_gap_events, depth + 1, child_prefix
             )
     
     def _create_event_id_for_lookup(self, event) -> str:
