@@ -33,6 +33,8 @@ class AnalysisCommand:
             print(f"随机种子: {getattr(args, 'random_seed', 42)}")
         if hasattr(args, 'call_stack_source'):
             print(f"调用栈来源: {args.call_stack_source}")
+        if hasattr(args, 'step_idx') and args.step_idx is not None:
+            print(f"Step索引: {args.step_idx}")
         print()
         
         # 验证聚合字段
@@ -137,6 +139,7 @@ class AnalysisCommand:
                 exclude_kernel_patterns=exclude_kernel_patterns,
                 call_stack_source=args.call_stack_source,
                 not_show_fwd_bwd_type=getattr(args, 'not_show_fwd_bwd_type', False),
+                step_idx=getattr(args, 'step_idx', None),
             )
             
             total_time = time.time() - start_time

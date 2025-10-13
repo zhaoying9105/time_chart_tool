@@ -157,6 +157,8 @@ def parse_arguments():
                                      '(默认: args)')
     analysis_parser.add_argument('--not-show-fwd-bwd-type', action='store_true',
                                 help='不显示fwd_bwd_type列，默认显示前向/后向传播类型列 (默认: False)')
+    analysis_parser.add_argument('--step-idx', type=int, default=None,
+                                help='指定要分析的step索引，如果不指定则分析所有step (默认: None)')
     
     # comm 命令 - 分析通信性能
     comm_parser = subparsers.add_parser('comm', help='分析分布式训练中的通信性能')

@@ -98,10 +98,11 @@ def _parse_event(event_data: Dict[str, Any], base_time_nanoseconds: Optional[int
 class PyTorchProfilerParser:
     """PyTorch Profiler JSON 解析器"""
     
-    def __init__(self):
+    def __init__(self, step_idx: Optional[int] = None):
         self.data: Optional[ProfilerData] = None
         self.call_stack_builder = CallStackBuilder()
         self._call_stack_trees: Optional[Dict[Tuple[int, int], Any]] = None
+        self.step_idx: Optional[int] = step_idx
     
     def load_json_file(self, file_path: Union[str, Path]) -> ProfilerData:
         """
@@ -171,6 +172,26 @@ class PyTorchProfilerParser:
         # 标准化时间戳
         events = self._normalize_timestamps(events)
         
+        # 如果指定了 step_idx，则进行 step 事件过滤
+        if self.step_idx is not None:
+            logger.info(f"开始进行 step 事件过滤，step_idx: {self.step_idx}")
+            
+            # 检测所有 step 事件
+            step_events = self._detect_step_events(events)
+            
+            if not step_events:
+                logger.warning("未找到任何 train_runner.py step 事件，将使用所有事件")
+            elif self.step_idx >= len(step_events):
+                logger.warning(f"step_idx {self.step_idx} 超出范围（总共 {len(step_events)} 个 step），将使用所有事件")
+            else:
+                # 选择指定的 step 事件
+                selected_step_event = step_events[self.step_idx]
+                logger.info(f"选择第 {self.step_idx} 个 step 事件: {selected_step_event.name}")
+                logger.info(f"Step 事件时间区间: [{selected_step_event.ts:.2f}, {selected_step_event.ts + (selected_step_event.dur or 0):.2f}] 微秒")
+                
+                # 根据选定的 step 事件过滤其他事件
+                events = self._filter_events_by_step(events, selected_step_event)
+        
         return ProfilerData(
             metadata=metadata,
             events=events,
@@ -228,6 +249,68 @@ class PyTorchProfilerParser:
         
         logger.info("时间戳标准化完成")
         return events
+    
+    def _detect_step_events(self, events: List[ActivityEvent]) -> List[ActivityEvent]:
+        """
+        检测 train_runner.py step 事件
+        
+        Args:
+            events: 事件列表
+            
+        Returns:
+            List[ActivityEvent]: train_runner.py step 事件列表
+        """
+        step_events = []
+        for event in events:
+            if event.name and "train_runner.py" in event.name and "step" in event.name:
+                step_events.append(event)
+        
+        logger.info(f"检测到 {len(step_events)} 个 step 事件")
+        return step_events
+    
+    def _has_time_intersection(self, event1: ActivityEvent, event2: ActivityEvent) -> bool:
+        """
+        检查两个事件的时间区间是否有交集
+        
+        Args:
+            event1: 第一个事件
+            event2: 第二个事件
+            
+        Returns:
+            bool: 是否有交集
+        """
+        if event1.ts is None or event2.ts is None:
+            return False
+        
+        # 计算事件1的时间区间
+        event1_start = event1.ts
+        event1_end = event1.ts + (event1.dur if event1.dur is not None else 0)
+        
+        # 计算事件2的时间区间
+        event2_start = event2.ts
+        event2_end = event2.ts + (event2.dur if event2.dur is not None else 0)
+        
+        # 检查是否有交集：两个区间有交集当且仅当 max(start1, start2) < min(end1, end2)
+        return max(event1_start, event2_start) < min(event1_end, event2_end)
+    
+    def _filter_events_by_step(self, events: List[ActivityEvent], step_event: ActivityEvent) -> List[ActivityEvent]:
+        """
+        根据指定的 step 事件过滤其他事件，只保留与 step 事件有时间交集的事件
+        
+        Args:
+            events: 所有事件列表
+            step_event: 指定的 step 事件
+            
+        Returns:
+            List[ActivityEvent]: 过滤后的事件列表
+        """
+        filtered_events = []
+        for event in events:
+            if self._has_time_intersection(event, step_event):
+                filtered_events.append(event)
+        
+        logger.info(f"根据 step 事件过滤后，保留 {len(filtered_events)} 个事件（原始 {len(events)} 个）")
+        return filtered_events
     
     def print_metadata(self) -> None:
         """打印元数据信息"""

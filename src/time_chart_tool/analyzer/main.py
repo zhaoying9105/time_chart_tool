@@ -17,8 +17,8 @@ from .utils import process_single_file_parallel, AggregatedData
 class Analyzer:
     """重构后的分析器，按照4个stage组织"""
     
-    def __init__(self):
-        self.parser = PyTorchProfilerParser()
+    def __init__(self, step_idx: Optional[int] = None):
+        self.parser = PyTorchProfilerParser(step_idx=step_idx)
         self.postprocessor = DataPostProcessor()
         self.aggregator = DataAggregator()
         self.comparator = DataComparator()
@@ -61,7 +61,8 @@ class Analyzer:
                            show_timestamp: bool = False, show_readable_timestamp: bool = False,
                            show_kernel_timestamp: bool = False, show_name: bool = False,
                            output_dir: str = ".", label: str = None, print_markdown: bool = False,
-                           call_stack_source: str = 'tree', not_show_fwd_bwd_type: bool = False) -> List[Path]:
+                           call_stack_source: str = 'tree', not_show_fwd_bwd_type: bool = False,
+                           step_idx: Optional[int] = None) -> List[Path]:
         """
         分析单个文件
         
@@ -81,6 +82,7 @@ class Analyzer:
             print_markdown: 是否打印markdown表格
             call_stack_source: 调用栈来源，'args' 或 'tree'
             not_show_fwd_bwd_type: 是否不显示fwd_bwd_type列
+            step_idx: 指定要分析的step索引，如果不指定则分析所有step
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -132,7 +134,8 @@ class Analyzer:
                                      output_dir: str = ".", label: str = None, print_markdown: bool = False,
                                      include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
                                      include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None,
-                                     call_stack_source: str = 'tree', not_show_fwd_bwd_type: bool = False) -> List[Path]:
+                                     call_stack_source: str = 'tree', not_show_fwd_bwd_type: bool = False,
+                                     step_idx: Optional[int] = None) -> List[Path]:
         """
         分析多个文件（使用glob模式）
         
@@ -152,6 +155,7 @@ class Analyzer:
             print_markdown: 是否打印markdown表格
             call_stack_source: 调用栈来源，'args' 或 'tree'
             not_show_fwd_bwd_type: 是否不显示fwd_bwd_type列
+            step_idx: 指定要分析的step索引，如果不指定则分析所有step
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -162,7 +166,8 @@ class Analyzer:
         aggregated_data_list = self._process_files_parallel(
             file_paths, aggregation_spec, mp.cpu_count(),
             include_op_patterns, exclude_op_patterns,
-            include_kernel_patterns, exclude_kernel_patterns
+            include_kernel_patterns, exclude_kernel_patterns,
+            call_stack_source, step_idx
         )
         
         # 合并相同标签的文件
@@ -337,7 +342,7 @@ class Analyzer:
     def _process_files_parallel(self, file_paths: List[str], aggregation_spec: str, max_workers: int, 
                               include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
                               include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None,
-                              call_stack_source: str = 'tree') -> List[Dict[Union[str, tuple], AggregatedData]]:
+                              call_stack_source: str = 'tree', step_idx: Optional[int] = None) -> List[Dict[Union[str, tuple], AggregatedData]]:
         """
         并行处理文件
         
@@ -350,7 +355,7 @@ class Analyzer:
             include_kernel_patterns: 包含的kernel名称模式列表
             exclude_kernel_patterns: 排除的kernel名称模式列表
             call_stack_source: 调用栈来源，'args' 或 'tree'
-            not_show_fwd_bwd_type: 是否不显示fwd_bwd_type列
+            step_idx: 指定要分析的step索引，如果不指定则分析所有step
             
         Returns:
             List[Dict[Union[str, tuple], AggregatedData]]: 每个文件的聚合数据列表
@@ -363,7 +368,7 @@ class Analyzer:
             # 提交任务
             future_to_file = {
                 executor.submit(process_single_file_parallel, file_path, aggregation_spec,
-                              include_op_patterns, exclude_op_patterns, include_kernel_patterns, exclude_kernel_patterns, call_stack_source): file_path
+                              include_op_patterns, exclude_op_patterns, include_kernel_patterns, exclude_kernel_patterns, call_stack_source, step_idx): file_path
                 for file_path in file_paths
             }
             
