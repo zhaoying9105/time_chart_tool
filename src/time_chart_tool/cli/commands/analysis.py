@@ -16,7 +16,8 @@ class AnalysisCommand:
     """分析命令处理器"""
     
     def __init__(self):
-        self.analyzer = Analyzer()
+        # analyzer 将在 run 方法中创建，因为需要根据参数设置
+        self.analyzer = None
     
     def run(self, args) -> int:
         """运行单个或多个文件分析"""
@@ -117,6 +118,10 @@ class AnalysisCommand:
         
         try:
             start_time = time.time()
+            
+            # 创建 Analyzer 实例，传递 coarse_call_stack 参数
+            coarse_call_stack = getattr(args, 'coarse_call_stack', False)
+            self.analyzer = Analyzer(step_idx=getattr(args, 'step_idx', None), coarse_call_stack=coarse_call_stack)
             
             # 使用新的分析流程 - 支持多文件独立解析和聚合
             generated_files = self.analyzer.analyze_single_file_with_glob(

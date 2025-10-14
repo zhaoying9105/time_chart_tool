@@ -14,8 +14,8 @@ from ..utils.data_structures import AggregatedData
 class DataPostProcessor:
     """数据后处理器"""
     
-    def __init__(self):
-        pass
+    def __init__(self, coarse_call_stack: bool = False):
+        self.coarse_call_stack = coarse_call_stack
     
     def _process_triton_names(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
                              kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]]) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
@@ -501,4 +501,4 @@ class DataPostProcessor:
             List[str]: 标准化后的 call stack
         """
         from ..utils import normalize_call_stack
-        return normalize_call_stack(call_stack)
+        return normalize_call_stack(call_stack, coarse_call_stack=self.coarse_call_stack)

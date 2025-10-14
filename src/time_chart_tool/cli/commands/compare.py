@@ -16,7 +16,8 @@ class CompareCommand:
     """对比命令处理器"""
     
     def __init__(self):
-        self.analyzer = Analyzer()
+        # analyzer 将在 run 方法中创建，因为需要根据参数设置
+        self.analyzer = None
     
     def run(self, args) -> int:
         """运行多文件对比分析"""
@@ -151,6 +152,10 @@ class CompareCommand:
         
         try:
             start_time = time.time()
+            
+            # 创建 Analyzer 实例，传递 coarse_call_stack 参数
+            coarse_call_stack = getattr(args, 'coarse_call_stack', False)
+            self.analyzer = Analyzer(coarse_call_stack=coarse_call_stack)
             
             # 使用新的分析流程
             generated_files = self.analyzer.analyze_multiple_files(

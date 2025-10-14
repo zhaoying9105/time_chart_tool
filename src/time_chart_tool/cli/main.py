@@ -155,6 +155,8 @@ def parse_arguments():
                                      '  args: 从JSON的args字段中获取Call stack (默认)\n'
                                      '  tree: 使用基于扫描线和线段树的算法生成调用栈\n'
                                      '(默认: args)')
+    analysis_parser.add_argument('--coarse-call-stack', action='store_true',
+                                help='使用粗糙的 call stack，去除模块名后缀 (如 Dense_10 -> Dense) (默认: False)')
     analysis_parser.add_argument('--not-show-fwd-bwd-type', action='store_true',
                                 help='不显示fwd_bwd_type列，默认显示前向/后向传播类型列 (默认: False)')
     analysis_parser.add_argument('--step-idx', type=int, default=None,
@@ -248,6 +250,8 @@ def parse_arguments():
                                     '  args: 从JSON的args字段中获取Call stack (默认)\n'
                                     '  tree: 使用基于扫描线和线段树的算法生成调用栈\n'
                                     '(默认: args)')
+    compare_parser.add_argument('--coarse-call-stack', action='store_true',
+                               help='使用粗糙的 call stack，去除模块名后缀 (如 Dense_10 -> Dense) (默认: False)')
     compare_parser.add_argument('--not-show-fwd-bwd-type', action='store_true',
                                help='不显示fwd_bwd_type列，默认显示前向/后向传播类型列 (默认: False)')
     

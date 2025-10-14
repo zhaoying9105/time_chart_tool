@@ -10,7 +10,8 @@ from .data_structures import AggregatedData
 def process_single_file_parallel(file_path: str, aggregation_spec: str,
                                 include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
                                 include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None,
-                                call_stack_source: str = 'args', step_idx: Optional[int] = None) -> Tuple[str, Dict[Union[str, tuple], AggregatedData]]:
+                                call_stack_source: str = 'args', step_idx: Optional[int] = None,
+                                coarse_call_stack: bool = False) -> Tuple[str, Dict[Union[str, tuple], AggregatedData]]:
     """
     并行处理单个文件的函数
     
@@ -23,6 +24,7 @@ def process_single_file_parallel(file_path: str, aggregation_spec: str,
         exclude_kernel_patterns: 排除的kernel名称模式列表
         call_stack_source: 调用栈来源，'args' 或 'tree'
         step_idx: 指定要分析的step索引，如果不指定则分析所有step
+        coarse_call_stack: 是否使用粗糙的 call stack
         
     Returns:
         Tuple[str, Dict]: (文件路径, 聚合后的数据)
@@ -40,7 +42,7 @@ def process_single_file_parallel(file_path: str, aggregation_spec: str,
         
         # 创建分析器实例
         from ..main import Analyzer
-        analyzer = Analyzer(step_idx=step_idx)
+        analyzer = Analyzer(step_idx=step_idx, coarse_call_stack=coarse_call_stack)
         
         # Stage 1: 数据后处理
         cpu_events_by_external_id, kernel_events_by_external_id = analyzer.stage1_data_postprocessing(

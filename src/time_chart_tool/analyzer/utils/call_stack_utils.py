@@ -6,6 +6,25 @@ import re
 from typing import List
 
 
+def _remove_module_suffix(module_name: str) -> str:
+    """
+    去除模块名后缀，将精确的 call stack 转换为粗糙的 call stack
+    例如: Dense_10 -> Dense, DenseTower_5 -> DenseTower, AllEmbedding_0 -> AllEmbedding
+    
+    Args:
+        module_name: 模块名称，可能包含后缀
+        
+    Returns:
+        str: 去除后缀后的模块名称
+    """
+    # 使用正则表达式匹配以下划线+数字结尾的模块名
+    # 例如: Dense_10, DenseTower_5, AllEmbedding_0
+    match = re.match(r'^(.+)_\d+$', module_name)
+    if match:
+        return match.group(1)
+    return module_name
+
+
 class CallStackWrapper:
     """Call stack 包装类，用于区分 call_stack 的 tuple 和多字段聚合的 tuple"""
     
@@ -27,7 +46,7 @@ class CallStackWrapper:
         return " -> ".join(self.call_stack)
 
 
-def normalize_call_stack(call_stack: List[str]) -> CallStackWrapper:
+def normalize_call_stack(call_stack: List[str], coarse_call_stack: bool = False) -> CallStackWrapper:
     """
     标准化 call stack，优先保留包含 nn.Module 的有价值部分
     特殊处理：去掉 Runstep 模块及其之后的模块（面向 lg-torch 的特殊逻辑）
@@ -36,6 +55,7 @@ def normalize_call_stack(call_stack: List[str]) -> CallStackWrapper:
     
     Args:
         call_stack: 原始 call stack
+        coarse_call_stack: 是否生成粗糙的 call stack（去掉模块名后缀如 _10, _11 等）
         
     Returns:
         CallStackWrapper: 标准化后的 call stack 包装对象，优先包含模型相关的层级，去掉 'nn.Module: ' 前缀
@@ -56,6 +76,11 @@ def normalize_call_stack(call_stack: List[str]) -> CallStackWrapper:
         if 'nn.Module:' in frame:
             # 去掉 'nn.Module: ' 前缀
             module_name = frame.replace('nn.Module: ', '')
+            
+            # 如果需要生成粗糙的 call stack，去除后缀（如 _10, _11 等）
+            if coarse_call_stack:
+                module_name = _remove_module_suffix(module_name)
+            
             nn_modules.append(module_name)
             print(f"DEBUG normalize_call_stack: 找到nn.Module[{i}]: {module_name}")
     

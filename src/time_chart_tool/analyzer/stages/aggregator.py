@@ -13,8 +13,8 @@ from ..utils.call_stack_utils import CallStackWrapper
 class DataAggregator:
     """数据聚合器"""
     
-    def __init__(self):
-        pass
+    def __init__(self, coarse_call_stack: bool = False):
+        self.coarse_call_stack = coarse_call_stack
     
     def _generate_aggregation_key(self, cpu_event: ActivityEvent, aggregation_fields: List[str], 
                                  call_stack_source: str = 'tree') -> Union[str, tuple]:
@@ -419,4 +419,4 @@ class DataAggregator:
             List[str]: 标准化后的 call stack
         """
         from ..utils import normalize_call_stack
-        return normalize_call_stack(call_stack)
+        return normalize_call_stack(call_stack, coarse_call_stack=self.coarse_call_stack)

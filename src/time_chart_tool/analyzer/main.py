@@ -17,10 +17,11 @@ from .utils import process_single_file_parallel, AggregatedData
 class Analyzer:
     """重构后的分析器，按照4个stage组织"""
     
-    def __init__(self, step_idx: Optional[int] = None):
+    def __init__(self, step_idx: Optional[int] = None, coarse_call_stack: bool = False):
         self.parser = PyTorchProfilerParser(step_idx=step_idx)
-        self.postprocessor = DataPostProcessor()
-        self.aggregator = DataAggregator()
+        self.coarse_call_stack = coarse_call_stack
+        self.postprocessor = DataPostProcessor(coarse_call_stack=coarse_call_stack)
+        self.aggregator = DataAggregator(coarse_call_stack=coarse_call_stack)
         self.comparator = DataComparator()
         self.presenter = DataPresenter()
         self.comm_analyzer = CommunicationAnalyzer()
@@ -368,7 +369,7 @@ class Analyzer:
             # 提交任务
             future_to_file = {
                 executor.submit(process_single_file_parallel, file_path, aggregation_spec,
-                              include_op_patterns, exclude_op_patterns, include_kernel_patterns, exclude_kernel_patterns, call_stack_source, step_idx): file_path
+                              include_op_patterns, exclude_op_patterns, include_kernel_patterns, exclude_kernel_patterns, call_stack_source, step_idx, self.coarse_call_stack): file_path
                 for file_path in file_paths
             }
             
