@@ -250,6 +250,8 @@ class DataPresenter:
                         row['input_type'] = str(key_parts[i])
                     elif field == 'op_index':
                         row['op_index'] = key_parts[i]
+                    elif field == 'fwd_bwd_type':
+                        row['fwd_bwd_type'] = str(key_parts[i])
                 else:
                     if field == 'name':
                         row['op_name'] = 'None'
@@ -261,6 +263,8 @@ class DataPresenter:
                         row['input_type'] = 'None'
                     elif field == 'op_index':
                         row['op_index'] = 'None'
+                    elif field == 'fwd_bwd_type':
+                        row['fwd_bwd_type'] = 'None'
             
             row['cpu_event_count'] = len(aggregated_data.cpu_events)
             
@@ -499,6 +503,8 @@ class DataPresenter:
                         row['input_type'] = str(key_parts[i])
                     elif field == 'op_index':
                         row['op_index'] = key_parts[i]
+                    elif field == 'fwd_bwd_type':
+                        row['fwd_bwd_type'] = str(key_parts[i])
                 else:
                     if field == 'name':
                         row['op_name'] = 'None'
@@ -510,6 +516,8 @@ class DataPresenter:
                         row['input_type'] = 'None'
                     elif field == 'op_index':
                         row['op_index'] = 'None'
+                    elif field == 'fwd_bwd_type':
+                        row['fwd_bwd_type'] = 'None'
             
             # 为每个文件添加数据
             for label, file_data in entry.items():
@@ -854,7 +862,7 @@ class DataPresenter:
             fields = [aggregation_spec.strip()]
         
         # 验证字段
-        valid_fields = {'call_stack', 'name', 'shape', 'dtype', 'op_index'}
+        valid_fields = {'call_stack', 'name', 'shape', 'dtype', 'op_index', 'fwd_bwd_type'}
         for field in fields:
             if field not in valid_fields:
                 raise ValueError(f"不支持的聚合字段: {field}。支持的字段: {', '.join(valid_fields)}")

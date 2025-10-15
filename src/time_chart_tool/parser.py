@@ -690,3 +690,4 @@ class PyTorchProfilerParser:
             print(f"  ... 还有 {len(event_types) - 10} 种类型")
         
         print()
+

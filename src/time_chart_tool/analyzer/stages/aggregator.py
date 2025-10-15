@@ -67,6 +67,10 @@ class DataAggregator:
             elif field == 'op_index':
                 # op_index需要特殊处理，这里先返回None，后续在聚合时处理
                 key_parts.append(None)
+            elif field == 'fwd_bwd_type':
+                # 获取 fwd_bwd_type 属性
+                fwd_bwd_type = getattr(cpu_event, 'fwd_bwd_type', 'none')
+                key_parts.append(fwd_bwd_type)
             else:
                 raise ValueError(f"不支持的聚合字段: {field}")
         
@@ -94,7 +98,7 @@ class DataAggregator:
             fields = [aggregation_spec.strip()]
         
         # 验证字段
-        valid_fields = {'call_stack', 'name', 'shape', 'dtype', 'op_index'}
+        valid_fields = {'call_stack', 'name', 'shape', 'dtype', 'op_index', 'fwd_bwd_type'}
         for field in fields:
             if field not in valid_fields:
                 raise ValueError(f"不支持的聚合字段: {field}。支持的字段: {', '.join(valid_fields)}")

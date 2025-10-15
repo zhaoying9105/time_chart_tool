@@ -67,8 +67,8 @@ def normalize_call_stack(call_stack: List[str], coarse_call_stack: bool = False)
     
     # print(f"DEBUG normalize_call_stack: 输入call_stack长度={len(call_stack)}")
     # print(f"DEBUG normalize_call_stack: 原始call_stack内容:")
-    for i, frame in enumerate(call_stack):
-        print(f"  [{i}] {frame}")
+    # for i, frame in enumerate(call_stack):
+    #     print(f"  [{i}] {frame}")
     
     # 过滤出所有的 nn.Module
     nn_modules = []
@@ -118,6 +118,6 @@ def normalize_call_stack(call_stack: List[str], coarse_call_stack: bool = False)
     
     # print(f"DEBUG normalize_call_stack: 找到{len(nn_modules)}个nn.Module，返回nn_modules")
     # print(f"DEBUG normalize_call_stack: nn_modules内容:")
-    for i, module in enumerate(nn_modules):
-        print(f"  [{i}] {module}")
+    # for i, module in enumerate(nn_modules):
+    #     print(f"  [{i}] {module}")
     return CallStackWrapper(nn_modules)

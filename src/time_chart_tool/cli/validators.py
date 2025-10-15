@@ -29,7 +29,7 @@ def validate_aggregation_fields(aggregation_spec: str) -> List[str]:
         fields = [aggregation_spec.strip()]
     
     # 验证字段
-    valid_fields = {'call_stack', 'name', 'shape', 'dtype', 'op_index'}
+    valid_fields = {'call_stack', 'name', 'shape', 'dtype', 'op_index', 'fwd_bwd_type'}
     for field in fields:
         if not field:
             raise ValueError("聚合字段不能为空字符串")

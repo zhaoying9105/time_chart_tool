@@ -118,8 +118,8 @@ def parse_arguments():
     analysis_parser.add_argument('--label', default='single_file', help='文件标签 (默认: single_file)')
     analysis_parser.add_argument('--aggregation', default='name',
                                 help='聚合字段组合，使用逗号分隔的字段组合\n'
-                                     '支持的字段: call_stack, name, shape, dtype\n'
-                                     '示例: "name" 或 "name,shape" 或 "call_stack,name" 或 "name,shape,dtype"\n'
+                                     '支持的字段: call_stack, name, shape, dtype, fwd_bwd_type\n'
+                                     '示例: "name" 或 "name,shape" 或 "call_stack,name" 或 "name,shape,dtype" 或 "fwd_bwd_type,name"\n'
                                      '(默认: name)')
     analysis_parser.add_argument('--show', type=str, default='',
                                 help='显示额外信息，使用逗号分隔的选项:\n'
@@ -203,8 +203,8 @@ def parse_arguments():
                                     '  通配符: "dir/*.json":label')
     compare_parser.add_argument('--aggregation', default='name',
                                help='聚合字段组合，使用逗号分隔的字段组合\n'
-                                    '支持的字段: call_stack, name, shape, dtype\n'
-                                    '示例: "name" 或 "name,shape" 或 "call_stack,name" 或 "name,shape,dtype"\n'
+                                    '支持的字段: call_stack, name, shape, dtype, fwd_bwd_type\n'
+                                    '示例: "name" 或 "name,shape" 或 "call_stack,name" 或 "name,shape,dtype" 或 "fwd_bwd_type,name"\n'
                                     '(默认: name)')
     compare_parser.add_argument('--show', type=str, default='',
                                help='显示额外信息，使用逗号分隔的选项:\n'
