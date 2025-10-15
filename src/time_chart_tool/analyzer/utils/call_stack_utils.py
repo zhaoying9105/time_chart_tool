@@ -62,11 +62,11 @@ def normalize_call_stack(call_stack: List[str], coarse_call_stack: bool = False)
                          如果没有 nn.Module，则返回原始 call stack
     """
     if not call_stack:
-        print("DEBUG normalize_call_stack: 输入call_stack为空")
+        # print("DEBUG normalize_call_stack: 输入call_stack为空")
         return CallStackWrapper([])
     
-    print(f"DEBUG normalize_call_stack: 输入call_stack长度={len(call_stack)}")
-    print(f"DEBUG normalize_call_stack: 原始call_stack内容:")
+    # print(f"DEBUG normalize_call_stack: 输入call_stack长度={len(call_stack)}")
+    # print(f"DEBUG normalize_call_stack: 原始call_stack内容:")
     for i, frame in enumerate(call_stack):
         print(f"  [{i}] {frame}")
     
@@ -82,10 +82,10 @@ def normalize_call_stack(call_stack: List[str], coarse_call_stack: bool = False)
                 module_name = _remove_module_suffix(module_name)
             
             nn_modules.append(module_name)
-            print(f"DEBUG normalize_call_stack: 找到nn.Module[{i}]: {module_name}")
+            # print(f"DEBUG normalize_call_stack: 找到nn.Module[{i}]: {module_name}")
     
     if not nn_modules:
-        print("DEBUG normalize_call_stack: 没有找到nn.Module，保留原始call_stack")
+        # print("DEBUG normalize_call_stack: 没有找到nn.Module，保留原始call_stack")
         # 如果没有 nn.Module，保留原始 call stack，但去掉内存地址信息
         normalized = []
         for frame in call_stack:
@@ -93,7 +93,7 @@ def normalize_call_stack(call_stack: List[str], coarse_call_stack: bool = False)
             # 匹配并去掉 "object at 0x..." 这样的内存地址信息
             cleaned_frame = re.sub(r' object at 0x[0-9a-fA-F]+>', '>', frame)
             normalized.append(cleaned_frame)
-        print(f"DEBUG normalize_call_stack: 返回标准化后的call_stack长度={len(normalized)}")
+        # print(f"DEBUG normalize_call_stack: 返回标准化后的call_stack长度={len(normalized)}")
         return CallStackWrapper(normalized)
     
     # # 找到包含 Runstep 的模块
@@ -116,8 +116,8 @@ def normalize_call_stack(call_stack: List[str], coarse_call_stack: bool = False)
     #     cleaned_frame = re.sub(r' object at 0x[0-9a-fA-F]+>', '>', frame)
     #     cleaned_normalized.append(cleaned_frame)
     
-    print(f"DEBUG normalize_call_stack: 找到{len(nn_modules)}个nn.Module，返回nn_modules")
-    print(f"DEBUG normalize_call_stack: nn_modules内容:")
+    # print(f"DEBUG normalize_call_stack: 找到{len(nn_modules)}个nn.Module，返回nn_modules")
+    # print(f"DEBUG normalize_call_stack: nn_modules内容:")
     for i, module in enumerate(nn_modules):
         print(f"  [{i}] {module}")
     return CallStackWrapper(nn_modules)

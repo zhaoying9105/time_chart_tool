@@ -5,7 +5,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="time_chart_tool",
-    version="1.0.4",
+    version="1.0.5",
     description="PyTorch Profiler 高级分析工具",
     author="Time Chart Tool Team",
     packages=find_packages(where="src"),

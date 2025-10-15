@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 CLI验证器模块
 """
@@ -54,7 +55,7 @@ def parse_show_options(show_spec: str) -> Dict[str, bool]:
     """
     valid_show_options = {
         'dtype', 'shape', 'kernel-names', 'kernel-duration', 
-        'timestamp', 'readable-timestamp', 'kernel-timestamp', 'name'
+        'timestamp', 'readable-timestamp', 'kernel-timestamp', 'name', 'call_stack'
     }
     
     show_options = {
@@ -65,7 +66,8 @@ def parse_show_options(show_spec: str) -> Dict[str, bool]:
         'timestamp': False,
         'readable_timestamp': False,
         'kernel_timestamp': False,
-        'name': False
+        'name': False,
+        'call_stack': False
     }
     
     if not show_spec or not show_spec.strip():

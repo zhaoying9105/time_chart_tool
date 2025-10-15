@@ -73,7 +73,8 @@ class CommunicationAnalyzer:
                                          show_kernel_duration: bool = False,
                                          show_timestamp: bool = False,
                                          show_readable_timestamp: bool = False,
-                                         show_kernel_timestamp: bool = False) -> List[Path]:
+                                         show_kernel_timestamp: bool = False,
+                                         show_call_stack: bool = False) -> List[Path]:
         """
         分析通信性能
         
@@ -93,6 +94,7 @@ class CommunicationAnalyzer:
             show_timestamp: 是否显示时间戳
             show_readable_timestamp: 是否显示可读时间戳
             show_kernel_timestamp: 是否显示kernel时间戳
+            show_call_stack: 是否显示调用栈信息
             
         Returns:
             List[Path]: 生成的文件路径列表

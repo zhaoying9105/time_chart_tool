@@ -190,7 +190,8 @@ def parse_arguments():
                                  '  timestamp: 显示时间戳\n'
                                  '  readable-timestamp: 显示可读时间戳\n'
                                  '  kernel-timestamp: 显示kernel时间戳\n'
-                                 '示例: --show "dtype,shape,kernel-duration"')
+                                 '  call_stack: 显示调用栈信息\n'
+                                 '示例: --show "dtype,shape,kernel-duration,call_stack"')
     
     # compare 命令 - 分析多个文件并对比
     compare_parser = subparsers.add_parser('compare', help='分析多个 JSON 文件并对比')

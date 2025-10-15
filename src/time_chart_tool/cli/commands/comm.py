@@ -72,7 +72,8 @@ class CommCommand:
                 show_kernel_duration=show_options['kernel_duration'],
                 show_timestamp=show_options['timestamp'],
                 show_readable_timestamp=show_options['readable_timestamp'],
-                show_kernel_timestamp=show_options['kernel_timestamp']
+                show_kernel_timestamp=show_options['kernel_timestamp'],
+                show_call_stack=show_options['call_stack']
             )
             
             total_time = time.time() - start_time

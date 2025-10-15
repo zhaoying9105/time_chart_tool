@@ -61,9 +61,9 @@ class Analyzer:
                            show_kernel_names: bool = False, show_kernel_duration: bool = False,
                            show_timestamp: bool = False, show_readable_timestamp: bool = False,
                            show_kernel_timestamp: bool = False, show_name: bool = False,
-                           output_dir: str = ".", label: str = None, print_markdown: bool = False,
-                           call_stack_source: str = 'tree', not_show_fwd_bwd_type: bool = False,
-                           step_idx: Optional[int] = None) -> List[Path]:
+                           show_call_stack: bool = False, output_dir: str = ".", label: str = None, 
+                           print_markdown: bool = False, call_stack_source: str = 'tree', 
+                           not_show_fwd_bwd_type: bool = False, step_idx: Optional[int] = None) -> List[Path]:
         """
         分析单个文件
         
@@ -78,6 +78,7 @@ class Analyzer:
             show_readable_timestamp: 是否显示可读时间戳
             show_kernel_timestamp: 是否显示kernel时间戳
             show_name: 是否显示名称
+            show_call_stack: 是否显示调用栈信息
             output_dir: 输出目录
             label: 文件标签
             print_markdown: 是否打印markdown表格
@@ -119,6 +120,7 @@ class Analyzer:
             show_readable_timestamp=show_readable_timestamp,
             show_kernel_timestamp=show_kernel_timestamp,
             show_name=show_name,
+            show_call_stack=show_call_stack,
             aggregation_spec=aggregation_spec,
             label=label,
             print_markdown=print_markdown,
@@ -132,11 +134,11 @@ class Analyzer:
                                      show_kernel_names: bool = False, show_kernel_duration: bool = False,
                                      show_timestamp: bool = False, show_readable_timestamp: bool = False,
                                      show_kernel_timestamp: bool = False, show_name: bool = False,
-                                     output_dir: str = ".", label: str = None, print_markdown: bool = False,
-                                     include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
-                                     include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None,
-                                     call_stack_source: str = 'tree', not_show_fwd_bwd_type: bool = False,
-                                     step_idx: Optional[int] = None) -> List[Path]:
+                                     show_call_stack: bool = False, output_dir: str = ".", label: str = None, 
+                                     print_markdown: bool = False, include_op_patterns: List[str] = None, 
+                                     exclude_op_patterns: List[str] = None, include_kernel_patterns: List[str] = None, 
+                                     exclude_kernel_patterns: List[str] = None, call_stack_source: str = 'tree', 
+                                     not_show_fwd_bwd_type: bool = False, step_idx: Optional[int] = None) -> List[Path]:
         """
         分析多个文件（使用glob模式）
         
@@ -151,6 +153,7 @@ class Analyzer:
             show_readable_timestamp: 是否显示可读时间戳
             show_kernel_timestamp: 是否显示kernel时间戳
             show_name: 是否显示名称
+            show_call_stack: 是否显示调用栈信息
             output_dir: 输出目录
             label: 文件标签
             print_markdown: 是否打印markdown表格
@@ -192,6 +195,7 @@ class Analyzer:
             show_readable_timestamp=show_readable_timestamp,
             show_kernel_timestamp=show_kernel_timestamp,
             show_name=show_name,
+            show_call_stack=show_call_stack,
             aggregation_spec=aggregation_spec,
             label=label,
             print_markdown=print_markdown,
@@ -210,7 +214,7 @@ class Analyzer:
                               show_kernel_names: bool = False, show_kernel_duration: bool = False,
                               show_timestamp: bool = False, show_readable_timestamp: bool = False,
                               show_kernel_timestamp: bool = False, show_name: bool = False,
-                              special_matmul: bool = False, output_dir: str = ".",
+                              show_call_stack: bool = False, special_matmul: bool = False, output_dir: str = ".",
                               compare_dtype: bool = False, compare_shape: bool = False, compare_name: bool = False,
                               print_markdown: bool = False, max_workers: int = None,
                               include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
@@ -230,6 +234,7 @@ class Analyzer:
             show_readable_timestamp: 是否显示可读时间戳
             show_kernel_timestamp: 是否显示kernel时间戳
             show_name: 是否显示名称
+            show_call_stack: 是否显示调用栈信息
             special_matmul: 是否进行特殊的matmul分析
             output_dir: 输出目录
             compare_dtype: 是否比较数据类型
@@ -280,6 +285,7 @@ class Analyzer:
             show_readable_timestamp=show_readable_timestamp,
             show_kernel_timestamp=show_kernel_timestamp,
             show_name=show_name,
+            show_call_stack=show_call_stack,
             aggregation_spec=aggregation_spec,
             special_matmul=special_matmul,
             compare_dtype=compare_dtype,
@@ -304,7 +310,7 @@ class Analyzer:
                                          show_dtype: bool = False, show_shape: bool = False,
                                          show_kernel_names: bool = False, show_kernel_duration: bool = False,
                                          show_timestamp: bool = False, show_readable_timestamp: bool = False,
-                                         show_kernel_timestamp: bool = False) -> List[Path]:
+                                         show_kernel_timestamp: bool = False, show_call_stack: bool = False) -> List[Path]:
         """
         分析通信性能
         
@@ -324,6 +330,7 @@ class Analyzer:
             show_timestamp: 是否显示时间戳
             show_readable_timestamp: 是否显示可读时间戳
             show_kernel_timestamp: 是否显示kernel时间戳
+            show_call_stack: 是否显示调用栈信息
             
         Returns:
             List[Path]: 生成的文件路径列表
@@ -335,7 +342,7 @@ class Analyzer:
             output_dir=output_dir, show_dtype=show_dtype, show_shape=show_shape,
             show_kernel_names=show_kernel_names, show_kernel_duration=show_kernel_duration,
             show_timestamp=show_timestamp, show_readable_timestamp=show_readable_timestamp,
-            show_kernel_timestamp=show_kernel_timestamp
+            show_kernel_timestamp=show_kernel_timestamp, show_call_stack=show_call_stack
         )
     
     # ==================== 辅助方法 ====================
