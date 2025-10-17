@@ -14,99 +14,30 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
-  # 分析单个文件 (按操作名聚合，默认方法)
-  time-chart-tool analysis file.json --label "baseline" --aggregation name --output-format json,xlsx
   
-  # 分析单个文件 (按操作名聚合，显示kernel信息)
-  time-chart-tool analysis file.json --label "baseline" --aggregation name --show "kernel-names,kernel-duration" --output-format json,xlsx
-  
-  # 分析单个文件并在stdout中打印markdown表格
-  time-chart-tool analysis file.json --label "baseline" --aggregation name --show "kernel-duration" --print-markdown
-  
-  # 分析单个文件 (按调用栈和操作名聚合，显示shape信息)
-  time-chart-tool analysis file.json --label "baseline" --aggregation "call_stack,name" --show "shape" --output-format json,xlsx
-  
-  # 分析单个文件 (按调用栈和操作名聚合，显示所有信息)
-  time-chart-tool analysis file.json --label "baseline" --aggregation "call_stack,name" --show "dtype,shape,kernel-names,kernel-duration" --output-format json,xlsx
-  
-  # 分析单个文件 (按操作名和形状聚合)
-  time-chart-tool analysis file.json --label "baseline" --aggregation "name,shape" --show "dtype" --output-format json,xlsx
-  
-  # 分析单个文件 (按调用栈和操作名聚合)
-  time-chart-tool analysis file.json --label "baseline" --aggregation "call_stack,name" --show "shape" --output-format json,xlsx
-  
-  # 分析单个文件 (按操作名、形状和数据类型聚合)
-  time-chart-tool analysis file.json --label "baseline" --aggregation "name,shape,dtype" --output-format json,xlsx
-  
-  # 分析单个文件 (显示CPU操作启动时间戳)
-  time-chart-tool analysis file.json --label "baseline" --aggregation name --show "timestamp" --output-format json,xlsx
-  
-  # 基于操作名对比多个文件 (默认方法)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation name --output-format json,xlsx
-  
-  # 基于操作名对比多个文件 (显示kernel信息)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation name --show "kernel-names,kernel-duration" --output-format json,xlsx
-  
-  # 基于调用栈和操作名对比多个文件 (显示shape信息)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation "call_stack,name" --show "shape" --output-format json,xlsx
+  # 分析单个文件 (按调用栈和操作名聚合，显示所有kernel信息,CPU操作启动时间戳)
+  time-chart-tool analysis file.json --label "baseline" --aggregation "call_stack,name" --show "dtype,shape,kernel-names,kernel-duration,timestamp" 
   
   # 基于调用栈和操作名对比多个文件 (显示所有信息)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation "call_stack,name" --show "dtype,shape,kernel-names,kernel-duration" --output-format json,xlsx
+  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation "call_stack,name" --show "dtype,shape,kernel-names,kernel-duration" 
   
   # 对比多个文件 (按操作名和形状聚合)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation "name,shape" --show "dtype" --output-format json,xlsx
+  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation "name,shape" --show "dtype" 
   
-  # 对比多个文件 (按调用栈和操作名聚合)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation "call_stack,name" --show "shape" --output-format json,xlsx
+  # 对比多个文件
+  time-chart-tool compare file1.json:label1 file2.json:label2  --aggregation 'name,shape,fwd_bwd_type' --show 'dtype,call_stack,kernel-names,timestamp' --compare 'dtype'
   
-  # 对比多个文件 (按操作名、形状和数据类型聚合)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation "name,shape,dtype" --output-format json,xlsx
+  # 对比多个文件：支持单文件、多文件、目录混合使用
+  time-chart-tool compare single_file.json:baseline "dir/*.json":test --aggregation name 
   
-  # 对比多个文件 (显示CPU操作启动时间戳)
-  time-chart-tool compare file1.json:label1 file2.json:label2 --aggregation name --show "timestamp" --output-format json,xlsx
+  # 对比多个文件：同一标签下多个文件自动聚合
+  time-chart-tool compare "file1.json,file2.json,file3.json":baseline "file4.json,file5.json":optimized --aggregation name 
   
-  # 对比多个文件并包含特殊的matmul分析
-  time-chart-tool compare file1.json:fp32 file2.json:bf16 --aggregation name --special-matmul --output-format json,xlsx
+  # 对比多个文件：自动查找目录下所有json文件
+  time-chart-tool compare step1_results/:baseline step2_results/:optimized --aggregation name 
   
-  # 混合模式：支持单文件、多文件、目录混合使用
-  time-chart-tool compare single_file.json:baseline "dir/*.json":test --aggregation name --output-format json,xlsx
-  
-  # 多文件模式：同一标签下多个文件自动聚合
-  time-chart-tool compare "file1.json,file2.json,file3.json":baseline "file4.json,file5.json":optimized --aggregation name --output-format json,xlsx
-  
-  # 目录模式：自动查找目录下所有json文件
-  time-chart-tool compare step1_results/:baseline step2_results/:optimized --aggregation name --output-format json,xlsx
-  
-  # 控制每个标签的文件数量，确保比较公平性
+  # 对比多个文件：控制每个标签的文件数量，确保比较公平性
   time-chart-tool compare "dir1/*.json":baseline "dir2/*.json":optimized --max-files-per-label 10 --random-seed 42 --aggregation name
-  
-  # 混合模式：单文件 vs 多文件（限制数量）
-  time-chart-tool compare single_file.json:reference "multi_files/*.json":test --max-files-per-label 5 --aggregation name
-  
-  # 高级聚合示例：按操作名和数据类型对比
-  time-chart-tool compare file1.json:fp32 file2.json:bf16 --aggregation "name,dtype" --output-format json,xlsx
-  
-  # 高级聚合示例：按调用栈和形状对比
-  time-chart-tool compare file1.json:baseline file2.json:optimized --aggregation "call_stack,shape" --show-dtype --output-format json,xlsx
-  
-  # 高级聚合示例：四字段组合聚合
-  time-chart-tool compare file1.json:baseline file2.json:optimized --aggregation "call_stack,name,shape,dtype" --output-format json,xlsx
-  
-  # 只输出 JSON 格式
-  time-chart-tool analysis file.json --aggregation "call_stack,name" --output-format json
-  time-chart-tool compare file1.json:fp32 file2.json:tf32 --aggregation name --output-format json
-  
-  # 只输出 XLSX 格式
-  time-chart-tool analysis file.json --aggregation name --output-format xlsx
-  time-chart-tool compare file1.json:baseline file2.json:optimized --aggregation "call_stack,name" --output-format xlsx
-  
-  # 按时间排序分析
-  time-chart-tool analysis file.json --aggregation on_op_timestamp --output-format json,xlsx
-  time-chart-tool compare file1.json:baseline file2.json:optimized --aggregation on_op_timestamp --output-format xlsx
-  
-  # 显示时间戳分析
-  time-chart-tool analysis file.json --aggregation on_op_name --show-timestamp --output-format json,xlsx
-  time-chart-tool compare file1.json:baseline file2.json:optimized --aggregation on_op_name --show-timestamp --output-format xlsx
         """
     )
     
