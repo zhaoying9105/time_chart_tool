@@ -136,6 +136,7 @@ class AnalysisCommand:
                 show_kernel_timestamp=show_options['kernel_timestamp'],
                 show_name=show_options['name'],
                 show_call_stack=show_options['call_stack'],
+                show_stream=show_options['stream'],
                 output_dir=str(output_dir),
                 label=args.label,
                 print_markdown=args.print_markdown,

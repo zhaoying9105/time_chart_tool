@@ -51,10 +51,10 @@ def _calculate_time_diff_readable(event1, event2) -> float:
 
 class CommunicationAnalyzer:
     COMMUNICATION_BLACKLIST_PATTERNS = [
-        'TCDP_RING_ALLGATHER_',
-        'TCDP_RING_REDUCESCATTER_',
-        'ALLREDUCELL',
-        'TCDP_RING_ALLREDUCE_SIMPLE_BF16_ADD'
+        # 'TCDP_RING_ALLGATHER_',
+        # 'TCDP_RING_REDUCESCATTER_',
+        # 'ALLREDUCELL',
+        # 'TCDP_RING_ALLREDUCE_SIMPLE_BF16_ADD'
     ]
 
     """通信性能分析器"""

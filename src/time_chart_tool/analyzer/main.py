@@ -61,7 +61,7 @@ class Analyzer:
                            show_kernel_names: bool = False, show_kernel_duration: bool = False,
                            show_timestamp: bool = False, show_readable_timestamp: bool = False,
                            show_kernel_timestamp: bool = False, show_name: bool = False,
-                           show_call_stack: bool = False, output_dir: str = ".", label: str = None, 
+                           show_call_stack: bool = False, show_stream: bool = False, output_dir: str = ".", label: str = None, 
                            print_markdown: bool = False, call_stack_source: str = 'tree', 
                            not_show_fwd_bwd_type: bool = False, step_idx: Optional[int] = None) -> List[Path]:
         """
@@ -79,6 +79,7 @@ class Analyzer:
             show_kernel_timestamp: 是否显示kernel时间戳
             show_name: 是否显示名称
             show_call_stack: 是否显示调用栈信息
+            show_stream: 是否显示stream信息
             output_dir: 输出目录
             label: 文件标签
             print_markdown: 是否打印markdown表格
@@ -121,6 +122,7 @@ class Analyzer:
             show_kernel_timestamp=show_kernel_timestamp,
             show_name=show_name,
             show_call_stack=show_call_stack,
+            show_stream=show_stream,
             aggregation_spec=aggregation_spec,
             label=label,
             print_markdown=print_markdown,
@@ -134,7 +136,7 @@ class Analyzer:
                                      show_kernel_names: bool = False, show_kernel_duration: bool = False,
                                      show_timestamp: bool = False, show_readable_timestamp: bool = False,
                                      show_kernel_timestamp: bool = False, show_name: bool = False,
-                                     show_call_stack: bool = False, output_dir: str = ".", label: str = None, 
+                                     show_call_stack: bool = False, show_stream: bool = False, output_dir: str = ".", label: str = None, 
                                      print_markdown: bool = False, include_op_patterns: List[str] = None, 
                                      exclude_op_patterns: List[str] = None, include_kernel_patterns: List[str] = None, 
                                      exclude_kernel_patterns: List[str] = None, call_stack_source: str = 'tree', 
@@ -154,6 +156,7 @@ class Analyzer:
             show_kernel_timestamp: 是否显示kernel时间戳
             show_name: 是否显示名称
             show_call_stack: 是否显示调用栈信息
+            show_stream: 是否显示stream信息
             output_dir: 输出目录
             label: 文件标签
             print_markdown: 是否打印markdown表格
@@ -196,6 +199,7 @@ class Analyzer:
             show_kernel_timestamp=show_kernel_timestamp,
             show_name=show_name,
             show_call_stack=show_call_stack,
+            show_stream=show_stream,
             aggregation_spec=aggregation_spec,
             label=label,
             print_markdown=print_markdown,
@@ -214,7 +218,7 @@ class Analyzer:
                               show_kernel_names: bool = False, show_kernel_duration: bool = False,
                               show_timestamp: bool = False, show_readable_timestamp: bool = False,
                               show_kernel_timestamp: bool = False, show_name: bool = False,
-                              show_call_stack: bool = False, special_matmul: bool = False, output_dir: str = ".",
+                              show_call_stack: bool = False, show_stream: bool = False, special_matmul: bool = False, output_dir: str = ".",
                               compare_dtype: bool = False, compare_shape: bool = False, compare_name: bool = False,
                               print_markdown: bool = False, max_workers: int = None,
                               include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
@@ -235,6 +239,7 @@ class Analyzer:
             show_kernel_timestamp: 是否显示kernel时间戳
             show_name: 是否显示名称
             show_call_stack: 是否显示调用栈信息
+            show_stream: 是否显示stream信息
             special_matmul: 是否进行特殊的matmul分析
             output_dir: 输出目录
             compare_dtype: 是否比较数据类型
@@ -286,6 +291,7 @@ class Analyzer:
             show_kernel_timestamp=show_kernel_timestamp,
             show_name=show_name,
             show_call_stack=show_call_stack,
+            show_stream=show_stream,
             aggregation_spec=aggregation_spec,
             special_matmul=special_matmul,
             compare_dtype=compare_dtype,

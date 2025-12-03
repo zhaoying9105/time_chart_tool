@@ -55,7 +55,7 @@ def parse_show_options(show_spec: str) -> Dict[str, bool]:
     """
     valid_show_options = {
         'dtype', 'shape', 'kernel-names', 'kernel-duration', 
-        'timestamp', 'readable-timestamp', 'kernel-timestamp', 'name', 'call_stack'
+        'timestamp', 'readable-timestamp', 'kernel-timestamp', 'name', 'call_stack', 'stream'
     }
     
     show_options = {
@@ -67,7 +67,8 @@ def parse_show_options(show_spec: str) -> Dict[str, bool]:
         'readable_timestamp': False,
         'kernel_timestamp': False,
         'name': False,
-        'call_stack': False
+        'call_stack': False,
+        'stream': False
     }
     
     if not show_spec or not show_spec.strip():

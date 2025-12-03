@@ -28,6 +28,7 @@ class DataPresenter:
                            show_kernel_timestamp: bool = False,
                            show_name: bool = False,
                            show_call_stack: bool = False,
+                           show_stream: bool = False,
                            aggregation_spec: str = 'name',
                            special_matmul: bool = False,
                            compare_dtype: bool = False,
@@ -58,6 +59,7 @@ class DataPresenter:
             show_kernel_timestamp: 是否显示kernel时间戳
             show_name: 是否显示名称
             show_call_stack: 是否显示调用栈信息
+            show_stream: 是否显示stream信息
             aggregation_spec: 聚合字段组合
             special_matmul: 是否进行特殊的matmul分析
             compare_dtype: 是否比较数据类型
@@ -95,6 +97,7 @@ class DataPresenter:
                 show_kernel_timestamp=show_kernel_timestamp,
                 show_name=show_name,
                 show_call_stack=show_call_stack,
+                show_stream=show_stream,
                 aggregation_spec=aggregation_spec,
                 print_markdown=print_markdown,
                 per_rank_stats=per_rank_stats,
@@ -117,6 +120,7 @@ class DataPresenter:
                 show_readable_timestamp=show_readable_timestamp,
                 show_name=show_name,
                 show_call_stack=show_call_stack,
+                show_stream=show_stream,
                 aggregation_spec=aggregation_spec,
                 compare_dtype=compare_dtype,
                 compare_shape=compare_shape,
@@ -145,6 +149,7 @@ class DataPresenter:
                            show_kernel_timestamp: bool = False,
                            show_name: bool = False,
                            show_call_stack: bool = False,
+                           show_stream: bool = False,
                            aggregation_spec: str = 'name',
                            label: Optional[str] = None,
                            print_markdown: bool = False,
@@ -165,6 +170,7 @@ class DataPresenter:
             show_kernel_timestamp: 是否显示kernel时间戳
             show_name: 是否显示名称
             show_call_stack: 是否显示调用栈信息
+            show_stream: 是否显示stream信息
             aggregation_spec: 聚合字段组合
             label: 文件标签
             print_markdown: 是否打印markdown表格
@@ -318,6 +324,17 @@ class DataPresenter:
                             call_stacks.add(call_stack_str)
                 row['call_stacks'] = '\n'.join(sorted(call_stacks)) if call_stacks else ''
             
+            if show_stream:
+                # 收集 stream 信息
+                streams = set()
+                for cpu_event in aggregated_data.cpu_events:
+                    if cpu_event.stream_id is not None:
+                        streams.add(str(cpu_event.stream_id))
+                for kernel_event in aggregated_data.kernel_events:
+                    if kernel_event.stream_id is not None:
+                        streams.add(str(kernel_event.stream_id))
+                row['streams'] = '\n'.join(sorted(streams)) if streams else ''
+            
             if show_kernel_names or show_kernel_duration or show_kernel_timestamp:
                 # 收集 kernel 信息
                 kernel_stats = self._calculate_kernel_statistics(aggregated_data.kernel_events)
@@ -390,6 +407,7 @@ class DataPresenter:
             show_timestamp=show_timestamp,
             show_name=show_name,
             show_call_stack=show_call_stack,
+            show_stream=show_stream,
             file_labels=[label] if label else None
         )
         return self._generate_output_files(rows, output_dir, base_name)
@@ -405,6 +423,7 @@ class DataPresenter:
                               show_readable_timestamp: bool = False,
                               show_name: bool = False,
                               show_call_stack: bool = False,
+                              show_stream: bool = False,
                               aggregation_spec: str = 'name',
                               compare_dtype: bool = False,
                               compare_shape: bool = False,
@@ -431,6 +450,7 @@ class DataPresenter:
             show_readable_timestamp: 是否显示可读时间戳
             show_name: 是否显示名称
             show_call_stack: 是否显示调用栈信息
+            show_stream: 是否显示stream信息
             aggregation_spec: 聚合字段组合
             compare_dtype: 是否比较数据类型
             compare_shape: 是否比较形状
@@ -581,6 +601,17 @@ class DataPresenter:
                                 call_stacks.add(call_stack_str)
                     row[f'{label}_call_stacks'] = '\n'.join(sorted(call_stacks)) if call_stacks else ''
                 
+                if show_stream:
+                    # 收集 stream 信息
+                    streams = set()
+                    for cpu_event in cpu_events:
+                        if cpu_event.stream_id is not None:
+                            streams.add(str(cpu_event.stream_id))
+                    for kernel_event in kernel_events:
+                        if kernel_event.stream_id is not None:
+                            streams.add(str(kernel_event.stream_id))
+                    row[f'{label}_streams'] = '\n'.join(sorted(streams)) if streams else ''
+                
                 if show_kernel_names or show_kernel_duration:
                     kernel_stats = self._calculate_kernel_statistics(kernel_events)
                     if kernel_stats:
@@ -665,6 +696,14 @@ class DataPresenter:
                             else:
                                 degradation = (ratio - 1) * 100
                                 row[f'{label2}_vs_{label1}_performance_improvement'] = f"-{degradation:.1f}%"
+                        
+                        # 添加 total duration 差值比较
+                        total_duration1 = row.get(f'{label1}_kernel_total_duration', 0.0)
+                        total_duration2 = row.get(f'{label2}_kernel_total_duration', 0.0)
+                        
+                        # 计算差值：前一个label的total duration - 当前label的total duration
+                        duration_diff = total_duration1 - total_duration2
+                        row[f'{label1}_vs_{label2}_total_duration_diff'] = duration_diff
             
             # 添加fwd_bwd_type列（如果不显示的话，默认显示）
             if not not_show_fwd_bwd_type:
@@ -688,7 +727,7 @@ class DataPresenter:
             rows.append(row)
         
         # 生成输出文件
-        base_name = self._generate_base_name(aggregation_spec, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_name, show_call_stack, file_labels, include_op_patterns, exclude_op_patterns, include_kernel_patterns, exclude_kernel_patterns)
+        base_name = self._generate_base_name(aggregation_spec, show_dtype, show_shape, show_kernel_names, show_kernel_duration, show_timestamp, show_name, show_call_stack, show_stream, file_labels, include_op_patterns, exclude_op_patterns, include_kernel_patterns, exclude_kernel_patterns)
         generated_files = self._generate_output_files(rows, output_dir, base_name)
         
         # 特殊的 matmul 展示
@@ -755,7 +794,7 @@ class DataPresenter:
     
     def _generate_base_name(self, aggregation_spec: str, show_dtype: bool, show_shape: bool, 
                            show_kernel_names: bool, show_kernel_duration: bool, show_timestamp: bool,
-                           show_name: bool, show_call_stack: bool = False, file_labels: List[str] = None,
+                           show_name: bool, show_call_stack: bool = False, show_stream: bool = False, file_labels: List[str] = None,
                            include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
                            include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None) -> str:
         """
@@ -770,6 +809,7 @@ class DataPresenter:
             show_timestamp: 是否显示时间戳
             show_name: 是否显示名称
             show_call_stack: 是否显示调用栈信息
+            show_stream: 是否显示stream信息
             file_labels: 文件标签列表
             include_op_patterns: 包含的操作名称模式列表
             exclude_op_patterns: 排除的操作名称模式列表
@@ -806,6 +846,8 @@ class DataPresenter:
             show_options.append("name")
         if show_call_stack:
             show_options.append("call_stack")
+        if show_stream:
+            show_options.append("stream")
         
         if show_options:
             name_parts.append(f"show_{'_'.join(show_options)}")

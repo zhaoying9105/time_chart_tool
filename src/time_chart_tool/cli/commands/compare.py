@@ -170,6 +170,7 @@ class CompareCommand:
                 show_kernel_timestamp=show_options['kernel_timestamp'],
                 show_name=show_options['name'],
                 show_call_stack=show_options['call_stack'],
+                show_stream=show_options['stream'],
                 special_matmul=args.special_matmul,
                 output_dir=str(output_dir),
                 compare_dtype=compare_options['dtype'],

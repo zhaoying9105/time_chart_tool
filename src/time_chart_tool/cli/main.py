@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 CLI主模块
 """
@@ -62,7 +63,8 @@ def parse_arguments():
                                      '  readable-timestamp: 显示可读时间戳\n'
                                      '  kernel-timestamp: 显示kernel时间戳\n'
                                      '  name: 显示cpu_op名称\n'
-                                     '示例: --show "dtype,shape,kernel-duration,name"')
+                                     '  stream: 显示stream信息\n'
+                                     '示例: --show "dtype,shape,kernel-duration,name,stream"')
     analysis_parser.add_argument('--print-markdown', action='store_true', 
                                 help='是否在stdout中以markdown格式打印表格 (默认: False)')
     analysis_parser.add_argument('--output-format', default='json,xlsx', 
@@ -122,7 +124,8 @@ def parse_arguments():
                                  '  readable-timestamp: 显示可读时间戳\n'
                                  '  kernel-timestamp: 显示kernel时间戳\n'
                                  '  call_stack: 显示调用栈信息\n'
-                                 '示例: --show "dtype,shape,kernel-duration,call_stack"')
+                                 '  stream: 显示stream信息\n'
+                                 '示例: --show "dtype,shape,kernel-duration,call_stack,stream"')
     
     # compare 命令 - 分析多个文件并对比
     compare_parser = subparsers.add_parser('compare', help='分析多个 JSON 文件并对比')
@@ -147,7 +150,8 @@ def parse_arguments():
                                     '  readable-timestamp: 显示可读时间戳\n'
                                     '  kernel-timestamp: 显示kernel时间戳\n'
                                     '  name: 显示cpu_op名称\n'
-                                    '示例: --show "dtype,shape,kernel-duration,name"')
+                                    '  stream: 显示stream信息\n'
+                                    '示例: --show "dtype,shape,kernel-duration,name,stream"')
     compare_parser.add_argument('--print-markdown', action='store_true', 
                                help='是否在stdout中以markdown格式打印表格 (默认: False)')
     compare_parser.add_argument('--special-matmul', action='store_true',
