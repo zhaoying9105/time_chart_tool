@@ -5,6 +5,13 @@ Time Chart Tool
 一个用于解析 PyTorch profiler 时间图表 JSON 数据的工具库。
 """
 
+# 设置全局 print flush=True
+import functools
+import builtins
+
+original_print = builtins.print
+builtins.print = functools.partial(original_print, flush=True)
+
 from .parser import PyTorchProfilerParser
 from .models import ActivityEvent, ProfilerData
 from .analyzer import Analyzer, KernelStatistics

@@ -326,43 +326,6 @@ class DataPostProcessor:
         
         return compiled_patterns
     
-    def _drop_communication_events(self, cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
-                                 kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]]) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
-        """
-        丢弃包含 TCDP 的通信 kernel events 及其对应的 CPU events
-        
-        Args:
-            cpu_events_by_external_id: CPU events 按 external_id 分组
-            kernel_events_by_external_id: Kernel events 按 external_id 分组
-            
-        Returns:
-            Tuple: 过滤后的 CPU events 和 Kernel events
-        """
-        # 找到包含 TCDP 的 external_id
-        tcdp_external_ids = set()
-        
-        for external_id, kernel_events in kernel_events_by_external_id.items():
-            for kernel_event in kernel_events:
-                if 'TCDP' in kernel_event.name:
-                    tcdp_external_ids.add(external_id)
-                    break
-        
-        print(f"找到 {len(tcdp_external_ids)} 个包含 TCDP kernel 的 external_id")
-        
-        # 过滤掉包含 TCDP 的 external_id
-        filtered_cpu_events = {}
-        filtered_kernel_events = {}
-        
-        for external_id in cpu_events_by_external_id:
-            if external_id not in tcdp_external_ids:
-                filtered_cpu_events[external_id] = cpu_events_by_external_id[external_id]
-        
-        for external_id in kernel_events_by_external_id:
-            if external_id not in tcdp_external_ids:
-                filtered_kernel_events[external_id] = kernel_events_by_external_id[external_id]
-        
-        return filtered_cpu_events, filtered_kernel_events
-    
     def _collect_per_rank_statistics(self, file_paths: List[str], aggregated_data_list: List[Dict[Union[str, tuple], 'AggregatedData']]) -> Dict[str, Dict[str, int]]:
         """
         收集每个文件的统计信息

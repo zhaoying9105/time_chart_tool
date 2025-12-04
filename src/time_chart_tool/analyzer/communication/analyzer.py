@@ -101,7 +101,7 @@ class CommunicationAnalyzer:
         """
         print("=== 通信性能分析 ===")
         
-        # 扫描executor文件夹
+        # 1. 扫描executor文件夹
         executor_folders = self._scan_executor_folders(pod_dir)
         if not executor_folders:
             print("错误: 没有找到executor文件夹")
@@ -109,48 +109,63 @@ class CommunicationAnalyzer:
         
         print(f"找到 {len(executor_folders)} 个executor文件夹")
         
-        # 提取通信数据
-        comm_data = self._extract_communication_data(executor_folders, step, kernel_prefix)
+        generated_files = []
+        
+        # 2. 确定是否为快速分析模式 (指定了 step 和两个 card_idx)
+        is_fast_mode = (step is not None and fastest_card_idx is not None and slowest_card_idx is not None)
+        target_indices = [fastest_card_idx, slowest_card_idx] if is_fast_mode else None
+        
+        if is_fast_mode:
+            print(f"检测到已指定最快卡({fastest_card_idx})和最慢卡({slowest_card_idx})，进入快速分析模式")
+        
+        # 3. 提取通信数据
+        comm_data = self._extract_communication_data(executor_folders, step, kernel_prefix, target_indices)
         if not comm_data:
             print("错误: 没有找到通信数据")
             return []
         
-        # 生成输出文件
-        generated_files = []
+        # 4. 生成统计报表 (非快速模式)
+        if not is_fast_mode:
+            # 生成原始数据Excel
+            raw_data_file = self._generate_raw_data_excel(comm_data, output_dir)
+            generated_files.append(raw_data_file)
+            
+            # 生成统计信息Excel
+            stats_file = self._generate_statistics_excel(comm_data, output_dir)
+            generated_files.append(stats_file)
         
-        # 生成原始数据Excel
-        raw_data_file = self._generate_raw_data_excel(comm_data, output_dir)
-        generated_files.append(raw_data_file)
-        
-        # 生成统计信息Excel
-        stats_file = self._generate_statistics_excel(comm_data, output_dir)
-        generated_files.append(stats_file)
-        
-        # 深度分析（如果指定了step）
+        # 5. 深度分析 (如果指定了 step)
         if step is not None:
-            # 如果没有指定comm_idx，自动选择Duration_Ratio最大的comm_idx
+        # if False:
+            # 确保step在数据中
+            if step not in comm_data:
+                print(f"警告: 未找到 Step {step} 的数据")
+                return generated_files
+            
+            # 自动选择 comm_idx
             if comm_idx is None:
-                step_stats = self._calculate_step_statistics(comm_data)
-                # 筛选出指定step的统计信息
-                step_specific_stats = [stat for stat in step_stats if stat["Step"] == step]
-                
-                if not step_specific_stats:
-                    print(f"错误: 没有找到step {step} 的统计信息")
+                comm_idx, auto_fastest, auto_slowest = self._auto_select_comm_target(comm_data, step)
+                if comm_idx is None:
+                    print(f"无法自动选择 comm_idx，跳过深度分析")
                     return generated_files
                 
-                # 找到Duration_Ratio最大的comm_idx
-                max_ratio_stat = max(step_specific_stats, key=lambda x: x["Duration_Ratio"])
-                comm_idx = max_ratio_stat["Comm_Op_Index"]
-                
-                print(f"自动选择comm_idx: {comm_idx} (Duration_Ratio: {max_ratio_stat['Duration_Ratio']:.2f})")
-                print(f"  最快卡: {max_ratio_stat['Fastest_Card_Index']} ({max_ratio_stat['Fastest_Duration_us']:.2f}μs)")
-                print(f"  最慢卡: {max_ratio_stat['Slowest_Card_Index']} ({max_ratio_stat['Slowest_Duration_us']:.2f}μs)")
+                # 如果用户没有指定快慢卡，使用自动检测的结果
+                if not is_fast_mode:
+                    print(f"自动选择comm_idx: {comm_idx}")
+                    if fastest_card_idx is None:
+                        fastest_card_idx = auto_fastest
+                        print(f"  建议最快卡: {fastest_card_idx}")
+                    if slowest_card_idx is None:
+                        slowest_card_idx = auto_slowest
+                        print(f"  建议最慢卡: {slowest_card_idx}")
             
+            # 执行深度分析
             deep_analysis_files = self._perform_deep_analysis(
                 comm_data, executor_folders, step, comm_idx, output_dir, 
                 kernel_prefix, prev_kernel_pattern, fastest_card_idx, slowest_card_idx,
                 show_timestamp, show_readable_timestamp
             )
+            
             if deep_analysis_files:
                 if isinstance(deep_analysis_files, list):
                     generated_files.extend(deep_analysis_files)
@@ -158,6 +173,30 @@ class CommunicationAnalyzer:
                     generated_files.append(deep_analysis_files)
         
         return generated_files
+
+    def _auto_select_comm_target(self, comm_data: Dict[int, Dict[int, List[float]]], step: int) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+        """
+        自动选择要分析的通信操作目标
+        
+        Returns:
+            Tuple[comm_idx, fastest_card_idx, slowest_card_idx]
+        """
+        step_stats = self._calculate_step_statistics(comm_data)
+        # 筛选出指定step的统计信息
+        step_specific_stats = [stat for stat in step_stats if stat["Step"] == step]
+        
+        if not step_specific_stats:
+            return None, None, None
+        
+        # 找到Duration_Ratio最大的comm_idx
+        max_ratio_stat = max(step_specific_stats, key=lambda x: x["Duration_Ratio"])
+        
+        return (
+            max_ratio_stat["Comm_Op_Index"],
+            max_ratio_stat["Fastest_Card_Index"],
+            max_ratio_stat["Slowest_Card_Index"]
+        )
+
     
     def _perform_deep_analysis(self, comm_data: Dict[int, Dict[int, List[float]]], executor_folders: List[str],
                               step: int, comm_idx: int, output_dir: str, kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL",
@@ -577,10 +616,36 @@ class CommunicationAnalyzer:
     def _print_communication_events_table(self, fastest_events, slowest_events) -> bool:
         """打印通信事件对比表格并返回一致性检查结果"""
         print("    通信事件对比表格:")
-        print("    | 序号 | 最快卡Kernel名称 | 最快卡开始时间 | 最快卡结束时间 | 最慢卡Kernel名称 | 最慢卡开始时间 | 最慢卡结束时间 | 名称一致 | 开始时间差(ms) | 结束时间差(ms) | 超过阈值 |")
-        print("    |------|----------------|-------------|-------------|----------------|-------------|-------------|----------|---------------|---------------|----------|")
         
-        max_events = max(len(fastest_events), len(slowest_events))
+        # 定义列名
+        headers = [
+            "序号", "最快卡Kernel名称", "最快卡开始时间", "最快卡结束时间", 
+            "最慢卡Kernel名称", "最慢卡开始时间", "最慢卡结束时间", 
+            "名称一致", "开始时间差(ms)", "结束时间差(ms)", "超过阈值",
+            "In msg nelems (Fast)", "In msg nelems (Slow)", "Nelems一致",
+            "Group size (Fast)", "Group size (Slow)", "Group Size一致"
+        ]
+        
+        # 定义每列的宽度
+        widths = [
+            6, 60, 30,30, 
+            60, 20, 20, 
+            10, 15, 15, 10,
+            20, 20, 10,
+            18, 18, 15
+        ]
+        
+        # 打印表头
+        header_row = "| " + " | ".join(f"{h:<{w}}" for h, w in zip(headers, widths)) + " |"
+        separator_row = "|-" + "-|-".join("-" * w for w in widths) + "-|"
+        
+        print(f"    {header_row}")
+        print(f"    {separator_row}")
+        
+        if len(fastest_events) != len(slowest_events):  
+            print(f"    WARN: 最快卡和最慢卡的通信kernel events数量不一致 ({len(fastest_events)} vs {len(slowest_events)})")
+        
+        max_events = min(len(fastest_events), len(slowest_events))
         consistency_check_passed = True
         
         for i in range(max_events):
@@ -606,7 +671,32 @@ class CommunicationAnalyzer:
             if threshold_exceeded == "✗":
                 consistency_check_passed = False
             
-            print(f"    | {i+1} | {fastest_name} | {fastest_start_ts} | {fastest_end_ts} | {slowest_name} | {slowest_start_ts} | {slowest_end_ts} | {name_consistent} | {start_time_diff} | {end_time_diff} | {threshold_exceeded} |")
+            # 提取 args 信息
+            fastest_args = fastest_event.args if fastest_event else {}
+            slowest_args = slowest_event.args if slowest_event else {}
+            
+            # 提取 'In msg nelems'
+            fast_nelems = str(fastest_args.get('In msg nelems', 'N/A'))
+            slow_nelems = str(slowest_args.get('In msg nelems', 'N/A'))
+            nelems_consistent = "✓" if fast_nelems == slow_nelems else "✗"
+            
+            # 提取 'Group size'
+            fast_group_size = str(fastest_args.get('Group size', 'N/A'))
+            slow_group_size = str(slowest_args.get('Group size', 'N/A'))
+            group_size_consistent = "✓" if fast_group_size == slow_group_size else "✗"
+            
+            # 构建数据行
+            row_data = [
+                str(i+1), fastest_name, fastest_start_ts, fastest_end_ts,
+                slowest_name, slowest_start_ts, slowest_end_ts,
+                name_consistent, start_time_diff, end_time_diff, threshold_exceeded,
+                fast_nelems, slow_nelems, nelems_consistent,
+                fast_group_size, slow_group_size, group_size_consistent
+            ]
+            
+            # 格式化并打印行
+            row_str = "| " + " | ".join(f"{d:<{w}}" for d, w in zip(row_data, widths)) + " |"
+            print(f"    {row_str}")
         
         return consistency_check_passed
 
@@ -654,28 +744,42 @@ class CommunicationAnalyzer:
         fastest_target_comm_event = self._find_communication_event(fastest_data, comm_idx, kernel_prefix)
         slowest_target_comm_event = self._find_communication_event(slowest_data, comm_idx, kernel_prefix)
         
+        # 打印 fastest_target_comm_event 和 slowest_target_comm_event 的 duration
+        if fastest_target_comm_event:
+            print(f"fastest_target_comm_event duration: {fastest_target_comm_event.dur}")
+        if slowest_target_comm_event:
+            print(f"slowest_target_comm_event duration: {slowest_target_comm_event.dur}")
+        
         if not fastest_target_comm_event or not slowest_target_comm_event:
             print("    错误: 无法找到目标通信kernel events")
             return False
         
-        if not fastest_all_comm_events or not slowest_all_comm_events:
-            print("    错误: 无法找到任何通信kernel events")
+        if len(fastest_all_comm_events) == 0:
+            print("    错误: 无法找到任何通信kernel events (fastest card)")
             return False
+        else:
+            print(f"    找到 {len(fastest_all_comm_events)} 个通信kernel events (fastest card)")
+        
+        if len(slowest_all_comm_events) == 0:
+            print("    错误: 无法找到任何通信kernel events (slowest card)")
+            return False
+        else:
+            print(f"    找到 {len(slowest_all_comm_events)} 个通信kernel events (slowest card)")
         
         # 2. 时间戳标准化已在parser中完成
         print("    时间戳标准化已在parser中完成")
-        
-        # 3. 打印通信事件对比表格
-        consistency_check_passed = self._print_communication_events_table(
-            fastest_all_comm_events, slowest_all_comm_events
-        )
-        
         # 4. 检查kernel名称顺序一致性
         fastest_kernel_names = [event.name for event in fastest_all_comm_events]
         slowest_kernel_names = [event.name for event in slowest_all_comm_events]
         
         print(f"    最快卡通信kernel序列: {fastest_kernel_names}")
         print(f"    最慢卡通信kernel序列: {slowest_kernel_names}")
+        
+        # 3. 打印通信事件对比表格
+        consistency_check_passed = self._print_communication_events_table(
+            fastest_all_comm_events, slowest_all_comm_events
+        )
+        
         
         sequence_consistent = (fastest_kernel_names == slowest_kernel_names)
         if not sequence_consistent:
@@ -2233,7 +2337,8 @@ class CommunicationAnalyzer:
         return sorted(executor_folders)
     
     def _extract_communication_data(self, executor_folders: List[str], step: Optional[int] = None, 
-                                   kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL") -> Dict[int, Dict[int, List[float]]]:
+                                   kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL",
+                                   target_card_indices: Optional[List[int]] = None) -> Dict[int, Dict[int, List[float]]]:
         """
         提取通信数据
         
@@ -2241,6 +2346,7 @@ class CommunicationAnalyzer:
             executor_folders: executor文件夹列表
             step: 指定要分析的step
             kernel_prefix: 通信kernel前缀
+            target_card_indices: 指定要提取的card索引列表，如果为None则提取所有
             
         Returns:
             Dict[int, Dict[int, List[float]]]: 通信数据 {step: {card_idx: [durations]}}
@@ -2252,14 +2358,17 @@ class CommunicationAnalyzer:
         print(f"  - Executor文件夹数量: {len(executor_folders)}")
         print(f"  - 目标step: {step}")
         print(f"  - Kernel前缀: {kernel_prefix}")
+        if target_card_indices:
+            print(f"  - 目标Card索引: {target_card_indices}")
         
         for executor_folder in executor_folders:
-            print(f"  处理executor文件夹: {executor_folder}")
+            # 如果指定了target_card_indices，我们可以只查找特定模式的文件名，或者在遍历时过滤
+            # 这里为了简单，还是遍历文件但过滤
             
             # 查找JSON文件
             json_files = glob.glob(os.path.join(executor_folder, "*.json"))
             total_json_files += len(json_files)
-            print(f"    找到 {len(json_files)} 个JSON文件")
+            # print(f"    找到 {len(json_files)} 个JSON文件")
             
             for json_file in json_files:
                 step_num, card_idx = self._parse_json_filename(os.path.basename(json_file))
@@ -2270,7 +2379,12 @@ class CommunicationAnalyzer:
                 if step is not None and step_num != step:
                     continue
                 
+                # 过滤目标card
+                if target_card_indices is not None and card_idx not in target_card_indices:
+                    continue
+                
                 # 提取通信持续时间
+                print(f"    正在处理 {json_file}")
                 durations = self._extract_communication_durations(json_file, kernel_prefix)
                 
                 if durations:
@@ -2333,7 +2447,7 @@ class CommunicationAnalyzer:
             
             # 转换为浮点数，最多取6个
             durations = [float(match) for match in matches[:6]]
-            
+            print(f"    durations 结果: {durations}")
             return durations
             
         except Exception as e:
