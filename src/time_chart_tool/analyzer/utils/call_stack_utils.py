@@ -91,7 +91,7 @@ def normalize_call_stack(call_stack: List[str], coarse_call_stack: bool = False)
         for frame in call_stack:
             # 去掉内存地址信息（如 object at 0x7f6f0a70efc0）
             # 匹配并去掉 "object at 0x..." 这样的内存地址信息
-            cleaned_frame = re.sub(r' object at 0x[0-9a-fA-F]+>', '>', frame)
+            cleaned_frame = re.sub(r' object at 0x[0-9a-fA-F]+', '', frame)
             normalized.append(cleaned_frame)
         # print(f"DEBUG normalize_call_stack: 返回标准化后的call_stack长度={len(normalized)}")
         return CallStackWrapper(normalized)

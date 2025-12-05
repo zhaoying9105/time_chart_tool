@@ -26,7 +26,7 @@ pip3 install -e .
 - Python >= 3.7
 - pandas >= 1.3.0
 - openpyxl >= 3.0.0
-- matplotlib >= 3.5.0
+- matplotlib == 3.0.0
 
 ## 使用方法
 

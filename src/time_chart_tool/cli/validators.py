@@ -43,7 +43,7 @@ def validate_aggregation_fields(aggregation_spec: str) -> List[str]:
     return fields
 
 
-def parse_show_options(show_spec: str) -> Dict[str, bool]:
+def parse_show_options(show_spec: str) -> List[str]:
     """
     解析show选项
     
@@ -51,28 +51,17 @@ def parse_show_options(show_spec: str) -> Dict[str, bool]:
         show_spec: show参数字符串，逗号分隔
         
     Returns:
-        Dict[str, bool]: 各show选项的开关状态
+        List[str]: 启用的show选项列表
     """
     valid_show_options = {
         'dtype', 'shape', 'kernel-names', 'kernel-duration', 
         'timestamp', 'readable-timestamp', 'kernel-timestamp', 'name', 'call_stack', 'stream'
     }
     
-    show_options = {
-        'dtype': False,
-        'shape': False, 
-        'kernel_names': False,
-        'kernel_duration': False,
-        'timestamp': False,
-        'readable_timestamp': False,
-        'kernel_timestamp': False,
-        'name': False,
-        'call_stack': False,
-        'stream': False
-    }
+    show_attributes = []
     
     if not show_spec or not show_spec.strip():
-        return show_options
+        return show_attributes
     
     # 解析逗号分隔的选项
     show_args = [arg.strip() for arg in show_spec.split(',')]
@@ -84,20 +73,20 @@ def parse_show_options(show_spec: str) -> Dict[str, bool]:
             raise ValueError(f"不支持的show选项: {arg}。支持的选项: {', '.join(sorted(valid_show_options))}")
         
         if arg == 'kernel-names':
-            show_options['kernel_names'] = True
+            show_attributes.append('kernel_names')
         elif arg == 'kernel-duration':
-            show_options['kernel_duration'] = True
+            show_attributes.append('kernel_duration')
         elif arg == 'readable-timestamp':
-            show_options['readable_timestamp'] = True
+            show_attributes.append('readable_timestamp')
         elif arg == 'kernel-timestamp':
-            show_options['kernel_timestamp'] = True
+            show_attributes.append('kernel_timestamp')
         else:
-            show_options[arg] = True
+            show_attributes.append(arg)
     
-    return show_options
+    return show_attributes
 
 
-def parse_compare_options(compare_spec: str) -> Dict[str, bool]:
+def parse_compare_options(compare_spec: str) -> List[str]:
     """
     解析compare选项
     
@@ -105,21 +94,16 @@ def parse_compare_options(compare_spec: str) -> Dict[str, bool]:
         compare_spec: compare参数字符串，逗号分隔
         
     Returns:
-        Dict[str, bool]: 各compare选项的开关状态
+        List[str]: 启用的compare选项列表
     """
     valid_compare_options = {
         'dtype', 'shape', 'name', 'kernel_name'
     }
     
-    compare_options = {
-        'dtype': False,
-        'shape': False,
-        'name': False,
-        'kernel_name': False
-    }
+    compare_attributes = []
     
     if not compare_spec or not compare_spec.strip():
-        return compare_options
+        return compare_attributes
     
     # 解析逗号分隔的选项
     compare_args = [arg.strip() for arg in compare_spec.split(',')]
@@ -130,9 +114,9 @@ def parse_compare_options(compare_spec: str) -> Dict[str, bool]:
         if arg not in valid_compare_options:
             raise ValueError(f"不支持的compare选项: {arg}。支持的选项: {', '.join(sorted(valid_compare_options))}")
         
-        compare_options[arg] = True
+        compare_attributes.append(arg)
     
-    return compare_options
+    return compare_attributes
 
 
 def validate_filter_options(include_op: str = None, exclude_op: str = None, 

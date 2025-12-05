@@ -6,15 +6,12 @@ import time
 from pathlib import Path
 
 from ..validators import parse_show_options
-from ...analyzer import Analyzer
+from ...analyzer import analyze_communication_performance
 
 
 class CommCommand:
     """通信分析命令处理器"""
-    
-    def __init__(self):
-        self.analyzer = Analyzer()
-    
+
     def run(self, args) -> int:
         """运行通信性能分析"""
         print(f"=== 通信性能分析 ===")
@@ -57,7 +54,7 @@ class CommCommand:
             start_time = time.time()
             
             # 运行通信性能分析
-            generated_files = self.analyzer.analyze_communication_performance(
+            generated_files = analyze_communication_performance(
                 pod_dir=str(pod_path),
                 step=args.step,
                 comm_idx=args.comm_idx,
@@ -66,14 +63,8 @@ class CommCommand:
                 kernel_prefix=args.kernel_prefix,
                 prev_kernel_pattern=args.prev_kernel_pattern,
                 output_dir=str(output_dir),
-                show_dtype=show_options['dtype'],
-                show_shape=show_options['shape'],
-                show_kernel_names=show_options['kernel_names'],
-                show_kernel_duration=show_options['kernel_duration'],
-                show_timestamp=show_options['timestamp'],
-                show_readable_timestamp=show_options['readable_timestamp'],
-                show_kernel_timestamp=show_options['kernel_timestamp'],
-                show_call_stack=show_options['call_stack']
+                show_timestamp='timestamp' in show_options,
+                show_readable_timestamp='readable_timestamp' in show_options,
             )
             
             total_time = time.time() - start_time

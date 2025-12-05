@@ -9,15 +9,14 @@ from typing import List
 from ..validators import validate_aggregation_fields, parse_show_options, validate_file, \
     validate_filter_options, parse_filter_patterns
 from ..file_utils import parse_file_paths
-from ...analyzer import Analyzer
+from ...analyzer import analyze_single_file_with_glob
 
 
 class AnalysisCommand:
     """分析命令处理器"""
     
     def __init__(self):
-        # analyzer 将在 run 方法中创建，因为需要根据参数设置
-        self.analyzer = None
+        pass
     
     def run(self, args) -> int:
         """运行单个或多个文件分析"""
@@ -26,14 +25,11 @@ class AnalysisCommand:
         print(f"标签: {args.label}")
         print(f"聚合字段: {args.aggregation}")
         print(f"显示选项: {args.show if args.show else '无'}")
-        print(f"打印markdown表格: {args.print_markdown}")
         print(f"输出格式: {args.output_format}")
         print(f"输出目录: {args.output_dir}")
         if hasattr(args, 'max_files') and args.max_files:
             print(f"最大文件数: {args.max_files}")
             print(f"随机种子: {getattr(args, 'random_seed', 42)}")
-        if hasattr(args, 'call_stack_source'):
-            print(f"调用栈来源: {args.call_stack_source}")
         if hasattr(args, 'step_idx') and args.step_idx is not None:
             print(f"Step索引: {args.step_idx}")
         print()
@@ -48,8 +44,8 @@ class AnalysisCommand:
         
         # 解析show选项
         try:
-            show_options = parse_show_options(args.show)
-            print(f"显示选项: {show_options}")
+            show_attributes = parse_show_options(args.show)
+            print(f"显示选项: {show_attributes}")
         except ValueError as e:
             print(f"错误: 显示选项解析失败 - {e}")
             return 1
@@ -79,8 +75,8 @@ class AnalysisCommand:
         
         # 检查聚合字段和显示选项是否重复
         show_fields = set()
-        for option, enabled in show_options.items():
-            if enabled and option in ['dtype', 'shape']:
+        for option in show_attributes:
+            if option in ['dtype', 'shape']:
                 show_fields.add(option)
         
         aggregation_fields_set = set(aggregation_fields)
@@ -119,34 +115,23 @@ class AnalysisCommand:
         try:
             start_time = time.time()
             
-            # 创建 Analyzer 实例，传递 coarse_call_stack 参数
+            # 获取 coarse_call_stack 参数
             coarse_call_stack = getattr(args, 'coarse_call_stack', False)
-            self.analyzer = Analyzer(step_idx=getattr(args, 'step_idx', None), coarse_call_stack=coarse_call_stack)
             
-            # 使用新的分析流程 - 支持多文件独立解析和聚合
-            generated_files = self.analyzer.analyze_single_file_with_glob(
+            # 使用新的分析流程 - 直接调用函数
+            generated_files = analyze_single_file_with_glob(
                 file_paths=file_paths,
-                aggregation_spec=args.aggregation,
-                show_dtype=show_options['dtype'],
-                show_shape=show_options['shape'],
-                show_kernel_names=show_options['kernel_names'],
-                show_kernel_duration=show_options['kernel_duration'],
-                show_timestamp=show_options['timestamp'],
-                show_readable_timestamp=show_options['readable_timestamp'],
-                show_kernel_timestamp=show_options['kernel_timestamp'],
-                show_name=show_options['name'],
-                show_call_stack=show_options['call_stack'],
-                show_stream=show_options['stream'],
+                aggregation_spec=aggregation_fields,
+                show_attributes=show_attributes,
                 output_dir=str(output_dir),
                 label=args.label,
-                print_markdown=args.print_markdown,
                 include_op_patterns=include_op_patterns,
                 exclude_op_patterns=exclude_op_patterns,
                 include_kernel_patterns=include_kernel_patterns,
                 exclude_kernel_patterns=exclude_kernel_patterns,
-                call_stack_source=args.call_stack_source,
                 not_show_fwd_bwd_type=getattr(args, 'not_show_fwd_bwd_type', False),
                 step_idx=getattr(args, 'step_idx', None),
+                coarse_call_stack=coarse_call_stack
             )
             
             total_time = time.time() - start_time

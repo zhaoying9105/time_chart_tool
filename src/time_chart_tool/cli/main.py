@@ -48,6 +48,7 @@ def parse_arguments():
     analysis_parser = subparsers.add_parser('analysis', help='分析单个或多个 JSON 文件')
     analysis_parser.add_argument('file', help='要分析的 JSON 文件路径，支持 glob 模式 (如: "*.json" 或 "dir/*.json")')
     analysis_parser.add_argument('--label', default='single_file', help='文件标签 (默认: single_file)')
+    analysis_parser.add_argument('--log-level', default='DEBUG', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help='日志级别 (默认: INFO)')
     analysis_parser.add_argument('--aggregation', default='name',
                                 help='聚合字段组合，使用逗号分隔的字段组合\n'
                                      '支持的字段: call_stack, name, shape, dtype, fwd_bwd_type\n'
@@ -65,8 +66,6 @@ def parse_arguments():
                                      '  name: 显示cpu_op名称\n'
                                      '  stream: 显示stream信息\n'
                                      '示例: --show "dtype,shape,kernel-duration,name,stream"')
-    analysis_parser.add_argument('--print-markdown', action='store_true', 
-                                help='是否在stdout中以markdown格式打印表格 (默认: False)')
     analysis_parser.add_argument('--output-format', default='json,xlsx', 
                                 choices=['json', 'xlsx', 'json,xlsx'],
                                 help='输出格式 (默认: json,xlsx)')
@@ -152,10 +151,6 @@ def parse_arguments():
                                     '  name: 显示cpu_op名称\n'
                                     '  stream: 显示stream信息\n'
                                     '示例: --show "dtype,shape,kernel-duration,name,stream"')
-    compare_parser.add_argument('--print-markdown', action='store_true', 
-                               help='是否在stdout中以markdown格式打印表格 (默认: False)')
-    compare_parser.add_argument('--special-matmul', action='store_true',
-                               help='是否进行特殊的 matmul 分析 (默认: False)')
     compare_parser.add_argument('--compare', type=str, default='',
                                help='比较选项，使用逗号分隔的选项:\n'
                                     '  dtype: 比较数据类型\n'
