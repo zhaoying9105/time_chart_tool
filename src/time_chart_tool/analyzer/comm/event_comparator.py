@@ -5,11 +5,7 @@ from datetime import datetime
 from .event_aligner import EventAligner
 
 # 导入必要的类型
-try:
-    from ...parser.profiler_data import ActivityEvent
-except ImportError:
-    # Fallback for when running as a standalone script or in different context
-    pass
+from ...parser.profiler_data import ActivityEvent
 
 def _readable_timestamp_to_microseconds(readable_timestamp: str) -> float:
     """将readable_timestamp转换为微秒时间戳"""

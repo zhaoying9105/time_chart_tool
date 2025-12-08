@@ -3,14 +3,10 @@ import os
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Union
-import logging
 
 from ...parser import parse_profiler_data
-from ...models import ActivityEvent
 
 from .utils import (
-    _readable_timestamp_to_microseconds,
-    _calculate_time_diff_readable,
     _extract_events_in_range_with_intersection,
     _get_analysis_start_time,
     _get_analysis_end_time,
