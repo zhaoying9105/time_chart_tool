@@ -262,6 +262,131 @@ def _set_fwd_bwd_type_from_call_stack(event: ActivityEvent) -> ActivityEvent:
     return event
 
 
+def _propagate_fwd_call_stack_to_bwd(events: List[ActivityEvent], call_stack_trees: Dict[Tuple[int, int], Any]) -> List[ActivityEvent]:
+    """
+    将 fwd 的 call stack 传播给 bwd
+    Logic: fwdbwd event -> ts -> got event ->  形成 fwd event  map to bwd event -> fwd event  call stack copy to bwd event
+    """
+    print("=== Stage 1.1.2: Propagate fwd call stack to bwd ===")
+    
+    # 1. 建立 ts -> cpu_op event 的映射 (只包含有 call stack 的 cpu_op)
+    # 这样可以通过 timestamp 快速找到对应的 cpu_op
+    ts_to_cpu_op = {e.ts: e for e in events if e.cat == 'cpu_op'}
+
+    # 2. 处理 fwdbwd events，找到 fwd 和 bwd 的对应关系
+    # fwdbwd events 是用来连接 fwd 和 bwd 的桥梁
+    # 它们成对出现，拥有相同的 id
+    # ph='s' 是 fwd start, ph='f' 是 bwd start
+    fwdbwd_events = [e for e in events if e.cat == 'fwdbwd']
+    
+    # key: id
+    # value: { 'fwd_ts': float, 'bwd_ts': float }
+    flow_map = defaultdict(dict)
+    
+    for e in fwdbwd_events:
+        if e.id is None: continue
+        if e.ph == 's':
+            flow_map[e.id]['fwd_ts'] = e.ts
+        elif e.ph == 'f':
+            flow_map[e.id]['bwd_ts'] = e.ts
+            
+    # 3. 构建 fwd_event -> bwd_event 的映射
+    # 只有当 fwd_ts 和 bwd_ts 都存在，且都能在 ts_to_cpu_op 中找到对应的 event 时，才建立映射
+    # 使用 list 存储 pairs，避免 unhashable type: 'ActivityEvent' 错误
+    fwd_bwd_pairs = []
+    
+    for _, flow in flow_map.items():
+        fwd_ts = flow.get('fwd_ts')
+        bwd_ts = flow.get('bwd_ts')
+        
+        if fwd_ts is not None and bwd_ts is not None:
+            fwd_op = ts_to_cpu_op.get(fwd_ts)
+            bwd_op = ts_to_cpu_op.get(bwd_ts)
+            
+            if fwd_op and bwd_op and getattr(fwd_op, 'call_stack', None):
+                fwd_bwd_pairs.append((fwd_op, bwd_op))
+
+    print(f"Found {len(fwd_bwd_pairs)} fwd-bwd pairs")
+
+    # 4. 复制 call stack 并传播
+    count_propagated = 0
+    bwd_ops_to_update_children = []
+    
+    for fwd_op, bwd_op in fwd_bwd_pairs:
+        # Copy call stack
+        bwd_op.call_stack = fwd_op.call_stack
+        bwd_op.fwd_bwd_type = 'bwd'
+        bwd_ops_to_update_children.append(bwd_op)
+        count_propagated += 1
+        
+    print(f"Propagated call stack to {count_propagated} bwd events")
+
+    # 5. 将 bwd event 的 call stack 传播给其子孙节点
+    if bwd_ops_to_update_children and call_stack_trees:
+        _propagate_stack_to_children(bwd_ops_to_update_children, call_stack_trees)
+        
+    return events
+
+def _propagate_stack_to_children(parent_events: List[ActivityEvent], call_stack_trees: Dict[Tuple[int, int], Any]):
+    """
+    将父节点的 call stack 传播给子孙节点
+    """
+    # 1. 建立 event_id 到 node 的映射，以便快速找到 parent_events 对应的 nodes
+    # 由于 call_stack_trees 是按 (pid, tid) 分组的，我们需要遍历查找
+    
+    # 优化：我们只关心 parent_events 涉及的 (pid, tid)
+    involved_pid_tids = set((e.pid, e.tid) for e in parent_events)
+    
+    # 建立 event_id -> event 的映射，用于快速查找 parent event
+    # 注意：我们需要使用 create_event_id 来匹配
+    from ...utils.event_utils import create_event_id
+    parent_event_ids = set(create_event_id(e) for e in parent_events)
+    
+    # 遍历相关的 trees
+    count_children_updated = 0
+    
+    for pid_tid in involved_pid_tids:
+        if pid_tid in call_stack_trees:
+            root = call_stack_trees[pid_tid]
+            # 遍历树找到 parent nodes
+            nodes_to_process = [root]
+            while nodes_to_process:
+                node = nodes_to_process.pop()
+                if node.event.name != "ROOT": # Skip virtual root
+                    node_event_id = create_event_id(node.event)
+                    if node_event_id in parent_event_ids:
+                        # 这是一个 bwd root node，它的 event 已经被更新了 call stack
+                        # 我们需要把这个 call stack 传播给它的所有子孙
+                        # 注意：node.event 引用的是 events 列表中的同一个对象吗？
+                        # attach_call_stacks_to_events 中似乎是创建了新对象或者是修改了属性
+                        # 我们假设 node.event 和 parent_events 中的对象是对应的（通过引用或ID）
+                        
+                        # 获取正确的 call stack (从 parent_events 中获取，或者直接从 node.event 获取如果已经更新)
+                        # 在 _propagate_fwd_call_stack_to_bwd 中我们直接修改了 bwd_op.call_stack
+                        # 如果 node.event 就是那个 bwd_op，那么直接用 node.event.call_stack
+                        
+                        # 验证 node.event 是否有 call stack
+                        if hasattr(node.event, 'call_stack') and node.event.call_stack:
+                             count_children_updated += _apply_stack_to_descendants(node, node.event.call_stack)
+                    
+                nodes_to_process.extend(node.children)
+                
+    print(f"Propagated call stack to {count_children_updated} children events")
+
+def _apply_stack_to_descendants(node: Any, call_stack: List[str]) -> int:
+    """递归将 stack 应用于所有子孙节点"""
+    count = 0
+    stack = list(node.children)
+    while stack:
+        child = stack.pop()
+        # 更新子节点的 call stack
+        child.event.call_stack = call_stack
+        child.event.fwd_bwd_type = 'bwd' # 标记为 bwd
+        count += 1
+        stack.extend(child.children)
+    return count
+
+
 def select_representative_kernel_events(
     kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]]
 ) -> Dict[Union[int, str], List[ActivityEvent]]:
@@ -317,12 +442,8 @@ def postprocessing(events, call_stack_trees,base_time_nanoseconds,
                              include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None,
                              coarse_call_stack: bool = False) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
     """
-    Stage 1: 数据后处理 (Legacy wrapper)
+    Stage 1: 数据后处理
     """
-    # 1.0 拆分数据
-    # events = events
-    # call_stack_trees = getattr(data, 'call_stack_trees', None)
-    # base_time_nanoseconds = getattr(data, 'base_time_nanoseconds', None)
 
     # 1.-2 计算可读时间戳
     events = calculate_readable_timestamps(events, base_time_nanoseconds)
@@ -336,6 +457,9 @@ def postprocessing(events, call_stack_trees,base_time_nanoseconds,
 
     # 1.1.1 Set fwd_bwd_type from call stack
     events = [_set_fwd_bwd_type_from_call_stack(e) for e in events]
+
+    # 1.1.2 Propagate fwd call stack to bwd
+    events = _propagate_fwd_call_stack_to_bwd(events, call_stack_trees)
 
     # 1.2 分类
     cpu_events, kernel_events = classify_events_by_external_id(events)

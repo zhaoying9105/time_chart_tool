@@ -1,11 +1,10 @@
 
-import pandas as pd
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 from .event_aligner import EventAligner
 
 # 导入必要的类型
-from ...parser.profiler_data import ActivityEvent
+from ...models import ActivityEvent
 
 def _readable_timestamp_to_microseconds(readable_timestamp: str) -> float:
     """将readable_timestamp转换为微秒时间戳"""
