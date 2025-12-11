@@ -29,7 +29,7 @@ def validate_aggregation_fields(aggregation_spec: str) -> List[str]:
         fields = [aggregation_spec.strip()]
     
     # 验证字段
-    valid_fields = {'call_stack', 'name', 'shape', 'dtype', 'op_index', 'fwd_bwd_type'}
+    valid_fields = {'call_stack', 'name', 'shape', 'dtype', 'fwd_bwd_type', 'pid', 'tid', 'op_index'}
     for field in fields:
         if not field:
             raise ValueError("聚合字段不能为空字符串")
@@ -39,6 +39,10 @@ def validate_aggregation_fields(aggregation_spec: str) -> List[str]:
     # 检查字段重复
     if len(fields) != len(set(fields)):
         raise ValueError("聚合字段不能重复")
+    
+    # 检查 op_index 约束：如果有 op_index，必须是唯一的聚合字段
+    if 'op_index' in fields and len(fields) > 1:
+        raise ValueError("当使用 op_index 聚合时，不能同时使用其他聚合字段")
     
     return fields
 
@@ -55,7 +59,8 @@ def parse_show_options(show_spec: str) -> List[str]:
     """
     valid_show_options = {
         'dtype', 'shape', 'kernel-names', 'kernel-duration', 
-        'timestamp', 'readable-timestamp', 'kernel-timestamp', 'name', 'call_stack', 'stream'
+        'timestamp', 'readable-timestamp', 'kernel-timestamp', 'name', 'call_stack', 'stream',
+        'pid', 'tid', 'fwd_bwd_type', 'op_index'
     }
     
     show_attributes = []

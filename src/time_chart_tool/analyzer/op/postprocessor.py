@@ -399,6 +399,26 @@ def select_representative_kernel_events(
     return result
 
 
+def sort_cpu_events_and_assign_index(cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]]) -> None:
+    """
+    对所有 CPU 事件按时间戳从小到大排序，并分配 op_index
+    注意：这是原地修改
+    """
+    # 收集所有事件
+    all_events = []
+    for events in cpu_events_by_external_id.values():
+        all_events.extend(events)
+    
+    # 按时间戳排序 (从小到大)
+    all_events.sort(key=lambda x: x.ts)
+    
+    # 分配 op_index
+    for idx, event in enumerate(all_events):
+        event.op_index = idx
+        
+    print(f"已为 {len(all_events)} 个 CPU 事件分配 op_index (0 ~ {len(all_events)-1})")
+
+
 def filter_and_select_events(cpu_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]], 
                            kernel_events_by_external_id: Dict[Union[int, str], List[ActivityEvent]],
                            include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None,
@@ -409,6 +429,19 @@ def filter_and_select_events(cpu_events_by_external_id: Dict[Union[int, str], Li
     """
     print("=== Stage 1.4: 过滤并选择代表事件 ===")
     
+    # 0. 排序并分配 op_index (在任何过滤之前)
+    sort_cpu_events_and_assign_index(cpu_events_by_external_id)
+    
+    # 统一进行 call stack 标准化处理
+    # 这确保了后续步骤（包括聚合）使用的是标准化后的 call stack
+    if cpu_events_by_external_id:
+        print(f"标准化 call stacks (coarse={coarse_call_stack})...")
+        for events in cpu_events_by_external_id.values():
+            for event in events:
+                if event.call_stack:
+                    wrapper = normalize_call_stack(event.call_stack, coarse_call_stack=coarse_call_stack)
+                    event.call_stack = wrapper.call_stack
+
     if include_op_patterns or exclude_op_patterns or include_kernel_patterns or exclude_kernel_patterns:
         print("根据过滤模式过滤事件...")
         cpu_events_by_external_id = filter_cpu_events_by_patterns(

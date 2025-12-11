@@ -14,7 +14,6 @@ setup(
     install_requires=[
         "pandas>=1.3.0",
         "openpyxl>=3.0.0",
-        "matplotlib==3.0.0",
     ],
     entry_points={
         "console_scripts": [

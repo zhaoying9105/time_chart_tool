@@ -57,8 +57,7 @@ def _process_single_file_internal(args):
         
         # 3. 聚合
         aggregated = data_aggregation(
-            cpu_events, kernel_events, aggregation_spec,
-            coarse_call_stack
+            cpu_events, kernel_events, aggregation_spec
         )
         
         if not aggregated:

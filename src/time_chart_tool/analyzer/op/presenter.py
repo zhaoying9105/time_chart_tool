@@ -149,6 +149,15 @@ def _present_single_file(data: Dict[str,AggregatedData],
             
         if not not_show_fwd_bwd_type:
             row['fwd_bwd_type'] = getattr(cpu_event, 'fwd_bwd_type', 'none')
+
+        if 'pid' in show_attributes:
+            row['pid'] = getattr(cpu_event, 'pid', 'none')
+            
+        if 'tid' in show_attributes:
+            row['tid'] = getattr(cpu_event, 'tid', 'none')
+            
+        if 'op_index' in show_attributes:
+            row['op_index'] = getattr(cpu_event, 'op_index', '')
             
         if 'call_stack' in show_attributes and 'call_stack' not in row:
             # 如果聚合键中不包含call_stack，但要求显示
@@ -346,6 +355,15 @@ def _present_multiple_files(data: Dict[str, Any],
                     
                     if not not_show_fwd_bwd_type:
                         row[f'{label}_fwd_bwd_type'] = getattr(cpu_event, 'fwd_bwd_type', 'none')
+
+                    if 'pid' in show_attributes:
+                        row[f'{label}_pid'] = getattr(cpu_event, 'pid', 'none')
+                        
+                    if 'tid' in show_attributes:
+                        row[f'{label}_tid'] = getattr(cpu_event, 'tid', 'none')
+                        
+                    if 'op_index' in show_attributes:
+                        row[f'{label}_op_index'] = getattr(cpu_event, 'op_index', '')
                         
                     if 'call_stack' in show_attributes and 'call_stack' not in row:
                         call_stack = cpu_event.call_stack
@@ -368,6 +386,12 @@ def _present_multiple_files(data: Dict[str, Any],
                         row[f'{label}_shape'] = ''
                     if not not_show_fwd_bwd_type:
                         row[f'{label}_fwd_bwd_type'] = ''
+                    if 'pid' in show_attributes:
+                        row[f'{label}_pid'] = ''
+                    if 'tid' in show_attributes:
+                        row[f'{label}_tid'] = ''
+                    if 'op_index' in show_attributes:
+                        row[f'{label}_op_index'] = ''
                     if 'call_stack' in show_attributes and 'call_stack' not in row:
                         row[f'{label}_call_stack'] = ''
                     if 'stream' in show_attributes:
@@ -406,6 +430,12 @@ def _present_multiple_files(data: Dict[str, Any],
                     row[f'{label}_shape'] = 'N/A'
                 if not not_show_fwd_bwd_type:
                     row[f'{label}_fwd_bwd_type'] = 'N/A'
+                if 'pid' in show_attributes:
+                    row[f'{label}_pid'] = 'N/A'
+                if 'tid' in show_attributes:
+                    row[f'{label}_tid'] = 'N/A'
+                if 'op_index' in show_attributes:
+                    row[f'{label}_op_index'] = 'N/A'
                 if 'call_stack' in show_attributes and 'call_stack' not in row:
                     row[f'{label}_call_stack'] = 'N/A'
                 if 'stream' in show_attributes:

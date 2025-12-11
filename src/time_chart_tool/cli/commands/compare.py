@@ -80,15 +80,13 @@ class CompareCommand:
             print(f"排除kernel模式: {exclude_kernel_patterns}")
         
         # 检查聚合字段和显示选项是否重复
-        show_fields = set()
-        for option in show_attributes:
-            if option in ['dtype', 'shape']:
-                show_fields.add(option)
-        
         aggregation_fields_set = set(aggregation_fields)
-        overlap = show_fields.intersection(aggregation_fields_set)
+        show_attributes_set = set(show_attributes)
+        overlap = show_attributes_set.intersection(aggregation_fields_set)
         if overlap:
             print(f"警告: 聚合字段 {list(overlap)} 与显示选项重复，将跳过重复的显示列")
+            show_attributes = [attr for attr in show_attributes if attr not in overlap]
+            print(f"修正后的显示选项: {show_attributes}")
         
         # 解析文件列表
         file_labels = []

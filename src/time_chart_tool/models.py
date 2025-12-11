@@ -22,6 +22,7 @@ class ActivityEvent:
     stream_id: Optional[int] = None
     readable_timestamp: Optional[str] = None
     fwd_bwd_type = 'none'
+    op_index: Optional[int] = None
     call_stack_from_tree: Optional[List[str]] = None
     
     def __post_init__(self):

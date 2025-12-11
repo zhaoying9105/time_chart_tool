@@ -284,15 +284,6 @@ def compare_events_by_time_sequence(fastest_events_by_external_id: Dict[str, Lis
     
     print(f"成功比较了 {len(comparison_rows)} 个CPU events")
     
-    # 5. 可视化对齐结果
-    print("\n=== 生成对齐结果可视化 ===")
-    visualization_files = event_aligner.visualize_alignment_results(
-        fastest_cpu_events, slowest_cpu_events,
-        aligned_fastest, aligned_slowest, alignment_info,
-        output_dir, step, comm_idx
-    )
-    print(f"已生成 {len(visualization_files)} 个可视化文件")
-    
     # 对齐质量评估
     print("\n=== 对齐质量评估 ===")
     total_aligned = len(comparison_rows)

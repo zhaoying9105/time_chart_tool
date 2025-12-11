@@ -49,7 +49,7 @@ def parse_arguments():
     analysis_parser.add_argument('file', help='要分析的 JSON 文件路径，支持 glob 模式 (如: "*.json" 或 "dir/*.json")')
     analysis_parser.add_argument('--label', default='single_file', help='文件标签 (默认: single_file)')
     analysis_parser.add_argument('--log-level', default='DEBUG', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help='日志级别 (默认: INFO)')
-    analysis_parser.add_argument('--aggregation', default='name',
+    analysis_parser.add_argument('--aggregation', default='',
                                 help='聚合字段组合，使用逗号分隔的字段组合\n'
                                      '支持的字段: call_stack, name, shape, dtype, fwd_bwd_type\n'
                                      '示例: "name" 或 "name,shape" 或 "call_stack,name" 或 "name,shape,dtype" 或 "fwd_bwd_type,name"\n'
@@ -134,7 +134,7 @@ def parse_arguments():
                                     '  多文件: "file1.json,file2.json,file3.json":label\n'
                                     '  目录: dir/:label (自动查找所有*.json文件)\n'
                                     '  通配符: "dir/*.json":label')
-    compare_parser.add_argument('--aggregation', default='name',
+    compare_parser.add_argument('--aggregation', default='',
                                help='聚合字段组合，使用逗号分隔的字段组合\n'
                                     '支持的字段: call_stack, name, shape, dtype, fwd_bwd_type\n'
                                     '示例: "name" 或 "name,shape" 或 "call_stack,name" 或 "name,shape,dtype" 或 "fwd_bwd_type,name"\n'
