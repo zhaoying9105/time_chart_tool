@@ -17,8 +17,7 @@ def _present_single_file(data: Dict[str,AggregatedData],
                        show_attributes: List[str],
                        aggregation_spec: List[str] = ['name'],
                        label: Optional[str] = None,
-                       per_rank_stats: Optional[Dict[str, Dict[str, int]]] = None,
-                       not_show_fwd_bwd_type: bool = False) -> List[Path]:
+                       per_rank_stats: Optional[Dict[str, Dict[str, int]]] = None) -> List[Path]:
     """
     展示单文件数据
     
@@ -147,7 +146,7 @@ def _present_single_file(data: Dict[str,AggregatedData],
         if 'shape' in show_attributes:
             row['shape'] = args.get('Input Dims', [])
             
-        if not not_show_fwd_bwd_type:
+        if 'fwd_bwd_type' in show_attributes:
             row['fwd_bwd_type'] = getattr(cpu_event, 'fwd_bwd_type', 'none')
 
         if 'pid' in show_attributes:
@@ -244,8 +243,7 @@ def _present_multiple_files(data: Dict[str, Any],
                           include_op_patterns: List[str] = None,
                           exclude_op_patterns: List[str] = None,
                           include_kernel_patterns: List[str] = None,
-                          exclude_kernel_patterns: List[str] = None,
-                          not_show_fwd_bwd_type: bool = False) -> List[Path]:
+                          exclude_kernel_patterns: List[str] = None) -> List[Path]:
     """
     展示多文件数据
     
@@ -353,7 +351,7 @@ def _present_multiple_files(data: Dict[str, Any],
                     if 'shape' in show_attributes:
                         row[f'{label}_shape'] = args.get('Input Dims', [])
                     
-                    if not not_show_fwd_bwd_type:
+                    if 'fwd_bwd_type' in show_attributes:
                         row[f'{label}_fwd_bwd_type'] = getattr(cpu_event, 'fwd_bwd_type', 'none')
 
                     if 'pid' in show_attributes:
@@ -384,7 +382,7 @@ def _present_multiple_files(data: Dict[str, Any],
                         row[f'{label}_dtype'] = ''
                     if 'shape' in show_attributes:
                         row[f'{label}_shape'] = ''
-                    if not not_show_fwd_bwd_type:
+                    if 'fwd_bwd_type' in show_attributes:
                         row[f'{label}_fwd_bwd_type'] = ''
                     if 'pid' in show_attributes:
                         row[f'{label}_pid'] = ''
@@ -428,7 +426,7 @@ def _present_multiple_files(data: Dict[str, Any],
                     row[f'{label}_dtype'] = 'N/A'
                 if 'shape' in show_attributes:
                     row[f'{label}_shape'] = 'N/A'
-                if not not_show_fwd_bwd_type:
+                if 'fwd_bwd_type' in show_attributes:
                     row[f'{label}_fwd_bwd_type'] = 'N/A'
                 if 'pid' in show_attributes:
                     row[f'{label}_pid'] = 'N/A'

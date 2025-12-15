@@ -97,7 +97,7 @@ python3 -m time_chart_tool comm --output-dir ./compiled_step_10040_bf16_all2all_
 - `TCDP_RING_ALLREDUCELL_SIMPLE`
 - `TCDP_RING_ALLREDUCE_SIMPLE`
 - `TCDP_RING_REDUCESCATTER_SIMPLE`
-- `TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL`
+- `TCDP_`
 
 ### 3. 单文件分析 (analysis)
 

@@ -78,53 +78,19 @@ def parse_arguments():
                                 help='包含的kernel名称模式，逗号分隔的字符串列表，支持正则表达式或通配符，亦可为简单子串 (与 --exclude-kernel 互斥)')
     analysis_parser.add_argument('--exclude-kernel', type=str, default=None,
                                 help='排除的kernel名称模式，逗号分隔的字符串列表，支持正则表达式或通配符，亦可为简单子串 (与 --include-kernel 互斥)')
-    analysis_parser.add_argument('--max-files', type=int, default=None,
-                                help='最多使用的文件数量，用于随机采样确保分析效率 (默认: 不限制)')
     analysis_parser.add_argument('--random-seed', type=int, default=42,
                                 help='随机采样的种子，确保结果可重现 (默认: 42)')
-    analysis_parser.add_argument('--call-stack-source', default='tree', choices=['args', 'tree'],
-                                help='调用栈来源选择:\n'
-                                     '  args: 从JSON的args字段中获取Call stack (默认)\n'
-                                     '  tree: 使用基于扫描线和线段树的算法生成调用栈\n'
-                                     '(默认: args)')
     analysis_parser.add_argument('--coarse-call-stack', action='store_true',
                                 help='使用粗糙的 call stack，去除模块名后缀 (如 Dense_10 -> Dense) (默认: False)')
-    analysis_parser.add_argument('--not-show-fwd-bwd-type', action='store_true',
-                                help='不显示fwd_bwd_type列，默认显示前向/后向传播类型列 (默认: False)')
-    analysis_parser.add_argument('--step-idx', type=int, default=None,
-                                help='指定要分析的step索引，如果不指定则分析所有step (默认: None)')
     
     # comm 命令 - 分析通信性能
     comm_parser = subparsers.add_parser('comm', help='分析分布式训练中的通信性能')
     comm_parser.add_argument('pod_dir', help='Pod文件夹路径，包含executor_trainer-runner_*_*_*格式的文件夹')
     comm_parser.add_argument('--step', type=int, help='指定要分析的step，如果不指定则分析所有step')
-    comm_parser.add_argument('--comm-idx', type=int, help='指定要分析的通信操作索引，如果不指定则分析所有通信操作')
-    comm_parser.add_argument('--fastest-card-idx', type=int, help='指定最快卡的索引，用于深度分析')
-    comm_parser.add_argument('--slowest-card-idx', type=int, help='指定最慢卡的索引，用于深度分析')
-    comm_parser.add_argument('--kernel-prefix', default='TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL', 
-                            help='要检测的通信kernel前缀 (默认: TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL)\n'
-                                 '支持的通信kernel前缀:\n'
-                                 '  - TCDP_ONESHOT_ALLREDUCELL_SIMPLE\n'
-                                 '  - TCDP_RING_ALLGATHER_SIMPLE\n'
-                                 '  - TCDP_RING_ALLREDUCELL_SIMPLE\n'
-                                 '  - TCDP_RING_ALLREDUCE_SIMPLE\n'
-                                 '  - TCDP_RING_REDUCESCATTER_SIMPLE\n'
-                                 '  - TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL')
-    comm_parser.add_argument('--prev-kernel-pattern', default='TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL_BF16_ADD', 
-                            help='上一个通信kernel的匹配模式，用于确定对比区间 (默认: TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL_BF16_ADD)')
+    comm_parser.add_argument('--kernel-prefix', default='TCDP_', 
+                            help='要检测的通信kernel前缀 (默认: TCDP_)\n'
+                                 '支持的通信kernel前缀:\n')
     comm_parser.add_argument('--output-dir', default='.', help='输出目录 (默认: 当前目录)')
-    comm_parser.add_argument('--show', type=str, default='',
-                            help='显示额外信息，使用逗号分隔的选项:\n'
-                                 '  dtype: 显示数据类型信息\n'
-                                 '  shape: 显示形状和步长信息\n'
-                                 '  kernel-names: 显示kernel名称\n'
-                                 '  kernel-duration: 显示kernel持续时间\n'
-                                 '  timestamp: 显示时间戳\n'
-                                 '  readable-timestamp: 显示可读时间戳\n'
-                                 '  kernel-timestamp: 显示kernel时间戳\n'
-                                 '  call_stack: 显示调用栈信息\n'
-                                 '  stream: 显示stream信息\n'
-                                 '示例: --show "dtype,shape,kernel-duration,call_stack,stream"')
     
     # compare 命令 - 分析多个文件并对比
     compare_parser = subparsers.add_parser('compare', help='分析多个 JSON 文件并对比')
@@ -176,15 +142,8 @@ def parse_arguments():
                                help='包含的kernel名称模式，逗号分隔的字符串列表，支持正则表达式 (与 --exclude-kernel 互斥)')
     compare_parser.add_argument('--exclude-kernel', type=str, default=None,
                                help='排除的kernel名称模式，逗号分隔的字符串列表，支持正则表达式 (与 --include-kernel 互斥)')
-    compare_parser.add_argument('--call-stack-source', default='tree', choices=['args', 'tree'],
-                               help='调用栈来源选择:\n'
-                                    '  args: 从JSON的args字段中获取Call stack (默认)\n'
-                                    '  tree: 使用基于扫描线和线段树的算法生成调用栈\n'
-                                    '(默认: args)')
     compare_parser.add_argument('--coarse-call-stack', action='store_true',
-                               help='使用粗糙的 call stack，去除模块名后缀 (如 Dense_10 -> Dense) (默认: False)')
-    compare_parser.add_argument('--not-show-fwd-bwd-type', action='store_true',
-                               help='不显示fwd_bwd_type列，默认显示前向/后向传播类型列 (默认: False)')
+                                help='使用粗糙的 call stack，去除模块名后缀 (如 Dense_10 -> Dense) (默认: False)')
     
     return parser.parse_args()
 

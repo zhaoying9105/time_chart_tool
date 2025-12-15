@@ -21,7 +21,7 @@ class CommunicationData:
     process_group_ranks: str
 
 def _extract_communication_data(executor_folders: List[str], step: Optional[int] = None, 
-                               kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL",
+                               kernel_prefix: str = "TCDP_",
                                target_card_indices: Optional[List[int]] = None) -> Dict[int, Dict[int, List[CommunicationData]]]:
     """
     提取通信数据
@@ -107,7 +107,7 @@ def _parse_json_filename(filename: str) -> Tuple[Optional[int], Optional[int]]:
     
     return None, None
 
-def _extract_communication_entries(json_file_path: str, kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL") -> List[CommunicationData]:
+def _extract_communication_entries(json_file_path: str, kernel_prefix: str = "TCDP_") -> List[CommunicationData]:
     """
     从JSON文件中提取指定通信kernel前缀的详细信息
     
@@ -121,44 +121,7 @@ def _extract_communication_entries(json_file_path: str, kernel_prefix: str = "TC
     try:
         with open(json_file_path, 'r', encoding='utf-8') as f:
             content = f.read()
-        
-        # 使用正则表达式匹配整个JSON对象块，这比只匹配duration更可靠，因为我们需要提取args中的字段
-        # 我们假设每个trace event是一个JSON对象，并且包含args字段
-        # 由于JSON文件可能很大，直接解析整个JSON可能比较慢，但这里为了准确提取args中的字段，
-        # 我们先用正则找到包含指定name的行或块，然后再尝试提取字段
-        
-        # 构造正则匹配整个JSON对象
-        # 这里的模式匹配 { "ph": "X", ... "name": "PREFIX...", ... } 这样的结构
-        # 注意：实际trace文件通常是一个大列表 [ ... ] 或每行一个JSON对象，或者是一个大的JSON对象包含 traceEvents
-        # 假设这里是标准的 trace event format，可能是个大列表
-        
-        # 由于文件内容可能很大，且格式可能是一个大JSON，我们尝试用正则查找特定的块
-        # 目标格式示例:
-        # { 
-        #   "ph": "X", "cat": "kernel", "name": "TCDP_ONESHOT_BROADCAST_SIMPLE_INT8_ADD", "pid": 0, "tid": 22, 
-        #   "ts": 5615513424760.622, "dur": 252.280, 
-        #   "args": { ... } 
-        # }
-        
-        # 使用正则查找所有包含指定前缀的 name 的 JSON 对象
-        # 我们先找到所有包含 name 的片段，然后向前后扩展找到完整的 {} 块
-        # 但由于嵌套结构（args也是{}），简单的正则匹配 {} 比较困难
-        # 考虑到通常 trace event 格式比较规范，我们可以尝试匹配关键字段
-        
         escaped_kernel_prefix = re.escape(kernel_prefix)
-        
-        # 这种复杂的匹配最好是先解析JSON，但如果文件太大，解析整个JSON会很慢
-        # 另一种方法是：假设文件格式是标准的 Chrome Trace Event Format，可能是一个包含 traceEvents 列表的 JSON
-        # 或者是一个 JSON 列表。
-        
-        # 让我们尝试解析整个JSON，如果文件不是特别巨大（比如几百MB），通常是可以接受的
-        # 如果文件非常大，我们可以考虑流式解析或正则优化
-        
-        # 鉴于之前的代码是用正则匹配，我们尝试改进正则来捕获我们需要的信息
-        # 注意：args 中的字段顺序可能不固定，而且可能包含嵌套的大括号
-        
-        # 方案：先用正则找到包含目标 name 的那个大括号块的大致位置
-        # 然后尝试解析那个块
         
         entries = []
         
@@ -203,19 +166,6 @@ def _extract_communication_entries(json_file_path: str, kernel_prefix: str = "TC
         except json.JSONDecodeError:
             # 如果直接解析失败（可能是截断的JSON或其他格式），回退到正则
             pass
-            
-        # 正则回退方案
-        # 匹配 name, ts, dur 以及 args 中的字段
-        # 这种方式对于 args 中的嵌套结构可能不太健壮，但可以作为备选
-        # 为了简化，我们假设 args 内容在一行或者格式比较紧凑
-        
-        # 查找所有包含指定 name 的 pattern
-        # 这是一个简化的正则，假设相关字段都在附近
-        # 注意：这只是一个非常粗略的提取，对于复杂嵌套可能不准确
-        
-        # 由于用户提供的示例中 args 包含嵌套的 extra 字典，且整个结构可能跨行
-        # 我们尝试用更复杂的正则或者简单的字符串查找
-        
         return []
         
     except Exception as e:

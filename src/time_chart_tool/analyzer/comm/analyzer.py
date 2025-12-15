@@ -10,12 +10,6 @@ from .excel_generator import (
     _generate_statistics_excel,
 )
 
-
-from .deep_analysis import (
-    _perform_deep_analysis,
-    _auto_select_comm_target
-)
-
 from .data_extractor import (
     _extract_communication_data,
 )
@@ -24,8 +18,8 @@ from .utils import _scan_executor_folders
 
 def analyze_communication_performance(pod_dir: str, step: Optional[int] = None, comm_idx: Optional[int] = None,
                                      fastest_card_idx: Optional[int] = None, slowest_card_idx: Optional[int] = None,
-                                     kernel_prefix: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL",
-                                     prev_kernel_pattern: str = "TCDP_TCDPALLCONNECTED_PXMMIXALLTOALLV_ALLTOALL_BF16_ADD",
+                                     kernel_prefix: str = "TCDP_",
+                                     prev_kernel_pattern: str = "TCDP__BF16_ADD",
                                      output_dir: str = ".",
                                      show_timestamp: bool = False, 
                                      show_readable_timestamp: bool = False) -> List[Path]:
@@ -87,43 +81,5 @@ def analyze_communication_performance(pod_dir: str, step: Optional[int] = None, 
         # 生成统计信息Excel
         stats_file = _generate_statistics_excel(comm_data, output_dir)
         generated_files.append(stats_file)
-    
-    # 5. 深度分析 (如果指定了 step)
-    if step is not None:
-    # if False:
-        # 确保step在数据中
-        if step not in comm_data:
-            print(f"警告: 未找到 Step {step} 的数据")
-            return generated_files
-        
-        # 自动选择 comm_idx
-        if comm_idx is None:
-            comm_idx, auto_fastest, auto_slowest = _auto_select_comm_target(comm_data, step)
-            if comm_idx is None:
-                print(f"无法自动选择 comm_idx，跳过深度分析")
-                return generated_files
-            
-            # 如果用户没有指定快慢卡，使用自动检测的结果
-            if not is_fast_mode:
-                print(f"自动选择comm_idx: {comm_idx}")
-                if fastest_card_idx is None:
-                    fastest_card_idx = auto_fastest
-                    print(f"  建议最快卡: {fastest_card_idx}")
-                if slowest_card_idx is None:
-                    slowest_card_idx = auto_slowest
-                    print(f"  建议最慢卡: {slowest_card_idx}")
-        
-        # 执行深度分析
-        deep_analysis_files = _perform_deep_analysis(
-            comm_data, executor_folders, step, comm_idx, output_dir, 
-            kernel_prefix, prev_kernel_pattern, fastest_card_idx, slowest_card_idx,
-            show_timestamp, show_readable_timestamp
-        )
-        
-        if deep_analysis_files:
-            if isinstance(deep_analysis_files, list):
-                generated_files.extend(deep_analysis_files)
-            else:
-                generated_files.append(deep_analysis_files)
     
     return generated_files

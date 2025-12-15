@@ -169,7 +169,7 @@ def analyze_single_file_with_glob(file_paths: List[str], aggregation_spec: List[
                                  include_op_patterns: List[str] = None, 
                                  exclude_op_patterns: List[str] = None, include_kernel_patterns: List[str] = None, 
                                  exclude_kernel_patterns: List[str] = None, 
-                                 not_show_fwd_bwd_type: bool = False, step_idx: Optional[int] = None,
+                                 step_idx: Optional[int] = None,
                                  coarse_call_stack: bool = False) -> List[Path]:
     """
     分析多个文件（视为同一个label进行合并）
@@ -221,7 +221,7 @@ def analyze_single_file_with_glob(file_paths: List[str], aggregation_spec: List[
         output_path, 
         show_attributes, 
         aggregation_spec,
-        not_show_fwd_bwd_type
+        label=label
     )
     
     return generated_files
@@ -234,7 +234,7 @@ def analyze_multiple_files(file_labels: List[Tuple[List[str], str]], aggregation
                           max_workers: int = None, 
                           include_op_patterns: List[str] = None, exclude_op_patterns: List[str] = None, 
                           include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None, 
-                          call_stack_source: str = 'tree', not_show_fwd_bwd_type: bool = False,
+                          call_stack_source: str = 'tree',
                           coarse_call_stack: bool = False) -> List[Path]:
     """ 
     分析多个文件并对比 
@@ -251,7 +251,6 @@ def analyze_multiple_files(file_labels: List[Tuple[List[str], str]], aggregation
         include_kernel_patterns: 包含的kernel名称模式列表 
         exclude_kernel_patterns: 排除的kernel名称模式列表 
         call_stack_source: 调用栈来源，'args' 或 'tree' 
-        not_show_fwd_bwd_type: 是否不显示fwd_bwd_type列 
         coarse_call_stack: 是否使用粗粒度调用栈
         
     Returns: 
@@ -290,8 +289,7 @@ def analyze_multiple_files(file_labels: List[Tuple[List[str], str]], aggregation
         include_op_patterns=include_op_patterns, 
         exclude_op_patterns=exclude_op_patterns, 
         include_kernel_patterns=include_kernel_patterns, 
-        exclude_kernel_patterns=exclude_kernel_patterns, 
-        not_show_fwd_bwd_type=not_show_fwd_bwd_type 
+        exclude_kernel_patterns=exclude_kernel_patterns
     ) 
     
     return generated_files

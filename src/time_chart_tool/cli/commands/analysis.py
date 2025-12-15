@@ -127,7 +127,6 @@ class AnalysisCommand:
                 exclude_op_patterns=exclude_op_patterns,
                 include_kernel_patterns=include_kernel_patterns,
                 exclude_kernel_patterns=exclude_kernel_patterns,
-                not_show_fwd_bwd_type=getattr(args, 'not_show_fwd_bwd_type', False),
                 step_idx=getattr(args, 'step_idx', None),
                 coarse_call_stack=coarse_call_stack
             )
