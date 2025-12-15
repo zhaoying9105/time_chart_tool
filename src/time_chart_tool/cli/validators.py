@@ -59,7 +59,8 @@ def parse_show_options(show_spec: str) -> List[str]:
     """
     valid_show_options = {
         'dtype', 'shape', 'kernel-names', 'kernel-duration', 
-        'timestamp', 'readable-timestamp', 'kernel-timestamp', 'name', 'call_stack', 'stream',
+        'timestamp', 'readable-timestamp', 'kernel-timestamp', 
+        'name', 'call_stack', 'stream',
         'pid', 'tid', 'fwd_bwd_type', 'op_index'
     }
     

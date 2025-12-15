@@ -1,0 +1,1 @@
+python3 -m time_chart_tool comm  --kernel-prefix TCDP_ --step 0  --output-dir ./comm_out 'data/'

@@ -42,7 +42,7 @@ def normalize_timestamps(events: List[ActivityEvent]) -> List[ActivityEvent]:
         return events
     
     min_ts = min(valid_ts)
-    print(f"=== Stage 1.-1: 时间戳标准化 (min_ts: {min_ts:.2f} us) ===")
+    print(f"===  时间戳标准化 (min_ts: {min_ts:.2f} us) ===")
     
     # 标准化所有事件的时间戳
     processed_events = []
@@ -100,7 +100,7 @@ def attach_call_stacks(events: List[ActivityEvent], call_stack_trees: Dict[Tuple
     if not call_stack_trees:
         return events
 
-    print("=== Stage 1.0: 为 CPU 事件添加调用栈信息 ===")
+    print("=== 为 CPU 事件添加调用栈信息 ===")
     
     # 筛选出需要处理的 CPU 事件
     cpu_events = [e for e in events if e.cat == 'cpu_op']
@@ -123,7 +123,7 @@ def classify_events_by_external_id(events: List[ActivityEvent]) -> Tuple[Dict[Un
     """
     1. 根据 cpu_op event & kernel event 的external id 分类，形成两个map
     """
-    print("=== Stage 1.1: 根据 external_id 分类事件 ===")
+    print("=== 根据 external_id 分类事件 ===")
     print("时间戳标准化已在parser中完成")
     
     # 根据 external id 分类
@@ -159,7 +159,7 @@ def process_triton_names_step(cpu_events_by_external_id: Dict[Union[int, str], L
     """
     3. 处理triton名称，去除suffix
     """
-    print("=== Stage 1.3: 处理triton名称，去除suffix ===")
+    print("=== 处理triton名称，去除suffix ===")
     return process_triton_names(cpu_events_by_external_id, kernel_events_by_external_id)
 
 
@@ -267,7 +267,7 @@ def _propagate_fwd_call_stack_to_bwd(events: List[ActivityEvent], call_stack_tre
     将 fwd 的 call stack 传播给 bwd
     Logic: fwdbwd event -> ts -> got event ->  形成 fwd event  map to bwd event -> fwd event  call stack copy to bwd event
     """
-    print("=== Stage 1.1.2: Propagate fwd call stack to bwd ===")
+    print("=== Propagate fwd call stack to bwd ===")
     
     # 1. 建立 ts -> cpu_op event 的映射 (只包含有 call stack 的 cpu_op)
     # 这样可以通过 timestamp 快速找到对应的 cpu_op
@@ -427,7 +427,7 @@ def filter_and_select_events(cpu_events_by_external_id: Dict[Union[int, str], Li
     """
     4. 根据过滤模式过滤操作和kernel事件，并选择代表事件（map[cpu op event: kernel event]）
     """
-    print("=== Stage 1.4: 过滤并选择代表事件 ===")
+    print("=== 过滤并选择代表事件 ===")
     
     # 0. 排序并分配 op_index (在任何过滤之前)
     sort_cpu_events_and_assign_index(cpu_events_by_external_id)
@@ -475,32 +475,31 @@ def postprocessing(events, call_stack_trees,base_time_nanoseconds,
                              include_kernel_patterns: List[str] = None, exclude_kernel_patterns: List[str] = None,
                              coarse_call_stack: bool = False) -> Tuple[Dict[Union[int, str], List[ActivityEvent]], Dict[Union[int, str], List[ActivityEvent]]]:
     """
-    Stage 1: 数据后处理
+    数据后处理
     """
 
-    # 1.-2 计算可读时间戳
+    # 1. 计算可读时间戳
     events = calculate_readable_timestamps(events, base_time_nanoseconds)
 
-    # 1.-1 时间戳标准化
+    # 2. 时间戳标准化
     events = normalize_timestamps(events)
 
-    # 1.1 Attach call stack (在分类前执行)
-    # 纯函数：接受 events 和 call_stack_trees，返回新的 events 列表
+    # 3. Attach call stack (在分类前执行)
     events = attach_call_stacks(events, call_stack_trees)
 
-    # 1.1.1 Set fwd_bwd_type from call stack
+    # 4. Set fwd_bwd_type from call stack
     events = [_set_fwd_bwd_type_from_call_stack(e) for e in events]
 
-    # 1.1.2 Propagate fwd call stack to bwd
+    # 5. Propagate fwd call stack to bwd
     events = _propagate_fwd_call_stack_to_bwd(events, call_stack_trees)
 
-    # 1.2 分类
+    # 6. 相同external_id 下的事件分类
     cpu_events, kernel_events = classify_events_by_external_id(events)
     
-    # 1.3 处理 Triton names
+    # 7 处理 Triton names
     cpu_events, kernel_events = process_triton_names_step(cpu_events, kernel_events)
     
-    # 1.4 过滤和选择
+    # 8 过滤和选择
     return filter_and_select_events(cpu_events, kernel_events, 
                                   include_op_patterns, exclude_op_patterns,
                                   include_kernel_patterns, exclude_kernel_patterns,

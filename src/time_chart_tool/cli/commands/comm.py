@@ -17,24 +17,9 @@ class CommCommand:
         print(f"=== 通信性能分析 ===")
         print(f"Pod目录: {args.pod_dir}")
         print(f"Step: {args.step if args.step is not None else '所有step'}")
-        print(f"通信操作索引: {args.comm_idx if args.comm_idx is not None else '所有通信操作'}")
-        if args.fastest_card_idx is not None:
-            print(f"指定最快卡索引: {args.fastest_card_idx}")
-        if args.slowest_card_idx is not None:
-            print(f"指定最慢卡索引: {args.slowest_card_idx}")
         print(f"通信Kernel前缀: {args.kernel_prefix}")
-        print(f"上一个通信Kernel模式: {args.prev_kernel_pattern}")
         print(f"输出目录: {args.output_dir}")
-        print(f"显示选项: {args.show if args.show else '无'}")
         print()
-        
-        # 解析show选项
-        try:
-            show_options = parse_show_options(args.show)
-            print(f"显示选项解析: {show_options}")
-        except ValueError as e:
-            print(f"错误: 显示选项解析失败 - {e}")
-            return 1
         
         # 验证pod目录
         pod_path = Path(args.pod_dir)
@@ -57,14 +42,8 @@ class CommCommand:
             generated_files = analyze_communication_performance(
                 pod_dir=str(pod_path),
                 step=args.step,
-                comm_idx=args.comm_idx,
-                fastest_card_idx=args.fastest_card_idx,
-                slowest_card_idx=args.slowest_card_idx,
                 kernel_prefix=args.kernel_prefix,
-                prev_kernel_pattern=args.prev_kernel_pattern,
                 output_dir=str(output_dir),
-                show_timestamp='timestamp' in show_options,
-                show_readable_timestamp='readable_timestamp' in show_options,
             )
             
             total_time = time.time() - start_time

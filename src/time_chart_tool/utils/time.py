@@ -45,7 +45,7 @@ def calculate_readable_timestamps(events: List[ActivityEvent], base_time_nanosec
     Returns:
         List[ActivityEvent]: 带有可读时间戳的事件列表（新对象）
     """
-    print("=== Stage 1.-2: 计算可读时间戳 ===")
+    print("===  计算可读时间戳 ===")
     
     processed_events = []
     for event in events:
