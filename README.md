@@ -172,3 +172,57 @@ python3 -m time_chart_tool comm 'data/pod_folder/' \
 
 ### OP 序号聚合 (op_index)
 `analysis` 命令支持 `--aggregation op_index`，这将按照 OP 下发的顺序（Trace 中的顺序）进行展示，非常适合查看执行流。注意此模式下不能与其他聚合字段组合。
+
+## 辅助工具
+
+本仓库提供了两个辅助脚本，用于简化数据获取和预处理流程。
+
+### 1. Primus 日志下载器 (prims_downloader.py)
+
+用于从 Primus 线上环境批量下载日志文件（特别是 Profiler JSON 文件）。
+该工具主要服务于 `comm` 命令，因为 `comm` 分析需要相同 step 下所有 rank 的 profile json 结果，且对目录结构和文件名格式有特定要求。
+
+**主要功能：**
+- 支持按 URL 下载 Primus 任务日志
+- 支持正则表达式过滤文件名（如只下载特定 step 的 json）
+- 支持多线程并发下载
+
+**基础用法：**
+```bash
+python3 prims_downloader.py [primus_url] [options]
+```
+
+**示例：**
+下载第 100020 step 的所有 rank 的 json 文件：
+
+```bash
+url='https://primus-ui-cn.byted.org/gaura-yx/nj-ed968275-497c-4352-94d2-c15c8-pj/webapps/primus/'
+python3 prims_downloader.py $url \
+    --mode both \
+    --output-dir /data03/zhaoying/engine/qianchuan_straggler_1204 \
+    --include_pattern '.*100020\.json$'
+```
+
+**常用参数：**
+- `primus_url`: Primus 任务的 Web UI 地址。
+- `--mode`: 运行模式，可选 `nodes` (仅获取节点信息), `download` (仅下载), `both` (获取并下载)。
+- `--output-dir`: 下载文件的保存目录。
+- `--include_pattern`: 使用正则表达式匹配要下载的文件名。
+- `--exclude_pattern`: 使用正则表达式排除文件名。
+
+### 2. Profiler 文件夹整理工具 (organize_profiler_folders.py)
+
+用于解决下载的 Profiler 数据包含多次运行（不同时间戳）的情况。
+例如，下载的数据中可能包含 step=10000 的多次运行结果（如一次在 10.1 日，一次在 10.2 日）。本工具会读取 JSON 的时间戳，将相同时间范围的文件夹归类到同一组，便于后续分析。
+
+**基础用法：**
+```bash
+python3 organize_profiler_folders.py [root_dir]
+```
+
+**示例：**
+```bash
+python3 organize_profiler_folders.py /data03/zhaoying/engine/qianchuan_straggler_1204
+```
+
+该命令会扫描目录下所有子文件夹中的 Profiler JSON，根据时间戳将它们移动到如 `2023-10-01_10-00-00_group_0` 的分组目录中。
