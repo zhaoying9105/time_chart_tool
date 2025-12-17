@@ -1,6 +1,6 @@
 *.xlsx
 *.csv
-*.json
+#*.json
 build/
 dist/
 .DS_Store
